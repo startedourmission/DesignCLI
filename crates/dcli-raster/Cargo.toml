@@ -1,0 +1,11 @@
+[package]
+name = "dcli-raster"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dcli-color.workspace = true
+dcli-tile.workspace = true
+dcli-model.workspace = true

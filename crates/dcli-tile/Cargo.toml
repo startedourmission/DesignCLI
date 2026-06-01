@@ -1,0 +1,10 @@
+[package]
+name = "dcli-tile"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dcli-color.workspace = true
+serde = { workspace = true, features = ["derive"] }

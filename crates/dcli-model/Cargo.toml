@@ -1,0 +1,12 @@
+[package]
+name = "dcli-model"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dcli-color.workspace = true
+dcli-tile.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

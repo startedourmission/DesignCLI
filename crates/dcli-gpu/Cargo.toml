@@ -1,0 +1,16 @@
+[package]
+name = "dcli-gpu"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 가속 프리뷰 + 윈도리스 export 경로. wgpu 의존을 가지는 crate(코어 4종과 분리).
+[dependencies]
+dcli-color.workspace = true
+dcli-tile.workspace = true
+dcli-model.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+anyhow.workspace = true

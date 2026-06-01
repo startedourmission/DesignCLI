@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dcli-color",
+    "crates/dcli-tile",
+    "crates/dcli-model",
+    "crates/dcli-raster",
+    "crates/dcli-gpu",
+    "examples/parity_spike",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+rust-version = "1.89"
+
+# wgpu 버전은 단일 출처로 핀(코어/셸/iced 충돌 방지 규율, implementation-plan.md).
+[workspace.dependencies]
+dcli-color = { path = "crates/dcli-color" }
+dcli-tile = { path = "crates/dcli-tile" }
+dcli-model = { path = "crates/dcli-model" }
+dcli-raster = { path = "crates/dcli-raster" }
+dcli-gpu = { path = "crates/dcli-gpu" }
+
+wgpu = "22"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+png = "0.17"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

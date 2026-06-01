@@ -1,0 +1,10 @@
+[package]
+name = "dcli-color"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 코어 crate: UI/런타임 의존 절대 금지 (implementation-plan.md 불변식).
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
