@@ -1,0 +1,21 @@
+[package]
+name = "dcli-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "dx"
+path = "src/main.rs"
+
+[dependencies]
+dcli-color.workspace = true
+dcli-tile.workspace = true
+dcli-model.workspace = true
+dcli-raster.workspace = true
+clap.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+png.workspace = true
+anyhow.workspace = true

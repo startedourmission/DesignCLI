@@ -74,6 +74,13 @@ impl PixelStore {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// (id, surface) 쌍을 **id 오름차순**으로 순회한다(결정적 사이드카 저장용).
+    pub fn iter_sorted(&self) -> impl Iterator<Item = (SurfaceId, &Surface)> {
+        let mut ids: Vec<_> = self.map.keys().copied().collect();
+        ids.sort();
+        ids.into_iter().map(move |id| (id, &self.map[&id]))
+    }
 }
 
 /// linear-light, premultiplied alpha로 저장되는 픽셀 표면.
@@ -162,6 +169,46 @@ impl Surface {
         }
         out
     }
+
+    /// 결정적 바이너리 직렬화 (픽셀 사이드카용).
+    ///
+    /// 포맷: magic "DXSF"(4B) + version(u8) + width(u32 LE) + height(u32 LE) +
+    /// linear-premul f32 픽셀(r,g,b,a 각 LE, row-major). 타임스탬프/패딩 없음 →
+    /// 같은 표면은 항상 같은 바이트(export 결정성 규율, psd-compat).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(13 + self.px.len() * 16);
+        out.extend_from_slice(b"DXSF");
+        out.push(1); // version
+        out.extend_from_slice(&self.width.to_le_bytes());
+        out.extend_from_slice(&self.height.to_le_bytes());
+        for p in &self.px {
+            out.extend_from_slice(&p.r.to_le_bytes());
+            out.extend_from_slice(&p.g.to_le_bytes());
+            out.extend_from_slice(&p.b.to_le_bytes());
+            out.extend_from_slice(&p.a.to_le_bytes());
+        }
+        out
+    }
+
+    /// `to_bytes`의 역. 포맷이 맞지 않으면 None.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 13 || &bytes[0..4] != b"DXSF" || bytes[4] != 1 {
+            return None;
+        }
+        let width = u32::from_le_bytes(bytes[5..9].try_into().ok()?);
+        let height = u32::from_le_bytes(bytes[9..13].try_into().ok()?);
+        let count = (width as usize).checked_mul(height as usize)?;
+        let body = &bytes[13..];
+        if body.len() != count * 16 {
+            return None;
+        }
+        let mut px = Vec::with_capacity(count);
+        for chunk in body.chunks_exact(16) {
+            let f = |o: usize| f32::from_le_bytes(chunk[o..o + 4].try_into().unwrap());
+            px.push(LinearPremul { r: f(0), g: f(4), b: f(8), a: f(12) });
+        }
+        Some(Self { width, height, px })
+    }
 }
 
 #[cfg(test)]
@@ -188,5 +235,39 @@ mod tests {
         let c = LinearPremul::from_srgb8_straight(255, 0, 0, 255);
         s.set(1, 0, c);
         assert_eq!(s.get(1, 0), c);
+    }
+
+    #[test]
+    fn surface_bytes_round_trip() {
+        let mut s = Surface::new(3, 2);
+        s.set(0, 0, LinearPremul::from_srgb8_straight(200, 100, 50, 255));
+        s.set(2, 1, LinearPremul::from_srgb8_straight(10, 20, 30, 128));
+        let bytes = s.to_bytes();
+        let back = Surface::from_bytes(&bytes).unwrap();
+        assert_eq!(back.width(), 3);
+        assert_eq!(back.height(), 2);
+        assert_eq!(back.get(0, 0), s.get(0, 0));
+        assert_eq!(back.get(2, 1), s.get(2, 1));
+    }
+
+    #[test]
+    fn surface_bytes_are_deterministic() {
+        let s = Surface::filled(4, 4, LinearPremul::from_srgb8_straight(1, 2, 3, 4));
+        assert_eq!(s.to_bytes(), s.to_bytes());
+    }
+
+    #[test]
+    fn from_bytes_rejects_bad_magic() {
+        assert!(Surface::from_bytes(b"NOPE............").is_none());
+    }
+
+    #[test]
+    fn store_iter_sorted_is_ascending() {
+        let mut st = PixelStore::new();
+        let a = st.insert(Surface::new(1, 1));
+        let b = st.insert(Surface::new(2, 2));
+        let ids: Vec<_> = st.iter_sorted().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec![a, b]);
+        assert!(a < b);
     }
 }

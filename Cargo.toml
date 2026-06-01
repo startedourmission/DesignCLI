@@ -6,6 +6,7 @@ members = [
     "crates/dcli-model",
     "crates/dcli-raster",
     "crates/dcli-gpu",
+    "crates/dcli-cli",
     "examples/parity_spike",
 ]
 
@@ -30,6 +31,7 @@ png = "0.17"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 opt-level = 3

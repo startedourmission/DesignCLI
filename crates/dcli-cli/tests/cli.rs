@@ -1,0 +1,143 @@
+//! `dx` CLI 통합 테스트 — 바이너리를 실제로 실행해 verb·--json·--dry-run·결정성 검증.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn dx() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_dx"))
+}
+
+/// 테스트별 고유 임시 폴더(병렬 테스트 충돌 방지). 빌드 OUT_DIR 하위에 만든다.
+fn tmp(tag: &str) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(format!("dx_test_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    p
+}
+
+fn run(args: &[&str]) -> (String, String, bool) {
+    let out = dx().args(args).output().expect("dx 실행 실패");
+    (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        out.status.success(),
+    )
+}
+
+fn doc_arg(dir: &Path) -> String {
+    dir.to_string_lossy().to_string()
+}
+
+#[test]
+fn create_add_export_roundtrip() {
+    let dir = tmp("roundtrip");
+    let d = doc_arg(&dir);
+
+    let (_, _, ok) = run(&["--doc", &d, "doc", "create", "--w", "64", "--h", "64"]);
+    assert!(ok, "doc create 실패");
+    assert!(dir.join("doc.json").is_file());
+
+    let (_, _, ok) = run(&["--doc", &d, "layer", "add", "--name", "bg", "--fill", "255,0,0,255"]);
+    assert!(ok);
+    assert!(dir.join("pixels/0.bin").is_file());
+
+    let png = dir.join("out.png");
+    let (_, _, ok) = run(&["--doc", &d, "export", "png", &png.to_string_lossy()]);
+    assert!(ok);
+    assert!(png.is_file());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn json_output_is_parseable() {
+    let dir = tmp("json");
+    let d = doc_arg(&dir);
+    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+    run(&["--doc", &d, "layer", "add", "--name", "a", "--fill", "1,2,3,255"]);
+
+    let (stdout, _, ok) = run(&["--doc", &d, "--json", "doc", "info"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("유효한 JSON 아님");
+    assert_eq!(v["w"], 8);
+    assert_eq!(v["layers"], 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dry_run_does_not_persist() {
+    let dir = tmp("dryrun");
+    let d = doc_arg(&dir);
+    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+
+    // dry-run으로 레이어 추가 → applied:false, 실제 저장 안 됨.
+    let (stdout, _, ok) = run(&[
+        "--doc", &d, "--json", "--dry-run", "layer", "add", "--name", "x", "--fill", "0,0,0,255",
+    ]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["applied"], false);
+
+    // 레이어 수는 여전히 0.
+    let (stdout, _, _) = run(&["--doc", &d, "--json", "doc", "info"]);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["layers"], 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn missing_layer_errors_to_stderr_with_nonzero_exit() {
+    let dir = tmp("err");
+    let d = doc_arg(&dir);
+    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+
+    let (stdout, stderr, ok) = run(&["--doc", &d, "--json", "layer", "get", "999"]);
+    assert!(!ok, "없는 레이어 조회는 exit!=0 이어야");
+    assert!(stdout.trim().is_empty(), "에러 시 stdout은 비어야(데이터 없음)");
+    assert!(stderr.contains("error") || stderr.contains("999"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn export_is_deterministic() {
+    let dir = tmp("det");
+    let d = doc_arg(&dir);
+    run(&["--doc", &d, "doc", "create", "--w", "32", "--h", "32"]);
+    run(&["--doc", &d, "layer", "add", "--name", "bg", "--fill", "200,100,50,255"]);
+    run(&["--doc", &d, "layer", "add", "--name", "top", "--fill", "100,100,100,200"]);
+    run(&["--doc", &d, "blend", "set", "1", "multiply"]);
+
+    let p1 = dir.join("a.png");
+    let p2 = dir.join("b.png");
+    run(&["--doc", &d, "export", "png", &p1.to_string_lossy()]);
+    run(&["--doc", &d, "export", "png", &p2.to_string_lossy()]);
+
+    let a = std::fs::read(&p1).unwrap();
+    let b = std::fs::read(&p2).unwrap();
+    assert_eq!(a, b, "같은 문서의 export PNG가 비결정적");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn save_load_preserves_structure_and_pixels() {
+    let dir = tmp("persist");
+    let d = doc_arg(&dir);
+    run(&["--doc", &d, "doc", "create", "--w", "16", "--h", "16"]);
+    run(&["--doc", &d, "layer", "add", "--name", "bg", "--fill", "10,20,30,255"]);
+
+    // 첫 export.
+    let p1 = dir.join("first.png");
+    run(&["--doc", &d, "export", "png", &p1.to_string_lossy()]);
+
+    // 새 프로세스가 load 후 다시 export(디스크 라운드트립) → 동일해야.
+    let p2 = dir.join("reloaded.png");
+    run(&["--doc", &d, "export", "png", &p2.to_string_lossy()]);
+
+    assert_eq!(std::fs::read(&p1).unwrap(), std::fs::read(&p2).unwrap());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
