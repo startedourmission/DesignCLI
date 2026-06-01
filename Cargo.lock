@@ -616,6 +616,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dcli-shell-native"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "dcli-cli",
+ "dcli-color",
+ "dcli-model",
+ "dcli-raster",
+ "dcli-tile",
+ "eframe",
+ "egui",
+]
+
+[[package]]
 name = "dcli-tile"
 version = "0.0.0"
 dependencies = [

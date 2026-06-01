@@ -1,0 +1,22 @@
+[package]
+name = "dcli-shell-native"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "dx-studio"
+path = "src/main.rs"
+
+# 네이티브 셸: 동일 코어 crate를 FFI/IPC 0으로 직링크(implementation-plan.md).
+# eframe(winit+wgpu)·egui 의존은 여기에만 — 코어 crate는 이걸 절대 링크하지 않는다.
+[dependencies]
+dcli-color.workspace = true
+dcli-tile.workspace = true
+dcli-model.workspace = true
+dcli-raster.workspace = true
+dcli-cli.workspace = true
+eframe.workspace = true
+egui.workspace = true
+anyhow.workspace = true

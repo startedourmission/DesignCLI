@@ -19,9 +19,5 @@ png.workspace = true
 anyhow.workspace = true
 
 # 프리뷰 창 전용(코어 아님). 코어 UI-무의존 불변식을 지키기 위해 example에만 둔다.
-[dependencies.eframe]
-version = "0.28"
-default-features = false
-features = ["wgpu", "default_fonts"]
-[dependencies.egui]
-version = "0.28"
+eframe.workspace = true
+egui.workspace = true

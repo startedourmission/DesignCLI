@@ -7,7 +7,8 @@
 //! 적용 결과를 보여주되 save하지 않는다.
 
 mod output;
-mod storage;
+
+use dcli_cli::storage;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
