@@ -191,6 +191,11 @@ impl Document {
         self.order.iter().filter_map(move |id| self.nodes.get(id))
     }
 
+    /// 현재 노드들이 참조하는 SurfaceId 집합(저장 시 이것만 디스크에 기록 → orphan 방지).
+    pub fn referenced_surfaces(&self) -> std::collections::BTreeSet<SurfaceId> {
+        self.nodes.values().filter_map(|n| n.surface_id()).collect()
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }

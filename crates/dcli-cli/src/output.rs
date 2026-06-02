@@ -3,7 +3,8 @@
 //! 규약(cli-agent-interface): --json이면 stdout에 구조화 JSON 한 줄, 에러는 항상
 //! stderr, 성공 exit=0. dry-run이면 `applied:false`로 표시.
 
-use dcli_model::{Document, Node, NodeKind};
+use dcli_cli::dto;
+use dcli_model::{Document, Node};
 use dcli_tile::SurfaceId;
 use serde_json::json;
 use std::path::Path;
@@ -59,12 +60,7 @@ impl Emitter {
 
     pub fn doc_info(&self, doc: &Document) {
         self.put(
-            json!({
-                "w": doc.width, "h": doc.height,
-                "depth": format!("{:?}", doc.bit_depth),
-                "blend_space": format!("{:?}", doc.blend_space),
-                "layers": doc.node_count(),
-            }),
+            dto::doc_info_json(doc),
             &format!(
                 "{}x{}, {:?}, {:?} 합성, 레이어 {}개",
                 doc.width, doc.height, doc.bit_depth, doc.blend_space, doc.node_count()
@@ -87,21 +83,17 @@ impl Emitter {
 
     pub fn layer_list(&self, doc: &Document) {
         if self.json {
-            let arr: Vec<_> = doc
-                .iter_bottom_to_top()
-                .map(node_json)
-                .collect();
-            println!("{}", json!({ "layers": arr }));
+            println!("{}", dto::layer_list_json(doc));
         } else {
             println!("레이어 (아래→위):");
             for (i, node) in doc.iter_bottom_to_top().enumerate() {
-                println!("  [{i}] {}", node_human(node));
+                println!("  [{i}] {}", dto::node_human(node));
             }
         }
     }
 
     pub fn layer_get(&self, node: &Node) {
-        self.put(node_json(node), &node_human(node));
+        self.put(dto::node_json(node), &dto::node_human(node));
     }
 
     pub fn exported(&self, out: &Path, w: u32, h: u32, dry_run: bool) {
@@ -114,35 +106,4 @@ impl Emitter {
             ),
         );
     }
-}
-
-fn node_kind_str(node: &Node) -> &'static str {
-    match node.kind {
-        NodeKind::Paint { .. } => "paint",
-        NodeKind::Group => "group",
-    }
-}
-
-fn node_json(node: &Node) -> serde_json::Value {
-    json!({
-        "id": node.id.0,
-        "name": node.name,
-        "kind": node_kind_str(node),
-        "visible": node.visible,
-        "opacity": node.opacity,
-        "blend": format!("{:?}", node.blend),
-        "surface": node.surface_id().map(|s| s.0),
-    })
-}
-
-fn node_human(node: &Node) -> String {
-    format!(
-        "n{} \"{}\" [{}] {} opacity={:.2} {:?}",
-        node.id.0,
-        node.name,
-        node_kind_str(node),
-        if node.visible { "visible" } else { "hidden" },
-        node.opacity,
-        node.blend,
-    )
 }

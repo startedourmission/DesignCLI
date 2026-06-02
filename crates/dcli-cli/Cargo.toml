@@ -12,13 +12,19 @@ path = "src/lib.rs"
 [[bin]]
 name = "dx"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# clap을 cli feature에 가둔다 → dcli-mcp가 lib(storage/dispatch/dto)만 clap 없이 링크.
+cli = ["dep:clap"]
 
 [dependencies]
 dcli-color.workspace = true
 dcli-tile.workspace = true
 dcli-model.workspace = true
 dcli-raster.workspace = true
-clap.workspace = true
+clap = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 png.workspace = true

@@ -141,3 +141,57 @@ fn save_load_preserves_structure_and_pixels() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn count_bins(dir: &std::path::Path) -> usize {
+    let pix = dir.join("pixels");
+    std::fs::read_dir(&pix)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "bin").unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+#[test]
+fn delete_then_save_removes_orphan_bin() {
+    // 검증 #1 회귀 가드: 레이어 삭제 후 저장하면 그 픽셀 .bin이 디스크에서 사라져야.
+    let dir = tmp("orphan");
+    let d = doc_arg(&dir);
+    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+    run(&["--doc", &d, "layer", "add", "--name", "a", "--fill", "1,2,3,255"]);
+    run(&["--doc", &d, "layer", "add", "--name", "b", "--fill", "4,5,6,255"]);
+    assert_eq!(count_bins(&dir), 2, "레이어 2개 → .bin 2개");
+
+    // 레이어 하나 삭제(삭제는 자동 저장됨).
+    run(&["--doc", &d, "layer", "delete", "0"]);
+    assert_eq!(count_bins(&dir), 1, "삭제 후 orphan .bin 없어야(1개만)");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn save_is_atomic_no_partial_dir() {
+    // 정상 저장 후 임시/백업 잔여 디렉토리가 남지 않아야(원자적 교체).
+    // 격리 부모 폴더 안에 문서를 둬 다른 테스트의 .tmp-/.bak과 섞이지 않게.
+    let parent = tmp("atomic");
+    std::fs::create_dir_all(&parent).unwrap();
+    let dir = parent.join("doc.dxdoc");
+    let d = doc_arg(&dir);
+    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+    run(&["--doc", &d, "layer", "add", "--name", "a", "--fill", "1,2,3,255"]);
+
+    // 격리 부모에 .tmp-/.bak 잔여물이 없어야.
+    let leftovers: Vec<_> = std::fs::read_dir(&parent)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.contains(".tmp-") || n.ends_with(".bak")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "원자적 save 후 잔여 디렉토리: {leftovers:?}");
+    assert!(dir.join("doc.json").is_file(), "doc.json 존재해야");
+
+    let _ = std::fs::remove_dir_all(&parent);
+}

@@ -5,6 +5,13 @@
 //!
 //! Phase 1은 구조/속성 op만: 레이어 추가/삭제/이동/속성변경. 픽셀 쓰기 op(fill/스트로크)는
 //! 후속 Phase에서 추가하며 하이브리드 undo(타일 스냅샷)를 도입한다.
+//!
+//! ★롤백 비트동일성 불변식★ (batch 트랜잭션의 전제, History::rollback_to):
+//! **모든 `Op::apply`는 검증을 모두 통과한 뒤에만 문서를 변형한다 — 부분 변형 후
+//! 에러를 내면 안 된다.** 그래야 실패 시 이전 op들의 역패치만으로 문서를 정확히
+//! 원복할 수 있다. forward에서 정규화(clamp 등)를 적용하면 inverse 복원도 대칭이어야
+//! 한다(현재 SetProps는 prev를 이미-정규화된 현재값에서 캡처하므로 round-trip 일치).
+//! 픽셀 쓰기 op 도입 시 이 대칭을 반드시 유지할 것.
 
 use crate::{Document, Node, NodeId, NodeKind, NodeProps};
 use dcli_tile::{Surface, SurfaceId};
