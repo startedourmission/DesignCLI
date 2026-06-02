@@ -8,13 +8,13 @@
 
 mod output;
 
+use dcli_cli::dispatch::{self, Action, BatchResult, BlendModeDto, NodeRef, PixelSource, PropPatch};
 use dcli_cli::storage;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use dcli_color::{BitDepth, LinearPremul};
-use dcli_model::{BlendMode, Document, History, NodeId, NodeProps, Op};
-use dcli_tile::Surface;
+use dcli_color::BitDepth;
+use dcli_model::{Document, History, NodeId};
 use output::Emitter;
 use std::path::PathBuf;
 use storage::DocPath;
@@ -136,16 +136,16 @@ fn parse_depth(s: &str) -> Result<BitDepth> {
     }
 }
 
-fn parse_blend(s: &str) -> Result<BlendMode> {
+fn parse_blend(s: &str) -> Result<BlendModeDto> {
     match s {
-        "normal" => Ok(BlendMode::Normal),
-        "multiply" => Ok(BlendMode::Multiply),
-        "screen" => Ok(BlendMode::Screen),
+        "normal" => Ok(BlendModeDto::Normal),
+        "multiply" => Ok(BlendModeDto::Multiply),
+        "screen" => Ok(BlendModeDto::Screen),
         other => anyhow::bail!("알 수 없는 블렌드 모드: {other} (normal|multiply|screen)"),
     }
 }
 
-fn parse_rgba(s: &str) -> Result<(u8, u8, u8, u8)> {
+fn parse_rgba(s: &str) -> Result<[u8; 4]> {
     let parts: Vec<&str> = s.split(',').collect();
     anyhow::ensure!(parts.len() == 4, "fill은 'R,G,B,A' 형식 (0-255)");
     let v: Vec<u8> = parts
@@ -153,33 +153,27 @@ fn parse_rgba(s: &str) -> Result<(u8, u8, u8, u8)> {
         .map(|p| p.trim().parse::<u8>())
         .collect::<Result<_, _>>()
         .context("fill 값은 0-255 정수")?;
-    Ok((v[0], v[1], v[2], v[3]))
+    Ok([v[0], v[1], v[2], v[3]])
 }
 
-/// PNG(straight sRGB8)를 문서 크기 표면(linear-premul)으로 import.
-fn import_png(path: &PathBuf, w: u32, h: u32) -> Result<Surface> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("이미지 열기 실패: {}", path.display()))?;
-    let dec = png::Decoder::new(file);
-    let mut reader = dec.read_info()?;
-    let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf)?;
-    anyhow::ensure!(
-        info.width == w && info.height == h,
-        "이미지 크기({}x{})가 문서({}x{})와 불일치",
-        info.width, info.height, w, h
-    );
-    anyhow::ensure!(
-        info.color_type == png::ColorType::Rgba && info.bit_depth == png::BitDepth::Eight,
-        "현재 8bit RGBA PNG만 지원"
-    );
-    let mut s = Surface::new(w, h);
-    for (i, px) in buf[..info.buffer_size()].chunks_exact(4).enumerate() {
-        let x = i as u32 % w;
-        let y = i as u32 / w;
-        s.set(x, y, LinearPremul::from_srgb8_straight(px[0], px[1], px[2], px[3]));
+/// 단발 Action을 문서에 적용한다(CLI 쓰기 공통 경로 = dispatch 1-op batch).
+/// CLI와 MCP가 같은 엔진을 쓰도록 보장한다. 성공 시 BatchResult 반환.
+fn apply_one(cli: &Cli, path: &DocPath, action: Action) -> Result<BatchResult> {
+    let doc = path.load()?;
+    let mut h = History::new(doc);
+    let res = dispatch::apply_batch(&mut h, &[action], cli.dry_run);
+    if !res.ok {
+        // 단발 op 실패 → 첫 이슈를 에러로.
+        let issue = res.issues.first();
+        anyhow::bail!(
+            "{}",
+            issue.map(|i| i.message.clone()).unwrap_or_else(|| "적용 실패".into())
+        );
     }
-    Ok(s)
+    if !cli.dry_run {
+        path.save(&h.doc)?;
+    }
+    Ok(res)
 }
 
 fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
@@ -203,13 +197,7 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
         Command::Layer(cmd) => run_layer(cli, emit, &path, cmd),
         Command::Blend(BlendCmd::Set { id, mode }) => {
             let mode = parse_blend(mode)?;
-            with_doc(cli, &path, |h| {
-                let nid = NodeId(*id);
-                let node = h.doc.get(nid).ok_or_else(|| anyhow::anyhow!("레이어 없음: n{id}"))?;
-                let props = NodeProps { blend: mode, ..NodeProps::of(node) };
-                h.apply(Op::SetProps { id: nid, props })?;
-                Ok(())
-            })?;
+            apply_one(cli, &path, Action::SetBlend { id: NodeRef::Node(*id), mode })?;
             emit.ok(&format!("블렌드 설정: n{id} = {mode:?}"), cli.dry_run);
             Ok(())
         }
@@ -228,23 +216,37 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
 fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Result<()> {
     match cmd {
         LayerCmd::Add { name, image, fill, index } => {
-            let mut doc = path.load()?;
-            let surface = if let Some(img) = image {
-                import_png(img, doc.width, doc.height)?
+            // CLI 인자를 dispatch PixelSource로 변환.
+            let source = if let Some(img) = image {
+                PixelSource::PngPath { path: img.clone() }
             } else if let Some(f) = fill {
-                let (r, g, b, a) = parse_rgba(f)?;
-                Surface::filled(doc.width, doc.height, LinearPremul::from_srgb8_straight(r, g, b, a))
+                PixelSource::Fill { rgba: parse_rgba(f)? }
             } else {
-                Surface::new(doc.width, doc.height) // 투명
+                PixelSource::Transparent
             };
-            let sid = doc.add_surface(surface);
+            // layer add는 dry-run 아닐 때 발급된 id를 보고해야 하므로 직접 처리.
+            let doc = path.load()?;
             let mut h = History::new(doc);
-            h.apply(Op::AddPaintLayer { name: name.clone(), surface: sid, index: *index })?;
-            let new_id = *h.doc.order().last().unwrap();
-            if !cli.dry_run {
-                path.save(&h.doc)?;
+            let action = Action::AddPaintLayer {
+                name: name.clone(),
+                source,
+                index: *index,
+                bind: Some("new".into()),
+            };
+            let res = dispatch::apply_batch(&mut h, &[action], cli.dry_run);
+            if !res.ok {
+                anyhow::bail!(
+                    "{}",
+                    res.issues.first().map(|i| i.message.clone()).unwrap_or_else(|| "추가 실패".into())
+                );
             }
-            emit.layer_added(new_id, name, sid, cli.dry_run);
+            if cli.dry_run {
+                emit.ok(&format!("레이어 추가(dry-run): \"{name}\""), true);
+            } else {
+                path.save(&h.doc)?;
+                let b = &res.bindings["new"];
+                emit.layer_added(NodeId(b.node), name, dcli_tile::SurfaceId(b.surface.unwrap()), false);
+            }
             Ok(())
         }
         LayerCmd::List => {
@@ -259,51 +261,20 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             Ok(())
         }
         LayerCmd::Set { id, opacity, visible, name } => {
-            with_doc(cli, path, |h| {
-                let nid = NodeId(*id);
-                let node = h.doc.get(nid).ok_or_else(|| anyhow::anyhow!("레이어 없음: n{id}"))?;
-                let mut props = NodeProps::of(node);
-                if let Some(o) = opacity {
-                    props.opacity = *o;
-                }
-                if let Some(v) = visible {
-                    props.visible = *v;
-                }
-                if let Some(n) = name {
-                    props.name = n.clone();
-                }
-                h.apply(Op::SetProps { id: nid, props })?;
-                Ok(())
-            })?;
+            let patch = PropPatch { name: name.clone(), visible: *visible, opacity: *opacity };
+            apply_one(cli, path, Action::SetProps { id: NodeRef::Node(*id), patch })?;
             emit.ok(&format!("레이어 속성 변경: n{id}"), cli.dry_run);
             Ok(())
         }
         LayerCmd::Move { id, to } => {
-            with_doc(cli, path, |h| {
-                h.apply(Op::MoveLayer { id: NodeId(*id), to: *to })?;
-                Ok(())
-            })?;
+            apply_one(cli, path, Action::MoveLayer { id: NodeRef::Node(*id), to: *to })?;
             emit.ok(&format!("레이어 이동: n{id} → idx {to}"), cli.dry_run);
             Ok(())
         }
         LayerCmd::Delete { id } => {
-            with_doc(cli, path, |h| {
-                h.apply(Op::DeleteLayer { id: NodeId(*id) })?;
-                Ok(())
-            })?;
+            apply_one(cli, path, Action::DeleteLayer { id: NodeRef::Node(*id) })?;
             emit.ok(&format!("레이어 삭제: n{id}"), cli.dry_run);
             Ok(())
         }
     }
-}
-
-/// 문서 load → 편집 클로저(History) → (dry-run 아니면) save 공통 패턴.
-fn with_doc(cli: &Cli, path: &DocPath, f: impl FnOnce(&mut History) -> Result<()>) -> Result<()> {
-    let doc = path.load()?;
-    let mut h = History::new(doc);
-    f(&mut h)?;
-    if !cli.dry_run {
-        path.save(&h.doc)?;
-    }
-    Ok(())
 }
