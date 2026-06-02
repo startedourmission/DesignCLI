@@ -1,0 +1,30 @@
+[package]
+name = "dcli-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "dx-mcp"
+path = "src/main.rs"
+
+# MCP 서버. rmcp(tokio)를 여기에만 가둔다 — 코어 4종은 tokio/rmcp를 절대 링크하지 않음
+# (dcli-shell-native가 eframe만 가두는 격리 패턴과 동일, implementation-plan.md).
+# dcli-cli는 default-features=false로 가져와 clap 없이 lib(storage/dispatch/dto)만 링크.
+[dependencies]
+dcli-color.workspace = true
+dcli-tile.workspace = true
+dcli-model.workspace = true
+dcli-raster.workspace = true
+dcli-cli = { workspace = true, default-features = false }
+rmcp.workspace = true
+tokio.workspace = true
+schemars.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+base64.workspace = true
+png.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

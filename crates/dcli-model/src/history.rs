@@ -271,8 +271,11 @@ mod tests {
 
     // ---- 트랜잭션 / round-trip 불변식 ----
 
+    /// (노드 구조, 픽셀 바이트) 다이제스트 타입.
+    type Digest = (Vec<(u64, String, f32, bool)>, Vec<(u64, Vec<u8>)>);
+
     /// 문서의 구조+픽셀 다이제스트(round-trip 비트동일 검증용).
-    fn digest(doc: &Document) -> (Vec<(u64, String, f32, bool)>, Vec<(u64, Vec<u8>)>) {
+    fn digest(doc: &Document) -> Digest {
         let structure: Vec<_> = doc
             .order()
             .iter()

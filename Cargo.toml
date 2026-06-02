@@ -8,6 +8,7 @@ members = [
     "crates/dcli-gpu",
     "crates/dcli-cli",
     "crates/dcli-shell-native",
+    "crates/dcli-mcp",
     "examples/parity_spike",
 ]
 
@@ -24,7 +25,7 @@ dcli-tile = { path = "crates/dcli-tile" }
 dcli-model = { path = "crates/dcli-model" }
 dcli-raster = { path = "crates/dcli-raster" }
 dcli-gpu = { path = "crates/dcli-gpu" }
-dcli-cli = { path = "crates/dcli-cli" }
+dcli-cli = { path = "crates/dcli-cli", default-features = false }
 
 wgpu = "22"
 pollster = "0.3"
@@ -36,8 +37,12 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.28", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.28"
-schemars = "0.8"
+schemars = "1"
 base64 = "0.22"
+rmcp = { version = "1", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-std", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 
 [profile.release]
 opt-level = 3
