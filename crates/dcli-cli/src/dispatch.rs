@@ -40,6 +40,20 @@ pub enum PixelSource {
     PngBase64 { data: String },
     /// 디스크의 PNG 경로.
     PngPath { path: PathBuf },
+    /// 투명 위에 도형들을 순서대로 그린다(안티에일리어싱).
+    Shapes { items: Vec<Shape> },
+}
+
+/// 그릴 도형 하나(좌표는 픽셀 단위 f32).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum Shape {
+    /// 채워진 사각형: 좌상단 (x,y), 크기 (w,h).
+    Rect { x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4] },
+    /// 채워진 타원: 중심 (cx,cy), 반지름 (rx,ry).
+    Ellipse { cx: f32, cy: f32, rx: f32, ry: f32, rgba: [u8; 4] },
+    /// 선분: (x0,y0)→(x1,y1), 두께 width.
+    Line { x0: f32, y0: f32, x1: f32, y1: f32, width: f32, rgba: [u8; 4] },
 }
 
 /// 노드 속성 부분 패치(지정한 필드만 변경).
@@ -175,6 +189,25 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<Surface, String> 
         PixelSource::PngPath { path } => {
             let bytes = std::fs::read(path).map_err(|e| format!("이미지 읽기 실패: {e}"))?;
             decode_png(&bytes, w, h)
+        }
+        PixelSource::Shapes { items } => {
+            let mut s = Surface::new(w, h);
+            for shape in items {
+                draw_shape(&mut s, shape);
+            }
+            Ok(s)
+        }
+    }
+}
+
+/// 한 도형을 표면에 그린다(dcli-raster::shapes 위임).
+fn draw_shape(s: &mut Surface, shape: &Shape) {
+    use dcli_raster::shapes;
+    match *shape {
+        Shape::Rect { x, y, w, h, rgba } => shapes::fill_rect(s, x, y, w, h, rgba),
+        Shape::Ellipse { cx, cy, rx, ry, rgba } => shapes::fill_ellipse(s, cx, cy, rx, ry, rgba),
+        Shape::Line { x0, y0, x1, y1, width, rgba } => {
+            shapes::stroke_line(s, x0, y0, x1, y1, width, rgba)
         }
     }
 }
@@ -407,6 +440,28 @@ mod tests {
         assert_eq!(h.doc.node_count(), 0, "dry_run은 무변경");
         assert_eq!(h.doc.pixels().len(), 0, "dry_run은 표면도 무변경");
         assert!(res.bindings.is_empty(), "dry_run은 실제 id 약속 안 함");
+    }
+
+    #[test]
+    fn shapes_layer_draws_pixels() {
+        // 도형 레이어가 실제 픽셀을 그리는지(투명 위 빨간 사각형).
+        let mut h = History::new(Document::new(16, 16, BitDepth::U8));
+        let actions = vec![Action::AddPaintLayer {
+            name: "shapes".into(),
+            source: PixelSource::Shapes {
+                items: vec![Shape::Rect { x: 4.0, y: 4.0, w: 8.0, h: 8.0, rgba: [255, 0, 0, 255] }],
+            },
+            index: None,
+            bind: None,
+        }];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        // 합성해서 사각형 내부가 빨강인지 확인.
+        let out = dcli_raster::composite(&h.doc).to_srgb8_rgba();
+        let idx = ((8 * 16) + 8) * 4; // (8,8) 픽셀.
+        assert_eq!(&out[idx..idx + 4], &[255, 0, 0, 255], "사각형 내부 빨강");
+        // 바깥(0,0)은 투명.
+        assert_eq!(&out[0..4], &[0, 0, 0, 0], "바깥 투명");
     }
 
     #[test]

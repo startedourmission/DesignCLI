@@ -15,6 +15,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod shapes;
+
 use dcli_color::{srgb_eotf, srgb_oetf, BlendSpace, LinearPremul};
 use dcli_model::{BlendMode, Document};
 use dcli_tile::Surface;

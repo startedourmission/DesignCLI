@@ -8,7 +8,9 @@
 
 mod output;
 
-use dcli_cli::dispatch::{self, Action, BatchResult, BlendModeDto, NodeRef, PixelSource, PropPatch};
+use dcli_cli::dispatch::{
+    self, Action, BatchResult, BlendModeDto, NodeRef, PixelSource, PropPatch, Shape,
+};
 use dcli_cli::storage;
 
 use anyhow::{Context, Result};
@@ -49,9 +51,52 @@ enum Command {
     /// 블렌드 명령.
     #[command(subcommand)]
     Blend(BlendCmd),
+    /// 도형 그리기(새 레이어로).
+    #[command(subcommand)]
+    Draw(DrawCmd),
     /// 합성 결과를 파일로 export.
     #[command(subcommand)]
     Export(ExportCmd),
+}
+
+#[derive(Subcommand)]
+enum DrawCmd {
+    /// 채워진 사각형: 좌상단 (x,y) 크기 (w,h).
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        /// 색 "R,G,B,A" (0-255).
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "rect")]
+        name: String,
+    },
+    /// 채워진 타원: 중심 (cx,cy) 반지름 (rx,ry).
+    Ellipse {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "ellipse")]
+        name: String,
+    },
+    /// 선분: (x0,y0)→(x1,y1) 두께 width.
+    Line {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        #[arg(long, default_value_t = 1.0)]
+        width: f32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "line")]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,6 +201,24 @@ fn parse_rgba(s: &str) -> Result<[u8; 4]> {
     Ok([v[0], v[1], v[2], v[3]])
 }
 
+/// DrawCmd를 dispatch Shape + 레이어 이름으로 변환.
+fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
+    Ok(match cmd {
+        DrawCmd::Rect { x, y, w, h, color, name } => (
+            Shape::Rect { x: *x, y: *y, w: *w, h: *h, rgba: parse_rgba(color)? },
+            name.clone(),
+        ),
+        DrawCmd::Ellipse { cx, cy, rx, ry, color, name } => (
+            Shape::Ellipse { cx: *cx, cy: *cy, rx: *rx, ry: *ry, rgba: parse_rgba(color)? },
+            name.clone(),
+        ),
+        DrawCmd::Line { x0, y0, x1, y1, width, color, name } => (
+            Shape::Line { x0: *x0, y0: *y0, x1: *x1, y1: *y1, width: *width, rgba: parse_rgba(color)? },
+            name.clone(),
+        ),
+    })
+}
+
 /// 단발 Action을 문서에 적용한다(CLI 쓰기 공통 경로 = dispatch 1-op batch).
 /// CLI와 MCP가 같은 엔진을 쓰도록 보장한다. 성공 시 BatchResult 반환.
 fn apply_one(cli: &Cli, path: &DocPath, action: Action) -> Result<BatchResult> {
@@ -199,6 +262,30 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             let mode = parse_blend(mode)?;
             apply_one(cli, &path, Action::SetBlend { id: NodeRef::Node(*id), mode })?;
             emit.ok(&format!("블렌드 설정: n{id} = {mode:?}"), cli.dry_run);
+            Ok(())
+        }
+        Command::Draw(cmd) => {
+            let (shape, name) = draw_to_shape(cmd)?;
+            // 한 도형을 새 레이어로 그린다(layer add의 Shapes source).
+            let action = Action::AddPaintLayer {
+                name: name.clone(),
+                source: PixelSource::Shapes { items: vec![shape] },
+                index: None,
+                bind: Some("new".into()),
+            };
+            let doc = path.load()?;
+            let mut h = History::new(doc);
+            let res = dispatch::apply_batch(&mut h, &[action], cli.dry_run);
+            if !res.ok {
+                anyhow::bail!(
+                    "{}",
+                    res.issues.first().map(|i| i.message.clone()).unwrap_or_else(|| "그리기 실패".into())
+                );
+            }
+            if !cli.dry_run {
+                path.save(&h.doc)?;
+            }
+            emit.ok(&format!("도형 그림: \"{name}\""), cli.dry_run);
             Ok(())
         }
         Command::Export(ExportCmd::Png { out }) => {

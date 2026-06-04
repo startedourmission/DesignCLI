@@ -42,6 +42,9 @@ Photoshop류 이미지 편집을 **CLI/AI 에이전트로 조작**하는 헤드�
 dx --doc my.dxdoc doc create --w 128 --h 96 --depth u8   # 새 문서
 dx --doc my.dxdoc layer add --name bg --fill 235,130,40,255
 dx --doc my.dxdoc layer add --name top --image photo.png
+dx --doc my.dxdoc draw rect 0 160 320 80 --color 90,170,70,255   # 도형(AA)
+dx --doc my.dxdoc draw ellipse 250 60 35 35 --color 255,220,80,255
+dx --doc my.dxdoc draw line 0 0 100 100 --width 4 --color 0,0,0,255
 dx --doc my.dxdoc blend set 1 multiply
 dx --doc my.dxdoc layer list
 dx --doc my.dxdoc export png out.png
