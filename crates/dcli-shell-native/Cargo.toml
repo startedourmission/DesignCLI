@@ -16,7 +16,7 @@ dcli-color.workspace = true
 dcli-tile.workspace = true
 dcli-model.workspace = true
 dcli-raster.workspace = true
-dcli-cli.workspace = true
+dcli-cli = { workspace = true, features = ["fs-sources"] }
 eframe.workspace = true
 egui.workspace = true
 anyhow.workspace = true

@@ -17,7 +17,8 @@ dcli-color.workspace = true
 dcli-tile.workspace = true
 dcli-model.workspace = true
 dcli-raster.workspace = true
-dcli-cli = { workspace = true, default-features = false }
+# MCP는 storage(fs-sources)가 필요. clap은 들어와도 무방(네이티브 바이너리).
+dcli-cli = { workspace = true, features = ["fs-sources"] }
 rmcp.workspace = true
 tokio.workspace = true
 schemars.workspace = true

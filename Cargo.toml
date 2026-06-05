@@ -9,6 +9,21 @@ members = [
     "crates/dcli-cli",
     "crates/dcli-shell-native",
     "crates/dcli-mcp",
+    "crates/dcli-wasm",
+    "examples/parity_spike",
+]
+# dcli-wasm은 cdylib(wasm32 전용) → 기본 빌드/테스트에서 제외.
+# cargo build/test가 wasm cdylib를 네이티브로 빌드 시도하지 않게 한다.
+# dcli-wasm은 wasm-pack(--target wasm32)로만 빌드.
+default-members = [
+    "crates/dcli-color",
+    "crates/dcli-tile",
+    "crates/dcli-model",
+    "crates/dcli-raster",
+    "crates/dcli-gpu",
+    "crates/dcli-cli",
+    "crates/dcli-shell-native",
+    "crates/dcli-mcp",
     "examples/parity_spike",
 ]
 
@@ -25,6 +40,7 @@ dcli-tile = { path = "crates/dcli-tile" }
 dcli-model = { path = "crates/dcli-model" }
 dcli-raster = { path = "crates/dcli-raster" }
 dcli-gpu = { path = "crates/dcli-gpu" }
+# default-features=false → 소비자가 필요 feature 명시(wasm은 fs-sources/cli 둘 다 끔).
 dcli-cli = { path = "crates/dcli-cli", default-features = false }
 
 wgpu = "22"
@@ -42,6 +58,9 @@ base64 = "0.22"
 rmcp = { version = "1", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-std", "sync"] }
 tracing = "0.1"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 
 [profile.release]

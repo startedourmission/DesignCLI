@@ -50,6 +50,11 @@ pub enum Op {
         surface: SurfaceId,
         /// bottom-to-top 순서 인덱스(없으면 맨 위).
         index: Option<usize>,
+        /// 강제 NodeId. None=새로 발급(최초 적용), Some=그 id로 재생성(redo).
+        /// ★redo가 같은 batch의 후속 op(이 노드를 참조)을 깨뜨리지 않으려면 redo 시
+        /// 원래 발급 id를 보존해야 한다.★ 직렬화 제외(에이전트가 보내는 값 아님).
+        #[serde(skip)]
+        forced_id: Option<NodeId>,
     },
     /// 노드 삭제(역패치가 노드 전체 + 순서 위치를 복원).
     DeleteLayer { id: NodeId },
@@ -85,11 +90,13 @@ impl Op {
     /// op을 문서에 적용하고 역패치를 반환한다.
     pub fn apply(&self, doc: &mut Document) -> Result<Inverse, OpError> {
         match self {
-            Op::AddPaintLayer { name, surface, index } => {
+            Op::AddPaintLayer { name, surface, index, forced_id } => {
                 if doc.pixels().get(*surface).is_none() {
                     return Err(OpError::SurfaceNotFound(*surface));
                 }
-                let id = doc.alloc_node_id();
+                // forced_id가 있으면(redo) 그 id로, 없으면(최초) 새로 발급.
+                // insert_node_at이 next_node를 max로 보정하므로 id 충돌 없음.
+                let id = forced_id.unwrap_or_else(|| doc.alloc_node_id());
                 let node = Node::paint(id, name.clone(), *surface);
                 let idx = index.unwrap_or(doc.order().len());
                 doc.insert_node_at(node, idx);
@@ -165,5 +172,5 @@ pub fn add_paint_with_surface(
     index: Option<usize>,
 ) -> Op {
     let sid = doc.add_surface(surface);
-    Op::AddPaintLayer { name: name.into(), surface: sid, index }
+    Op::AddPaintLayer { name: name.into(), surface: sid, index, forced_id: None }
 }

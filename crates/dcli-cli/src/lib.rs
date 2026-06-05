@@ -3,4 +3,6 @@
 
 pub mod dispatch;
 pub mod dto;
+// storage는 std::fs 의존 → wasm 빌드에서 제외(fs-sources off).
+#[cfg(feature = "fs-sources")]
 pub mod storage;

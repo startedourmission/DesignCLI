@@ -15,9 +15,12 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [features]
-default = ["cli"]
-# clap을 cli feature에 가둔다 → dcli-mcp가 lib(storage/dispatch/dto)만 clap 없이 링크.
-cli = ["dep:clap"]
+default = ["cli", "fs-sources"]
+# clap을 cli feature에 가둔다. cli는 파일 IO도 필요하므로 fs-sources 포함.
+cli = ["dep:clap", "fs-sources"]
+# 파일시스템 의존(storage 모듈, PixelSource::PngPath). wasm은 이걸 끄면 std::fs가
+# 컴파일에서 진짜로 제거된다(브라우저 빌드 안전). MCP/CLI는 켜고, dcli-wasm은 끈다.
+fs-sources = []
 
 [dependencies]
 dcli-color.workspace = true

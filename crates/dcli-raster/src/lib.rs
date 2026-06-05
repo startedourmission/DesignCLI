@@ -221,7 +221,7 @@ mod tests {
     /// 표면을 등록하고 페인트 레이어를 맨 위에 추가, blend를 설정한다.
     fn add(doc: &mut Document, name: &str, s: Surface, blend: BlendMode) {
         let sid = doc.add_surface(s);
-        Op::AddPaintLayer { name: name.into(), surface: sid, index: None }
+        Op::AddPaintLayer { name: name.into(), surface: sid, index: None, forced_id: None }
             .apply(doc)
             .unwrap();
         let id = *doc.order().last().unwrap();

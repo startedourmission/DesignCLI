@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DesignCLI — 웹 에디터</title>
+  <!-- Lit을 CDN ESM으로(번들러·npm 불필요, 메모리 규율: React 금지·경량). -->
+  <script type="importmap">
+  {
+    "imports": {
+      "lit": "https://esm.sh/lit@3.1.4",
+      "lit/": "https://esm.sh/lit@3.1.4/"
+    }
+  }
+  </script>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; height: 100vh; overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #1e1e1e; color: #ddd;
+    }
+  </style>
+</head>
+<body>
+  <app-shell></app-shell>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

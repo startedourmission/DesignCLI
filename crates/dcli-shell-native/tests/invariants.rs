@@ -37,11 +37,11 @@ fn shell_and_core_composite_match_for_same_ops() {
         let bg = h.doc.add_surface(Surface::filled(
             32, 32, LinearPremul::from_srgb8_straight(220, 120, 40, 255),
         ));
-        h.apply(Op::AddPaintLayer { name: "bg".into(), surface: bg, index: None }).unwrap();
+        h.apply(Op::AddPaintLayer { name: "bg".into(), surface: bg, index: None, forced_id: None }).unwrap();
         let top = h.doc.add_surface(Surface::filled(
             32, 32, LinearPremul::from_srgb8_straight(120, 120, 120, 200),
         ));
-        h.apply(Op::AddPaintLayer { name: "top".into(), surface: top, index: None }).unwrap();
+        h.apply(Op::AddPaintLayer { name: "top".into(), surface: top, index: None, forced_id: None }).unwrap();
         let id = *h.doc.order().last().unwrap();
         h.apply(Op::SetProps {
             id,

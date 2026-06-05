@@ -15,6 +15,7 @@ use dcli_tile::{Surface, SurfaceId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(feature = "fs-sources")]
 use std::path::PathBuf;
 
 /// 노드 참조: 발급된 id 또는 같은 batch 내 named binding.
@@ -38,7 +39,8 @@ pub enum PixelSource {
     Fill { rgba: [u8; 4] },
     /// base64 인코딩된 PNG(8bit RGBA).
     PngBase64 { data: String },
-    /// 디스크의 PNG 경로.
+    /// 디스크의 PNG 경로. (fs-sources 전용 — wasm 빌드에는 없음)
+    #[cfg(feature = "fs-sources")]
     PngPath { path: PathBuf },
     /// 투명 위에 도형들을 순서대로 그린다(안티에일리어싱).
     Shapes { items: Vec<Shape> },
@@ -186,6 +188,7 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<Surface, String> 
                 .map_err(|e| format!("base64 디코드 오류: {e}"))?;
             decode_png(&bytes, w, h)
         }
+        #[cfg(feature = "fs-sources")]
         PixelSource::PngPath { path } => {
             let bytes = std::fs::read(path).map_err(|e| format!("이미지 읽기 실패: {e}"))?;
             decode_png(&bytes, w, h)
@@ -310,7 +313,7 @@ fn try_one(
             let surface = materialize(source, w, hh).map_err(|m| ("bad_surface_source".to_string(), m))?;
             let sid = h.doc.add_surface(surface);
             owned.push(sid); // 롤백 시 회수 대상으로 추적.
-            h.stage(Op::AddPaintLayer { name: name.clone(), surface: sid, index: *index })
+            h.stage(Op::AddPaintLayer { name: name.clone(), surface: sid, index: *index, forced_id: None })
                 .map_err(op_err)?;
             let node = *h.doc.order().last().expect("방금 추가됨");
             if let Some(b) = bind {

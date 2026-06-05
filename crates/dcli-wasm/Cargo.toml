@@ -1,0 +1,28 @@
+[package]
+name = "dcli-wasm"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# cdylib = wasm 산출물(wasm-pack), rlib = 네이티브 host 테스트용.
+crate-type = ["cdylib", "rlib"]
+
+# 코어 + dispatch를 브라우저에 노출하는 얇은 어댑터.
+# ★dcli-cli를 default-features=false로 의존 → clap·storage(std::fs) 없이 dispatch/dto만★
+# (fs-sources OFF → storage 모듈과 PixelSource::PngPath가 wasm 바이너리에서 제거됨).
+[dependencies]
+dcli-color.workspace = true
+dcli-tile.workspace = true
+dcli-model.workspace = true
+dcli-raster.workspace = true
+dcli-cli = { workspace = true, default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+png.workspace = true
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook.workspace = true

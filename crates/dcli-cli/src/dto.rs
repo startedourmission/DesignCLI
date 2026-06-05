@@ -4,13 +4,22 @@
 //! 정의한다. CLI output.rs의 Emitter와 dcli-mcp tool 핸들러가 모두 이 함수를 호출하므로
 //! 두 표면의 JSON이 컴파일러가 강제하는 단일 코드경로로 일치한다(검증 #2 단일 진실원).
 
-use dcli_model::{Document, Node, NodeKind};
+use dcli_model::{BlendMode, Document, Node, NodeKind};
 use serde_json::{json, Value};
 
 pub fn node_kind_str(node: &Node) -> &'static str {
     match node.kind {
         NodeKind::Paint { .. } => "paint",
         NodeKind::Group => "group",
+    }
+}
+
+/// 블렌드 모드를 snake_case 문자열로(set_blend Action과 동일 케이싱 → 매핑 불필요).
+pub fn blend_str(blend: BlendMode) -> &'static str {
+    match blend {
+        BlendMode::Normal => "normal",
+        BlendMode::Multiply => "multiply",
+        BlendMode::Screen => "screen",
     }
 }
 
@@ -22,7 +31,7 @@ pub fn node_json(node: &Node) -> Value {
         "kind": node_kind_str(node),
         "visible": node.visible,
         "opacity": node.opacity,
-        "blend": format!("{:?}", node.blend),
+        "blend": blend_str(node.blend),
         "surface": node.surface_id().map(|s| s.0),
     })
 }

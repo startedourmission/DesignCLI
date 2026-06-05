@@ -108,8 +108,17 @@ impl History {
         };
         loop {
             let entry = self.done.pop().expect("최소 1개 보장됨");
+            // ★redo 안정성★: AddPaintLayer는 redo 시 같은 NodeId로 재생성해야 같은
+            // batch의 후속 op(이 노드 참조)이 안 깨진다. inverse가 아는 발급 id를
+            // op의 forced_id로 박아 undone에 넣는다.
+            let mut op = entry.op;
+            if let (Op::AddPaintLayer { forced_id, .. }, Inverse::RemoveAdded { id }) =
+                (&mut op, &entry.inverse)
+            {
+                *forced_id = Some(*id);
+            }
             entry.inverse.apply(&mut self.doc)?;
-            self.undone.push(RedoEntry { op: entry.op, group: entry.group });
+            self.undone.push(RedoEntry { op, group: entry.group });
             // 단발이면 1개로 종료. batch면 다음 entry가 같은 group일 때만 계속.
             if group.is_none() || self.done.last().map(|e| e.group) != Some(group) {
                 break;

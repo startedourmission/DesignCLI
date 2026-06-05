@@ -64,7 +64,7 @@ impl StudioApp {
         // 반투명 회색 새 레이어(데모용 채움).
         let surface = Surface::filled(w, h, LinearPremul::from_srgb8_straight(150, 150, 150, 180));
         let sid = self.hist.doc.add_surface(surface);
-        self.apply(Op::AddPaintLayer { name: "layer".into(), surface: sid, index: None });
+        self.apply(Op::AddPaintLayer { name: "layer".into(), surface: sid, index: None, forced_id: None });
         self.selected = self.hist.doc.order().last().copied();
     }
 
