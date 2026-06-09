@@ -166,3 +166,29 @@ fn gpu_matches_cpu_oracle() {
         assert!(s > 0.999, "[{:?}] GPU-CPU SSIM {} < 0.999", depth, s);
     }
 }
+
+#[test]
+fn gpu_matches_cpu_with_offset() {
+    // 레이어 offset(평행이동)이 CPU/GPU에서 동일 픽셀 매핑인지 — offset parity 게이트.
+    let ctx = match dcli_gpu::GpuContext::new_headless() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("GPU 미가용, skip: {e}");
+            return;
+        }
+    };
+    for depth in [BitDepth::U8, BitDepth::F32] {
+        let mut doc = spike_scene(depth);
+        // 맨 위 레이어를 (+13, -7)만큼 이동(음수 포함, 경계 클리핑 확인).
+        let top = *doc.order().last().unwrap();
+        doc.get_mut(top).unwrap().offset = (13, -7);
+
+        let cpu = dcli_raster::composite(&doc).to_srgb8_rgba();
+        let gpu = ctx.composite(&doc).expect("gpu composite").to_srgb8_rgba();
+        let m = max_abs(&cpu, &gpu);
+        let s = ssim_gray(&cpu, &gpu);
+        eprintln!("[offset {:?}] max-abs={} ssim={:.6}", depth, m, s);
+        assert!(m <= 2, "[offset {:?}] GPU-CPU max-abs {} > 2", depth, m);
+        assert!(s > 0.999, "[offset {:?}] GPU-CPU SSIM {} < 0.999", depth, s);
+    }
+}

@@ -8,6 +8,7 @@
 
 mod output;
 
+use dcli_cli::client::Server;
 use dcli_cli::dispatch::{
     self, Action, BatchResult, BlendModeDto, NodeRef, PixelSource, PropPatch, Shape,
 };
@@ -25,8 +26,14 @@ use storage::DocPath;
 #[command(name = "dx", version, about = "DesignCLI — CLI로 조작하는 이미지 에디터")]
 struct Cli {
     /// 작업 대상 문서 폴더(.dxdoc). 대부분의 명령이 사용.
+    /// --server 모드에서는 이 문자열(파일명 stem)이 데몬의 문서 id가 된다.
     #[arg(long, global = true, default_value = "doc.dxdoc")]
     doc: PathBuf,
+
+    /// 라이브 데몬(dx-daemon) URL. 지정 시 디스크 대신 데몬에 편집을 보낸다
+    /// (웹 UI에 실시간 반영). 예: --server http://localhost:8137
+    #[arg(long, global = true)]
+    server: Option<String>,
 
     /// 데이터를 JSON으로 stdout에 출력(에이전트 친화).
     #[arg(long, global = true)]
@@ -57,6 +64,10 @@ enum Command {
     /// 합성 결과를 파일로 export.
     #[command(subcommand)]
     Export(ExportCmd),
+    /// 마지막 편집을 되돌린다(--server 모드 전용 — 디스크 모드는 세션 히스토리 없음).
+    Undo,
+    /// 되돌린 편집을 다시 적용한다(--server 모드 전용).
+    Redo,
 }
 
 #[derive(Subcommand)]
@@ -135,7 +146,7 @@ enum LayerCmd {
     List,
     /// 단일 레이어 상세.
     Get { id: u64 },
-    /// 레이어 속성 변경(opacity/visible/name).
+    /// 레이어 속성 변경(opacity/visible/name/위치). --x/--y는 함께 줘야 한다.
     Set {
         id: u64,
         #[arg(long)]
@@ -144,6 +155,12 @@ enum LayerCmd {
         visible: Option<bool>,
         #[arg(long)]
         name: Option<String>,
+        /// 캔버스 X 평행이동(절대 offset, 픽셀). --y와 함께.
+        #[arg(long, requires = "y")]
+        x: Option<i32>,
+        /// 캔버스 Y 평행이동(절대 offset, 픽셀). --x와 함께.
+        #[arg(long, requires = "x")]
+        y: Option<i32>,
     },
     /// 레이어를 새 순서 인덱스로 이동.
     Move { id: u64, to: usize },
@@ -219,14 +236,42 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
     })
 }
 
-/// 단발 Action을 문서에 적용한다(CLI 쓰기 공통 경로 = dispatch 1-op batch).
-/// CLI와 MCP가 같은 엔진을 쓰도록 보장한다. 성공 시 BatchResult 반환.
-fn apply_one(cli: &Cli, path: &DocPath, action: Action) -> Result<BatchResult> {
+/// --server 모드면 데몬 문서 id를 만든다. id = --doc 경로의 파일명 stem
+/// (예: "demo.dxdoc" → "demo", "demo" → "demo"). 디스크 모드면 None.
+fn server_of(cli: &Cli) -> Option<Server> {
+    let base = cli.server.as_ref()?;
+    let id = cli
+        .doc
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("doc")
+        .to_string();
+    Some(Server::new(base, &id))
+}
+
+/// 한 Action을 적용한다(CLI 쓰기 공통 경로). --server면 데몬에, 아니면 디스크에.
+/// 둘 다 dispatch::apply_batch 동일 엔진을 거치고 같은 BatchResult를 돌려준다.
+fn apply_actions(cli: &Cli, path: &DocPath, actions: Vec<Action>) -> Result<BatchResult> {
+    if let Some(srv) = server_of(cli) {
+        // 데몬 모드: dry-run은 의미가 다르므로(서버 상태 불변) 그대로 검증만은 미지원 —
+        // 프로토타입은 실제 적용. dry-run 플래그는 디스크 모드 전용으로 둔다.
+        if cli.dry_run {
+            anyhow::bail!("--dry-run은 --server 모드에서 미지원(프로토타입)");
+        }
+        let res = srv.apply(&actions)?;
+        if !res.ok {
+            anyhow::bail!(
+                "{}",
+                res.issues.first().map(|i| i.message.clone()).unwrap_or_else(|| "적용 실패".into())
+            );
+        }
+        return Ok(res);
+    }
+    // 디스크 모드.
     let doc = path.load()?;
     let mut h = History::new(doc);
-    let res = dispatch::apply_batch(&mut h, &[action], cli.dry_run);
+    let res = dispatch::apply_batch(&mut h, &actions, cli.dry_run);
     if !res.ok {
-        // 단발 op 실패 → 첫 이슈를 에러로.
         let issue = res.issues.first();
         anyhow::bail!(
             "{}",
@@ -239,13 +284,25 @@ fn apply_one(cli: &Cli, path: &DocPath, action: Action) -> Result<BatchResult> {
     Ok(res)
 }
 
+/// 단발 Action 편의 래퍼.
+fn apply_one(cli: &Cli, path: &DocPath, action: Action) -> Result<BatchResult> {
+    apply_actions(cli, path, vec![action])
+}
+
 fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
     let path = DocPath::new(cli.doc.clone());
     match &cli.command {
         Command::Doc(DocCmd::Create { w, h, depth }) => {
-            let depth = parse_depth(depth)?;
+            let depth_bd = parse_depth(depth)?;
+            if let Some(srv) = server_of(cli) {
+                // 데몬에 문서 등록(이미 있으면 멱등). 데몬이 진실원.
+                srv.ensure_doc(*w, *h, depth)?;
+                let doc = Document::new(*w, *h, depth_bd);
+                emit.doc_created(&cli.doc, &doc, false);
+                return Ok(());
+            }
             anyhow::ensure!(!path.exists() || cli.dry_run, "이미 문서가 존재: {}", cli.doc.display());
-            let doc = Document::new(*w, *h, depth);
+            let doc = Document::new(*w, *h, depth_bd);
             if !cli.dry_run {
                 path.save(&doc)?;
             }
@@ -253,6 +310,12 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             Ok(())
         }
         Command::Doc(DocCmd::Info) => {
+            if let Some(srv) = server_of(cli) {
+                // 데몬 state에서 doc 메타만 추려 그대로 출력(JSON 우선).
+                let st = srv.state()?;
+                emit.raw_json_or(&st["doc"], "doc info (server)");
+                return Ok(());
+            }
             let doc = path.load()?;
             emit.doc_info(&doc);
             Ok(())
@@ -273,28 +336,37 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 index: None,
                 bind: Some("new".into()),
             };
-            let doc = path.load()?;
-            let mut h = History::new(doc);
-            let res = dispatch::apply_batch(&mut h, &[action], cli.dry_run);
-            if !res.ok {
-                anyhow::bail!(
-                    "{}",
-                    res.issues.first().map(|i| i.message.clone()).unwrap_or_else(|| "그리기 실패".into())
-                );
-            }
-            if !cli.dry_run {
-                path.save(&h.doc)?;
-            }
+            apply_one(cli, &path, action)?;
             emit.ok(&format!("도형 그림: \"{name}\""), cli.dry_run);
             Ok(())
         }
         Command::Export(ExportCmd::Png { out }) => {
+            anyhow::ensure!(
+                cli.server.is_none(),
+                "export는 --server 모드 미지원(프로토타입) — 웹 UI의 🖼 PNG 버튼을 쓰세요"
+            );
             let doc = path.load()?;
             let surface = dcli_raster::composite(&doc);
             if !cli.dry_run {
                 storage::export_png(out, &surface)?;
             }
             emit.exported(out, surface.width(), surface.height(), cli.dry_run);
+            Ok(())
+        }
+        Command::Undo => {
+            let srv = server_of(cli).ok_or_else(|| {
+                anyhow::anyhow!("undo는 --server 모드 전용(디스크 모드는 세션 히스토리 없음)")
+            })?;
+            let changed = srv.undo()?;
+            emit.ok(if changed { "되돌림" } else { "되돌릴 항목 없음" }, false);
+            Ok(())
+        }
+        Command::Redo => {
+            let srv = server_of(cli).ok_or_else(|| {
+                anyhow::anyhow!("redo는 --server 모드 전용(디스크 모드는 세션 히스토리 없음)")
+            })?;
+            let changed = srv.redo()?;
+            emit.ok(if changed { "다시 적용" } else { "다시 적용할 항목 없음" }, false);
             Ok(())
         }
     }
@@ -311,44 +383,60 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             } else {
                 PixelSource::Transparent
             };
-            // layer add는 dry-run 아닐 때 발급된 id를 보고해야 하므로 직접 처리.
-            let doc = path.load()?;
-            let mut h = History::new(doc);
             let action = Action::AddPaintLayer {
                 name: name.clone(),
                 source,
                 index: *index,
                 bind: Some("new".into()),
             };
-            let res = dispatch::apply_batch(&mut h, &[action], cli.dry_run);
-            if !res.ok {
-                anyhow::bail!(
-                    "{}",
-                    res.issues.first().map(|i| i.message.clone()).unwrap_or_else(|| "추가 실패".into())
-                );
-            }
+            // 공통 경로(디스크/서버). 발급된 id는 BatchResult.bindings에서 읽는다.
+            let res = apply_actions(cli, path, vec![action])?;
             if cli.dry_run {
                 emit.ok(&format!("레이어 추가(dry-run): \"{name}\""), true);
             } else {
-                path.save(&h.doc)?;
                 let b = &res.bindings["new"];
                 emit.layer_added(NodeId(b.node), name, dcli_tile::SurfaceId(b.surface.unwrap()), false);
             }
             Ok(())
         }
         LayerCmd::List => {
+            if let Some(srv) = server_of(cli) {
+                let st = srv.state()?;
+                emit.raw_json_or(&st["layers"], "레이어 (server)");
+                return Ok(());
+            }
             let doc = path.load()?;
             emit.layer_list(&doc);
             Ok(())
         }
         LayerCmd::Get { id } => {
+            if let Some(srv) = server_of(cli) {
+                // 데몬 state에서 해당 id 레이어를 찾아 출력.
+                let st = srv.state()?;
+                let found = st["layers"]
+                    .as_array()
+                    .and_then(|a| a.iter().find(|l| l["id"].as_u64() == Some(*id)))
+                    .cloned();
+                match found {
+                    Some(l) => emit.raw_json_or(&l, "레이어 (server)"),
+                    None => anyhow::bail!("레이어 없음: n{id}"),
+                }
+                return Ok(());
+            }
             let doc = path.load()?;
             let node = doc.get(NodeId(*id)).ok_or_else(|| anyhow::anyhow!("레이어 없음: n{id}"))?;
             emit.layer_get(node);
             Ok(())
         }
-        LayerCmd::Set { id, opacity, visible, name } => {
-            let patch = PropPatch { name: name.clone(), visible: *visible, opacity: *opacity };
+        LayerCmd::Set { id, opacity, visible, name, x, y } => {
+            // --x/--y는 clap requires로 항상 쌍 → 둘 다 Some일 때만 offset.
+            let offset = x.zip(*y);
+            let patch = PropPatch {
+                name: name.clone(),
+                visible: *visible,
+                opacity: *opacity,
+                offset,
+            };
             apply_one(cli, path, Action::SetProps { id: NodeRef::Node(*id), patch })?;
             emit.ok(&format!("레이어 속성 변경: n{id}"), cli.dry_run);
             Ok(())

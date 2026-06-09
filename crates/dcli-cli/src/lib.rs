@@ -3,6 +3,11 @@
 
 pub mod dispatch;
 pub mod dto;
+// dxpkg는 코어(model/tile)만 의존 → wasm·native 양쪽에서 항상 컴파일(스냅샷 코덱 단일 진실원).
+pub mod dxpkg;
+// --server 모드 HTTP 클라(ureq). wasm 빌드에서 제외.
+#[cfg(feature = "server")]
+pub mod client;
 // storage는 std::fs 의존 → wasm 빌드에서 제외(fs-sources off).
 #[cfg(feature = "fs-sources")]
 pub mod storage;

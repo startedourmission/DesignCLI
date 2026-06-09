@@ -9,10 +9,9 @@
 //! storage·std::fs 없음)로 의존하므로 브라우저 빌드가 깨끗하다.
 
 use dcli_cli::dispatch::{self, Action};
-use dcli_cli::dto;
+use dcli_cli::{dto, dxpkg};
 use dcli_color::BitDepth;
 use dcli_model::{Document, History};
-use dcli_tile::{Surface, SurfaceId};
 use wasm_bindgen::prelude::*;
 
 /// 한 문서 편집 세션. History(undo 포함)를 소유한다.
@@ -97,6 +96,65 @@ impl Editor {
         dto::layer_list_json(&self.hist.doc).to_string()
     }
 
+    /// 캔버스 좌표 (x,y)에서 hit되는 최상위(top) 가시 레이어 node id를 반환한다.
+    /// 레이어 offset을 반영해 표면 픽셀의 alpha>0이면 hit. 없으면 -1(선택 해제).
+    /// 선택툴이 사용(클릭→레이어 선택). id는 JS 친화 i32(node id는 작은 값 가정).
+    pub fn hit_test(&self, x: i32, y: i32) -> i32 {
+        use dcli_model::NodeKind;
+        // top-to-bottom: order는 bottom-to-top이라 역순.
+        for &id in self.hist.doc.order().iter().rev() {
+            let Some(node) = self.hist.doc.get(id) else { continue };
+            if !node.visible || node.opacity <= 0.0 {
+                continue;
+            }
+            let NodeKind::Paint { surface } = node.kind else { continue };
+            let Some(surf) = self.hist.doc.pixels().get(surface) else { continue };
+            let (dx, dy) = node.offset;
+            let (sx, sy) = (x - dx, y - dy);
+            if sx < 0 || sy < 0 || sx >= surf.width() as i32 || sy >= surf.height() as i32 {
+                continue;
+            }
+            let px = surf.pixels()[(sy * surf.width() as i32 + sx) as usize];
+            if px.a > 0.0 {
+                return id.0 as i32;
+            }
+        }
+        -1
+    }
+
+    /// 레이어의 불투명 픽셀 타이트 바운드(offset 반영, 캔버스 좌표) [x,y,w,h] JSON.
+    /// 셀렉션 박스가 도형에 딱 맞게 그려지도록. 빈 레이어면 null. id는 JS 친화 u32.
+    pub fn layer_bounds(&self, id: u32) -> String {
+        use dcli_model::{NodeId, NodeKind};
+        let Some(node) = self.hist.doc.get(NodeId(id as u64)) else { return "null".into() };
+        let NodeKind::Paint { surface } = node.kind else { return "null".into() };
+        let Some(surf) = self.hist.doc.pixels().get(surface) else { return "null".into() };
+        let (w, h) = (surf.width() as i32, surf.height() as i32);
+        let px = surf.pixels();
+        let (mut minx, mut miny, mut maxx, mut maxy) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for y in 0..h {
+            for x in 0..w {
+                if px[(y * w + x) as usize].a > 0.0 {
+                    minx = minx.min(x);
+                    miny = miny.min(y);
+                    maxx = maxx.max(x);
+                    maxy = maxy.max(y);
+                }
+            }
+        }
+        if minx > maxx {
+            return "null".into(); // 완전 투명.
+        }
+        let (dx, dy) = node.offset;
+        format!(
+            "[{},{},{},{}]",
+            minx + dx,
+            miny + dy,
+            maxx - minx + 1,
+            maxy - miny + 1
+        )
+    }
+
     pub fn width(&self) -> u32 {
         self.hist.doc.width
     }
@@ -127,12 +185,12 @@ impl Editor {
         Ok(png)
     }
 
-    /// 문서를 .dxpkg 단일 파일 바이트로 직렬화(저장).
+    /// 문서를 .dxpkg 단일 파일 바이트로 직렬화(저장). 코덱은 dcli_cli::dxpkg 공유.
     pub fn to_dxpkg(&self) -> Vec<u8> {
         dxpkg::encode(&self.hist.doc)
     }
 
-    /// .dxpkg 바이트에서 새 Editor를 만든다(열기).
+    /// .dxpkg 바이트에서 새 Editor를 만든다(열기). 코덱은 dcli_cli::dxpkg 공유.
     pub fn from_dxpkg(bytes: &[u8]) -> Result<Editor, JsError> {
         let doc = dxpkg::decode(bytes).map_err(|e| JsError::new(&e))?;
         Ok(Editor { hist: History::new(doc), rgba: Vec::new(), dirty: true })
@@ -152,83 +210,7 @@ pub fn __start() {
     console_error_panic_hook::set_once();
 }
 
-/// .dxpkg 포맷 — doc.json(구조) + 참조 표면 바이너리(네이티브 .dxdoc과 바이트 호환).
-///
-/// 레이아웃(little-endian):
-///   "DXPKG\0"(6B) | version u32 | doc.json len u32 | [doc.json] |
-///   surface 개수 u32 | (SurfaceId u64 | bytes len u32 | [Surface::to_bytes])*
-mod dxpkg {
-    use super::*;
-
-    const MAGIC: &[u8; 6] = b"DXPKG\0";
-    const VERSION: u32 = 1;
-
-    pub fn encode(doc: &Document) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&VERSION.to_le_bytes());
-
-        let json = doc.to_json().expect("문서 직렬화");
-        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
-        out.extend_from_slice(json.as_bytes());
-
-        // 참조되는 표면만(orphan 제외) id 오름차순.
-        let referenced = doc.referenced_surfaces();
-        let surfaces: Vec<_> = doc
-            .pixels()
-            .iter_sorted()
-            .filter(|(id, _)| referenced.contains(id))
-            .collect();
-        out.extend_from_slice(&(surfaces.len() as u32).to_le_bytes());
-        for (id, surface) in surfaces {
-            out.extend_from_slice(&id.0.to_le_bytes());
-            let bytes = surface.to_bytes();
-            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(&bytes);
-        }
-        out
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Document, String> {
-        let mut cur = 0usize;
-        let take = |cur: &mut usize, n: usize| -> Result<&[u8], String> {
-            if *cur + n > bytes.len() {
-                return Err("dxpkg: 바이트 부족".into());
-            }
-            let s = &bytes[*cur..*cur + n];
-            *cur += n;
-            Ok(s)
-        };
-        let u32le = |cur: &mut usize| -> Result<u32, String> {
-            Ok(u32::from_le_bytes(take(cur, 4)?.try_into().unwrap()))
-        };
-
-        if take(&mut cur, 6)? != MAGIC {
-            return Err("dxpkg: magic 불일치".into());
-        }
-        let version = u32le(&mut cur)?;
-        if version != VERSION {
-            return Err(format!("dxpkg: 미지원 버전 {version}"));
-        }
-
-        let json_len = u32le(&mut cur)? as usize;
-        let json = std::str::from_utf8(take(&mut cur, json_len)?)
-            .map_err(|e| format!("dxpkg: doc.json utf8: {e}"))?;
-        let mut doc = Document::from_json(json).map_err(|e| format!("dxpkg: doc.json 파싱: {e}"))?;
-
-        let mut store = dcli_tile::PixelStore::new();
-        let count = u32le(&mut cur)?;
-        for _ in 0..count {
-            let id = SurfaceId(u64::from_le_bytes(take(&mut cur, 8)?.try_into().unwrap()));
-            let blen = u32le(&mut cur)? as usize;
-            let sbytes = take(&mut cur, blen)?;
-            let surface = Surface::from_bytes(sbytes).ok_or("dxpkg: 표면 디코드 실패")?;
-            store.restore(id, surface);
-        }
-        doc.set_pixels(store);
-        Ok(doc)
-    }
-}
+// .dxpkg 코덱은 dcli_cli::dxpkg로 이동(스냅샷 포맷 단일 진실원 — 데몬·CLI·wasm 공유).
 
 // ---- host(네이티브 rlib) 회귀 테스트 ----
 #[cfg(test)]

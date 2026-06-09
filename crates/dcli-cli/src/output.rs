@@ -26,6 +26,17 @@ impl Emitter {
         }
     }
 
+    /// 데몬에서 받은 JSON 값을 그대로 출력(--json이면 raw, 아니면 human 라벨 + pretty).
+    /// 서버 모드 읽기 명령(doc info / layer list)이 데몬 응답을 재모델링 없이 보여준다.
+    pub fn raw_json_or(&self, value: &serde_json::Value, human_label: &str) {
+        if self.json {
+            println!("{value}");
+        } else {
+            println!("{human_label}:");
+            println!("{}", serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()));
+        }
+    }
+
     pub fn error(&self, e: &anyhow::Error) {
         if self.json {
             eprintln!("{}", json!({ "error": e.to_string() }));

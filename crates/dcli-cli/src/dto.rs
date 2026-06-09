@@ -32,6 +32,7 @@ pub fn node_json(node: &Node) -> Value {
         "visible": node.visible,
         "opacity": node.opacity,
         "blend": blend_str(node.blend),
+        "offset": [node.offset.0, node.offset.1],
         "surface": node.surface_id().map(|s| s.0),
     })
 }

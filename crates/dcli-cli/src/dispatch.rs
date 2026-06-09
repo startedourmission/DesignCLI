@@ -64,6 +64,8 @@ pub struct PropPatch {
     pub name: Option<String>,
     pub visible: Option<bool>,
     pub opacity: Option<f32>,
+    /// 캔버스 평행이동 (dx, dy) 정수 픽셀(Move 툴). 절대 offset으로 설정.
+    pub offset: Option<(i32, i32)>,
 }
 
 /// 블렌드 모드(문자열 직렬화).
@@ -115,7 +117,8 @@ fn default_layer_name() -> String {
 }
 
 /// batch 실행 이슈(self-correction용 구조화 에러).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+/// Deserialize도 derive: --server 모드 CLI가 데몬 응답을 같은 타입으로 되받는다.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Issue {
     pub op_index: usize,
     pub op_kind: String,
@@ -124,7 +127,7 @@ pub struct Issue {
 }
 
 /// batch 결과.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResult {
     pub ok: bool,
     pub applied: usize,
@@ -135,7 +138,7 @@ pub struct BatchResult {
     pub aborted_at: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BindingOut {
     pub node: u64,
     pub surface: Option<u64>,
@@ -346,6 +349,9 @@ fn try_one(
             }
             if let Some(o) = patch.opacity {
                 props.opacity = o;
+            }
+            if let Some(off) = patch.offset {
+                props.offset = off;
             }
             h.stage(Op::SetProps { id: nid, props }).map_err(op_err)
         }

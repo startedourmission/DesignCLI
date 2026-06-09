@@ -39,23 +39,59 @@ pub fn composite(doc: &Document) -> Surface {
             // 표면이 스토어에 없으면(예: JSON만 로드) 건너뛴다.
             continue;
         };
-        composite_layer(&mut acc, surface.pixels(), node.blend, node.opacity, doc.blend_space);
+        composite_layer(
+            &mut acc,
+            surface.pixels(),
+            (surface.width(), surface.height()),
+            node.offset,
+            node.blend,
+            node.opacity,
+            doc.blend_space,
+        );
     }
     acc
 }
 
-/// 한 레이어를 누적 표면 위에 블렌드한다.
+/// 한 레이어를 누적 표면 위에 블렌드한다. `offset`(dx,dy)만큼 시프트해 그린다.
+///
+/// dst 픽셀 (x,y)는 src 픽셀 (x-dx, y-dy)에서 읽는다. offset=(0,0)이면 1:1로 기존과 동일.
+/// 경계 밖(src 범위 이탈)은 투명이므로 블렌드 기여 없음(건너뜀).
+#[allow(clippy::too_many_arguments)]
 fn composite_layer(
     acc: &mut Surface,
     src: &[LinearPremul],
+    src_dim: (u32, u32),
+    offset: (i32, i32),
     blend: BlendMode,
     opacity: f32,
     space: BlendSpace,
 ) {
+    let (dw, dh) = (acc.width() as i32, acc.height() as i32);
+    let (sw, sh) = (src_dim.0 as i32, src_dim.1 as i32);
+    let (dx, dy) = offset;
+
+    // 빠른 경로: offset 0 + 동일 크기면 기존 1:1 zip(비트동일·최속).
+    if dx == 0 && dy == 0 && sw == dw && sh == dh {
+        let dst = acc.pixels_mut();
+        debug_assert_eq!(dst.len(), src.len());
+        for (d, s) in dst.iter_mut().zip(src.iter()) {
+            *d = blend_pixel(*d, *s, blend, opacity, space);
+        }
+        return;
+    }
+
+    // 일반 경로: dst가 src와 겹치는 영역만 순회(경계 밖은 투명 = noop).
     let dst = acc.pixels_mut();
-    debug_assert_eq!(dst.len(), src.len());
-    for (d, s) in dst.iter_mut().zip(src.iter()) {
-        *d = blend_pixel(*d, *s, blend, opacity, space);
+    let x0 = dx.max(0);
+    let y0 = dy.max(0);
+    let x1 = (dx + sw).min(dw);
+    let y1 = (dy + sh).min(dh);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let s = src[((y - dy) * sw + (x - dx)) as usize];
+            let di = (y * dw + x) as usize;
+            dst[di] = blend_pixel(dst[di], s, blend, opacity, space);
+        }
     }
 }
 
@@ -227,7 +263,7 @@ mod tests {
         let id = *doc.order().last().unwrap();
         Op::SetProps {
             id,
-            props: NodeProps { name: name.into(), visible: true, opacity: 1.0, blend },
+            props: NodeProps { name: name.into(), visible: true, opacity: 1.0, blend, offset: (0, 0) },
         }
         .apply(doc)
         .unwrap();
@@ -267,6 +303,41 @@ mod tests {
         let out = composite(&g).to_srgb8_rgba();
         let expected = dcli_color::quantize_u8(0.501_960_8_f32 * 0.501_960_8);
         assert!((out[0] as i32 - expected as i32).abs() <= 1, "got {} expected {}", out[0], expected);
+    }
+
+    #[test]
+    fn offset_shifts_layer() {
+        // 4x4 문서, 좌상단 1픽셀짜리 빨강을 (2,1)만큼 이동 → (2,1)에 나타나고 (0,0)은 투명.
+        let mut doc = Document::new(4, 4, BitDepth::U8);
+        // 표면 자체는 (0,0)에 빨강, 나머지 투명.
+        let mut s = Surface::new(4, 4);
+        s.pixels_mut()[0] = LinearPremul::from_srgb8_straight(255, 0, 0, 255);
+        let sid = doc.add_surface(s);
+        Op::AddPaintLayer { name: "dot".into(), surface: sid, index: None, forced_id: None }
+            .apply(&mut doc)
+            .unwrap();
+        let id = *doc.order().last().unwrap();
+        // offset (2,1) 적용.
+        doc.get_mut(id).unwrap().offset = (2, 1);
+
+        let out = composite(&doc).to_srgb8_rgba();
+        let at = |x: usize, y: usize| {
+            let i = (y * 4 + x) * 4;
+            &out[i..i + 4]
+        };
+        assert_eq!(at(0, 0), &[0, 0, 0, 0], "원위치는 비어야");
+        assert_eq!(at(2, 1), &[255, 0, 0, 255], "(2,1)로 이동");
+    }
+
+    #[test]
+    fn offset_zero_bit_identical_to_unshifted() {
+        // offset (0,0)은 기존 1:1 경로와 비트동일해야(빠른 경로 회귀 핀).
+        let mut a = Document::new(3, 3, BitDepth::U8);
+        add(&mut a, "x", solid(3, 3, 12, 34, 56, 200), BlendMode::Normal);
+        let mut b = Document::new(3, 3, BitDepth::U8);
+        add(&mut b, "x", solid(3, 3, 12, 34, 56, 200), BlendMode::Normal);
+        b.get_mut(*b.order().last().unwrap()).unwrap().offset = (0, 0);
+        assert_eq!(composite(&a).to_srgb8_rgba(), composite(&b).to_srgb8_rgba());
     }
 
     #[test]

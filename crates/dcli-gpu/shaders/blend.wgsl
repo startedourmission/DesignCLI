@@ -10,15 +10,15 @@ const MAX_LAYERS: u32 = 8u;
 struct LayerMeta {
     blend: u32,     // 0=Normal,1=Multiply,2=Screen
     opacity: f32,
-    _pad0: f32,
-    _pad1: f32,
+    offset_x: i32,  // 캔버스 평행이동 (dx,dy) 정수 픽셀 (CPU composite_layer와 동일)
+    offset_y: i32,
 };
 
 struct Uniforms {
     layer_count: u32,
     blend_space: u32, // 0=Gamma, 1=Linear
-    _pad0: u32,
-    _pad1: u32,
+    doc_w: u32,
+    doc_h: u32,
     layers: array<LayerMeta, MAX_LAYERS>,
 };
 
@@ -123,9 +123,20 @@ fn blend_in_linear(dst: vec4<f32>, src: vec4<f32>, blend: u32) -> vec4<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    // 목적지 픽셀 좌표(정수, top-left 원점). builtin position은 픽셀 중심(+0.5)이라 floor.
+    let dst_px = vec2<i32>(i32(floor(in.pos.x)), i32(floor(in.pos.y)));
+    let dw = i32(u.doc_w);
+    let dh = i32(u.doc_h);
     for (var i: u32 = 0u; i < u.layer_count; i = i + 1u) {
         let lm = u.layers[i];
-        var src = textureSampleLevel(layer_tex, samp, in.uv, i32(i), 0.0);
+        // 소스 텍셀 = dst - offset (CPU: src[(y-dy), (x-dx)]). 경계 밖이면 투명.
+        let sx = dst_px.x - lm.offset_x;
+        let sy = dst_px.y - lm.offset_y;
+        if (sx < 0 || sy < 0 || sx >= dw || sy >= dh) {
+            continue;
+        }
+        // 정수 좌표 직접 로드(필터링 없음 → CPU 인덱싱과 비트 동형).
+        var src = textureLoad(layer_tex, vec2<i32>(sx, sy), i32(i), 0);
         // 레이어 opacity 적용 (premul 불변식 유지).
         src = src * lm.opacity;
         if (u.blend_space == 1u) {

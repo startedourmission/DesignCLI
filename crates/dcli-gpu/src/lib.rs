@@ -21,8 +21,9 @@ const MAX_LAYERS: usize = 8;
 struct LayerMeta {
     blend: u32,
     opacity: f32,
-    _pad0: f32,
-    _pad1: f32,
+    /// 캔버스 평행이동 (dx, dy) 정수 픽셀. CPU composite_layer와 동일 매핑.
+    offset_x: i32,
+    offset_y: i32,
 }
 
 #[repr(C)]
@@ -30,8 +31,9 @@ struct LayerMeta {
 struct Uniforms {
     layer_count: u32,
     blend_space: u32,
-    _pad0: u32,
-    _pad1: u32,
+    /// 문서 픽셀 크기(셰이더가 fragment 좌표 → 텍셀 인덱스 계산에 사용).
+    doc_w: u32,
+    doc_h: u32,
     layers: [LayerMeta; MAX_LAYERS],
 }
 
@@ -92,13 +94,13 @@ impl GpuContext {
     pub fn composite(&self, doc: &Document) -> anyhow::Result<Surface> {
         // bottom-to-top 가시 페인트 노드를 (blend, opacity, surface) 쌍으로 수집.
         // 표면이 스토어에 없거나 픽셀 없는 노드(그룹)는 제외(CPU 정본과 동일 규칙).
-        let visible: Vec<(BlendMode, f32, &Surface)> = doc
+        let visible: Vec<(BlendMode, f32, (i32, i32), &Surface)> = doc
             .iter_bottom_to_top()
             .filter(|n| n.visible && n.opacity > 0.0)
             .filter_map(|n| {
                 let sid = n.surface_id()?;
                 let s = doc.pixels().get(sid)?;
-                Some((n.blend, n.opacity, s))
+                Some((n.blend, n.opacity, n.offset, s))
             })
             .collect();
         anyhow::ensure!(
@@ -128,7 +130,7 @@ impl GpuContext {
             view_formats: &[],
         });
 
-        for (i, (_, _, surface)) in visible.iter().enumerate() {
+        for (i, (_, _, _, surface)) in visible.iter().enumerate() {
             let data = surface_to_f32(surface);
             queue.write_texture(
                 wgpu::ImageCopyTexture {
@@ -152,13 +154,13 @@ impl GpuContext {
         });
 
         // --- uniforms ---
-        let mut layers = [LayerMeta { blend: 0, opacity: 1.0, _pad0: 0.0, _pad1: 0.0 }; MAX_LAYERS];
-        for (i, (blend, opacity, _)) in visible.iter().enumerate() {
+        let mut layers = [LayerMeta { blend: 0, opacity: 1.0, offset_x: 0, offset_y: 0 }; MAX_LAYERS];
+        for (i, (blend, opacity, offset, _)) in visible.iter().enumerate() {
             layers[i] = LayerMeta {
                 blend: blend_code(*blend),
                 opacity: *opacity,
-                _pad0: 0.0,
-                _pad1: 0.0,
+                offset_x: offset.0,
+                offset_y: offset.1,
             };
         }
         let uniforms = Uniforms {
@@ -167,8 +169,8 @@ impl GpuContext {
                 dcli_color::BlendSpace::Gamma => 0,
                 dcli_color::BlendSpace::Linear => 1,
             },
-            _pad0: 0,
-            _pad1: 0,
+            doc_w: w,
+            doc_h: h,
             layers,
         };
         let ubuf = device.create_buffer(&wgpu::BufferDescriptor {

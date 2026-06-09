@@ -1,0 +1,29 @@
+[package]
+name = "dcli-daemon"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "dx-daemon"
+path = "src/main.rs"
+
+[dependencies]
+# 엔진은 CLI/wasm과 동일 코드경로 — fs-sources 켜서 native(PngPath 등도 가능).
+dcli-cli = { workspace = true, features = ["fs-sources"] }
+dcli-color.workspace = true
+dcli-model.workspace = true
+dcli-tile.workspace = true
+dcli-raster.workspace = true
+
+axum.workspace = true
+tower-http.workspace = true
+# daemon은 멀티스레드 런타임 + net 필요(workspace tokio는 feature가 좁아 여기서 직접 지정).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+base64.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

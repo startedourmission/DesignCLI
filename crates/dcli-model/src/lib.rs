@@ -66,6 +66,10 @@ pub struct Node {
     /// [0,1] 불투명도.
     pub opacity: f32,
     pub blend: BlendMode,
+    /// 캔버스 평행이동 (dx, dy) 정수 픽셀. 표면은 그대로 두고 합성 시 이만큼 시프트한다
+    /// (Move 툴). 회전/스케일은 미지원(리샘플링 필요 → 후속). 구버전 문서 호환 위해 default.
+    #[serde(default)]
+    pub offset: (i32, i32),
     pub kind: NodeKind,
 }
 
@@ -77,6 +81,7 @@ impl Node {
             visible: true,
             opacity: 1.0,
             blend: BlendMode::Normal,
+            offset: (0, 0),
             kind: NodeKind::Paint { surface },
         }
     }
@@ -97,6 +102,9 @@ pub struct NodeProps {
     pub visible: bool,
     pub opacity: f32,
     pub blend: BlendMode,
+    /// 캔버스 평행이동 (dx, dy). SetProps/RestoreProps가 이걸 운반해 이동·undo가 자동 대칭.
+    #[serde(default)]
+    pub offset: (i32, i32),
 }
 
 impl NodeProps {
@@ -106,6 +114,7 @@ impl NodeProps {
             visible: node.visible,
             opacity: node.opacity,
             blend: node.blend,
+            offset: node.offset,
         }
     }
 }
