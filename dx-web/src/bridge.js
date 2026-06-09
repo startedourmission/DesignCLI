@@ -9,6 +9,8 @@
 export const fill = (rgba) => ({ from: "fill", rgba });
 export const transparent = () => ({ from: "transparent" });
 export const shapes = (items) => ({ from: "shapes", items });
+// base64(헤더 제외 순수 데이터) PNG → 레이어 소스. 문서 크기와 일치해야 엔진이 받는다.
+export const pngBase64 = (data) => ({ from: "png_base64", data });
 
 export const rect = (x, y, w, h, rgba) => ({ shape: "rect", x, y, w, h, rgba });
 export const ellipse = (cx, cy, rx, ry, rgba) => ({ shape: "ellipse", cx, cy, rx, ry, rgba });
@@ -24,6 +26,8 @@ export const addPaintLayer = (name, source, opts = {}) => ({
 
 export const setProps = (id, patch) => ({ op: "set_props", id: ref(id), patch });
 export const setBlend = (id, mode) => ({ op: "set_blend", id: ref(id), mode });
+// 캔버스 평행이동(절대 offset, [dx,dy]). Move 툴이 사용.
+export const setOffset = (id, offset) => ({ op: "set_props", id: ref(id), patch: { offset } });
 export const moveLayer = (id, to) => ({ op: "move_layer", id: ref(id), to });
 export const deleteLayer = (id) => ({ op: "delete_layer", id: ref(id) });
 
