@@ -337,10 +337,17 @@ class DxCanvas extends LitElement {
       }
       e.preventDefault();
       this.app.select(hit);
+      // ★원본 트랜스폼 보존★ 커밋 시 offset/scale/rotation을 새 레이어로 이어받고,
+      // 편집 박스도 변환된 실제 표시 위치에 띄운다(초기 생성 위치로 돌아가는 버그 수정).
+      const xf = {
+        offset: layer.offset ?? [0, 0],
+        scale: layer.scale ?? [1, 1],
+        rotation: layer.rotation ?? 0,
+      };
       this._openText({
         x: meta.x, y: meta.y, value: meta.text,
         size: meta.size, rgba: meta.rgba,
-        editId: hit,
+        editId: hit, xf,
       });
     } catch (err) {
       console.error("[text] 편집 진입 실패:", err);
@@ -695,11 +702,13 @@ class DxCanvas extends LitElement {
     const name = v.split("\n")[0].slice(0, 20);
     if (t.editId != null) {
       // 기존 텍스트 편집: 같은 z-순서에 재래스터(삭제 후 그 인덱스로 추가) + meta 갱신.
+      // ★원본 트랜스폼(offset/scale/rotation) 이어받기 — 이동해 둔 위치 보존★
       const idx = this.app.orderBottomToTop().indexOf(t.editId);
+      const xf = t.xf ?? { offset: [0, 0], scale: [1, 1], rotation: 0 };
       this.app.apply([
         B.deleteLayer(t.editId),
         B.addPaintLayer(name, B.shapes([B.text(t.x, t.y, v, size, rgba)]), { index: idx >= 0 ? idx : undefined, bind: "t" }),
-        B.setProps("t", { meta }),
+        B.setProps("t", { meta, offset: xf.offset, scale: xf.scale, rotation: xf.rotation }),
       ]);
       this.app.select(null);
     } else {
@@ -786,8 +795,16 @@ class DxCanvas extends LitElement {
     return html`
       <div class="wrap">
         <canvas id="base"></canvas><canvas id="overlay"></canvas>
-        ${t ? html`<textarea class="txt" spellcheck="false"
-          style="left:${t.x * z}px; top:${t.y * z}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}"
+        ${t ? (() => {
+          // 편집 박스는 레이어의 **변환된 표시 위치**에(원시 meta 좌표 아님 — 위치 버그 수정).
+          const xf = t.xf;
+          const pos = xf
+            ? this.app.xformOf({ offset: xf.offset, scale: xf.scale, rotation: xf.rotation }).fwd(t.x, t.y)
+            : { x: t.x, y: t.y };
+          const [sxx, syy] = xf?.scale ?? [1, 1];
+          const rotDeg = xf?.rotation ?? 0;
+          return html`<textarea class="txt" spellcheck="false"
+          style="left:${pos.x * z}px; top:${pos.y * z}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}; transform: rotate(${rotDeg}deg) scale(${sxx}, ${syy}); transform-origin: 0 0;"
           .value=${t.value}
           @input=${(e) => { t.value = e.target.value; e.target.style.width = "auto"; e.target.style.width = e.target.scrollWidth + "px"; e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
           @keydown=${(e) => {
@@ -795,7 +812,8 @@ class DxCanvas extends LitElement {
             else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) this._commitText();
             e.stopPropagation();
           }}
-          @blur=${() => this._commitText()}></textarea>` : nothing}
+          @blur=${() => this._commitText()}></textarea>`;
+        })() : nothing}
       </div>
     `;
   }
