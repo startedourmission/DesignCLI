@@ -76,6 +76,10 @@ pub struct Node {
     /// 비파괴 회전(도, 시계방향). 표면 중심 기준.
     #[serde(default)]
     pub rotation: f32,
+    /// 임의 메타데이터(JSON 문자열 관행). 예: 텍스트 레이어의 {type,x,y,text,size,rgba}
+    /// — 편집 시 재래스터에 쓰인다. 엔진은 내용을 해석하지 않는다(소비자 소유).
+    #[serde(default)]
+    pub meta: Option<String>,
     pub kind: NodeKind,
 }
 
@@ -94,6 +98,7 @@ impl Node {
             offset: (0, 0),
             scale: (1.0, 1.0),
             rotation: 0.0,
+            meta: None,
             kind: NodeKind::Paint { surface },
         }
     }
@@ -128,6 +133,9 @@ pub struct NodeProps {
     /// 비파괴 회전(도).
     #[serde(default)]
     pub rotation: f32,
+    /// 임의 메타데이터(소비자 소유).
+    #[serde(default)]
+    pub meta: Option<String>,
 }
 
 impl NodeProps {
@@ -140,6 +148,7 @@ impl NodeProps {
             offset: node.offset,
             scale: node.scale,
             rotation: node.rotation,
+            meta: node.meta.clone(),
         }
     }
 }

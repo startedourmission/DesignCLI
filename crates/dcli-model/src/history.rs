@@ -223,6 +223,7 @@ mod tests {
                 offset: (0, 0),
                 scale: (1.0, 1.0),
                 rotation: 0.0,
+                meta: None,
             },
         })
         .unwrap();
@@ -321,7 +322,7 @@ mod tests {
         let new_id = *h.doc.order().last().unwrap();
         h.stage(Op::SetProps {
             id: new_id,
-            props: NodeProps { name: "x".into(), visible: false, opacity: 0.3, blend: BlendMode::Screen, offset: (0, 0), scale: (1.0, 1.0), rotation: 0.0 },
+            props: NodeProps { name: "x".into(), visible: false, opacity: 0.3, blend: BlendMode::Screen, offset: (0, 0), scale: (1.0, 1.0), rotation: 0.0, meta: None },
         })
         .unwrap();
         h.stage(Op::MoveLayer { id: new_id, to: 0 }).unwrap();

@@ -370,7 +370,7 @@ mod tests {
         let id = *doc.order().last().unwrap();
         Op::SetProps {
             id,
-            props: NodeProps { name: name.into(), visible: true, opacity: 1.0, blend, offset: (0, 0), scale: (1.0, 1.0), rotation: 0.0 },
+            props: NodeProps { name: name.into(), visible: true, opacity: 1.0, blend, offset: (0, 0), scale: (1.0, 1.0), rotation: 0.0, meta: None },
         }
         .apply(doc)
         .unwrap();

@@ -221,6 +221,9 @@ enum LayerCmd {
         /// 비파괴 회전(도, 시계방향, 표면 중심 기준).
         #[arg(long, allow_negative_numbers = true)]
         rotation: Option<f32>,
+        /// 임의 메타데이터(JSON 문자열 관행). 빈 문자열("")이면 제거.
+        #[arg(long)]
+        meta: Option<String>,
     },
     /// 레이어를 새 순서 인덱스로 이동.
     Move { id: u64, to: usize },
@@ -409,13 +412,24 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
         Command::Draw(cmd) => {
             let (shape, name) = draw_to_shape(cmd)?;
             // 한 도형을 새 레이어로 그린다(layer add의 Shapes source).
-            let action = Action::AddPaintLayer {
+            let mut actions = vec![Action::AddPaintLayer {
                 name: name.clone(),
-                source: PixelSource::Shapes { items: vec![shape] },
+                source: PixelSource::Shapes { items: vec![shape.clone()] },
                 index: None,
                 bind: Some("new".into()),
-            };
-            apply_one(cli, &path, action)?;
+            }];
+            // 텍스트는 편집용 meta를 자동 저장(웹 더블클릭 편집과 호환).
+            if let Shape::Text { x, y, text, size, rgba } = &shape {
+                let meta = serde_json::json!({
+                    "type": "text", "x": x, "y": y, "text": text, "size": size, "rgba": rgba,
+                })
+                .to_string();
+                actions.push(Action::SetProps {
+                    id: NodeRef::Bind("new".into()),
+                    patch: PropPatch { meta: Some(meta), ..Default::default() },
+                });
+            }
+            apply_actions(cli, &path, actions)?;
             emit.ok(&format!("도형 그림: \"{name}\""), cli.dry_run);
             Ok(())
         }
@@ -507,7 +521,7 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             emit.layer_get(node);
             Ok(())
         }
-        LayerCmd::Set { id, opacity, visible, name, x, y, scale_x, scale_y, rotation } => {
+        LayerCmd::Set { id, opacity, visible, name, x, y, scale_x, scale_y, rotation, meta } => {
             // --x/--y, --scale-x/--scale-y는 clap requires로 항상 쌍.
             let offset = x.zip(*y);
             let scale = scale_x.zip(*scale_y);
@@ -518,6 +532,7 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                 offset,
                 scale,
                 rotation: *rotation,
+                meta: meta.clone(),
             };
             apply_one(cli, path, Action::SetProps { id: NodeRef::Node(*id), patch })?;
             emit.ok(&format!("레이어 속성 변경: n{id}"), cli.dry_run);

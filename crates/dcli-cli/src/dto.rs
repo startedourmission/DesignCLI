@@ -35,6 +35,7 @@ pub fn node_json(node: &Node) -> Value {
         "offset": [node.offset.0, node.offset.1],
         "scale": [node.scale.0, node.scale.1],
         "rotation": node.rotation,
+        "meta": node.meta,
         "surface": node.surface_id().map(|s| s.0),
     })
 }

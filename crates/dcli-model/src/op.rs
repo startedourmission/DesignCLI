@@ -127,6 +127,7 @@ impl Op {
                 node.offset = props.offset;
                 node.scale = props.scale;
                 node.rotation = props.rotation;
+                node.meta = props.meta.clone();
                 Ok(Inverse::RestoreProps { id: *id, props: prev })
             }
         }
@@ -163,6 +164,7 @@ impl Inverse {
                 node.offset = props.offset;
                 node.scale = props.scale;
                 node.rotation = props.rotation;
+                node.meta = props.meta;
                 Ok(())
             }
         }

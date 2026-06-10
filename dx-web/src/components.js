@@ -287,7 +287,38 @@ class DxCanvas extends LitElement {
     this.app.renderer.resize();
     this._applyZoom();
     this.base.addEventListener("pointerdown", (e) => this._down(e));
+    this.base.addEventListener("dblclick", (e) => this._dblclick(e));
     this.addEventListener("wheel", (e) => this._wheel(e), { passive: false });
+  }
+
+  /** 텍스트 입력 오버레이 열기. 클릭 직후 캔버스의 포커스 스틸을 피해 지연 포커스. */
+  _openText(state) {
+    this._text = { born: performance.now(), ...state };
+    this.updateComplete.then(() => {
+      const ta = this.renderRoot.querySelector("textarea.txt");
+      if (!ta) return;
+      // pointerup/click 시퀀스가 끝난 뒤 포커스(즉시 blur 방지).
+      setTimeout(() => { ta.focus(); ta.select?.(); }, 0);
+    });
+  }
+
+  /** select 도구 더블클릭: 텍스트 레이어(meta.type==text)면 인라인 편집. */
+  _dblclick(e) {
+    if ((this.toolState?.tool ?? "select") !== "select") return;
+    const p = this._coords(e);
+    const hit = this.app.hitTest(p.x, p.y);
+    if (hit == null) return;
+    const layer = this.app.layers().find((l) => l.id === hit);
+    let meta = null;
+    try { meta = layer?.meta ? JSON.parse(layer.meta) : null; } catch { /* meta 없음 */ }
+    if (meta?.type !== "text") return;
+    e.preventDefault();
+    this.app.select(hit);
+    this._openText({
+      x: meta.x, y: meta.y, value: meta.text,
+      size: meta.size, rgba: meta.rgba,
+      editId: hit,
+    });
   }
   updated() { this._applyZoom(); this._drawOverlay(); }
 
@@ -358,11 +389,11 @@ class DxCanvas extends LitElement {
     if (!b) return null;
     const t = this.app.xformOf(sel);
     const d = this._drag;
-    // 드래그 중 임시값 반영(미리보기).
+    // 드래그 중 임시값 반영(미리보기). resize/rotate는 anchor 보정 offset도 함께.
     const prov = { ...sel };
     if (d?.mode === "move") prov.offset = [d.baseOffset[0] + d.dx, d.baseOffset[1] + d.dy];
-    if (d?.mode === "resize") prov.scale = d.provScale;
-    if (d?.mode === "rotate") prov.rotation = d.provRot;
+    if (d?.mode === "resize") { prov.scale = d.provScale; if (d.provOffset) prov.offset = d.provOffset; }
+    if (d?.mode === "rotate") { prov.rotation = d.provRot; if (d.provOffset) prov.offset = d.provOffset; }
     const tp = this.app.xformOf(prov);
     const z = this._zoom;
     const c4 = [
@@ -413,16 +444,24 @@ class DxCanvas extends LitElement {
       return;
     }
     if (tool === "text") {
-      this._text = { x: p.x, y: p.y, value: "" };
-      this.updateComplete.then(() => this.renderRoot.querySelector("textarea.txt")?.focus());
+      // 캔버스가 포커스를 뺏어 textarea가 즉시 blur→사라지는 것 방지.
+      e.preventDefault();
+      this._openText({ x: p.x, y: p.y, value: "" });
       return;
     }
     if (tool === "select") {
       // 핸들 우선(선택 유지한 채 리사이즈/회전).
       const hh = this._hitHandle(e);
       if (hh?.type === "rotate") {
-        const a0 = Math.atan2(p.y - hh.g.tp.center().y, p.x - hh.g.tp.center().x);
-        this._drag = { mode: "rotate", id: hh.g.sel.id, a0, rot0: hh.g.sel.rotation ?? 0, provRot: hh.g.sel.rotation ?? 0 };
+        const sel = hh.g.sel, b = hh.g.b;
+        // 피벗 = 도형(불투명 bbox) 중심 — 회전해도 도형이 제자리에 머문다.
+        const pivot = { x: b[0] + b[2] / 2, y: b[1] + b[3] / 2 };
+        const pv = hh.g.t.fwd(pivot.x, pivot.y); // 피벗의 캔버스 위치(드래그 동안 고정 목표)
+        const a0 = Math.atan2(p.y - pv.y, p.x - pv.x);
+        this._drag = {
+          mode: "rotate", id: sel.id, sel, pivot, pv, a0,
+          rot0: sel.rotation ?? 0, provRot: sel.rotation ?? 0, provOffset: null,
+        };
         return;
       }
       if (hh?.type === "resize") {
@@ -431,13 +470,17 @@ class DxCanvas extends LitElement {
         // 핸들의 src 기준점(코너/엣지 중점) — 축별로 중심에서의 거리로 스케일 계산.
         const hx = hh.h.k.includes("l") ? b[0] : hh.h.k.includes("r") ? b[0] + b[2] : b[0] + b[2] / 2;
         const hy = hh.h.k.startsWith("t") ? b[1] : hh.h.k.startsWith("b") ? b[1] + b[3] : b[1] + b[3] / 2;
+        // anchor = 반대쪽 핸들(src) — Figma처럼 반대편이 고정된 채 늘어난다.
+        const ax2 = hh.h.k.includes("l") ? b[0] + b[2] : hh.h.k.includes("r") ? b[0] : b[0] + b[2] / 2;
+        const ay2 = hh.h.k.startsWith("t") ? b[1] + b[3] : hh.h.k.startsWith("b") ? b[1] : b[1] + b[3] / 2;
         this._drag = {
           mode: "resize", id: sel.id, ax: hh.h.ax,
-          scale0: sel.scale ?? [1, 1], provScale: sel.scale ?? [1, 1],
-          hsrc: { x: hx, y: hy }, c, sel,
+          scale0: sel.scale ?? [1, 1], provScale: sel.scale ?? [1, 1], provOffset: null,
+          hsrc: { x: hx, y: hy }, asrc: { x: ax2, y: ay2 }, c, sel,
         };
         return;
       }
+      // 더블클릭 추정(텍스트 편집)은 dblclick 핸들러에서 처리.
       const hit = this.app.hitTest(p.x, p.y);
       this.app.select(hit);
       if (hit != null) {
@@ -464,13 +507,12 @@ class DxCanvas extends LitElement {
       d.dy = Math.round(p.y - d.start.y);
       this._drawOverlay();
     } else if (d.mode === "rotate") {
-      const sel = this.app.getSelected();
-      if (!sel) return;
-      const ctr = this.app.xformOf({ ...sel, rotation: d.rot0 }).center();
-      const a = Math.atan2(p.y - ctr.y, p.x - ctr.x);
+      const a = Math.atan2(p.y - d.pv.y, p.x - d.pv.x);
       let deg = d.rot0 + ((a - d.a0) * 180) / Math.PI;
       if (e.shiftKey) deg = Math.round(deg / 15) * 15; // Shift = 15° 스냅
       d.provRot = Math.round(deg * 10) / 10;
+      // 도형 중심(피벗)이 제자리에 머물도록 offset 보정.
+      d.provOffset = this.app.computeAnchoredOffset(d.sel, null, d.provRot, d.pivot);
       this._drawOverlay();
     } else if (d.mode === "resize") {
       const sel = d.sel;
@@ -492,6 +534,8 @@ class DxCanvas extends LitElement {
       }
       const clampS = (v) => (Math.abs(v) < 0.01 ? (v < 0 ? -0.01 : 0.01) : v);
       d.provScale = [clampS(Math.round(nsx * 1000) / 1000), clampS(Math.round(nsy * 1000) / 1000)];
+      // 반대쪽 핸들(anchor)이 제자리에 머물도록 offset 보정.
+      d.provOffset = this.app.computeAnchoredOffset(d.sel, d.provScale, null, d.asrc);
       this._drawOverlay();
     } else if (d.mode === "draw") {
       d.cur = p;
@@ -510,13 +554,14 @@ class DxCanvas extends LitElement {
       return;
     }
     if (d.mode === "rotate") {
-      if (d.provRot !== d.rot0) this.app.apply([B.setRotation(d.id, d.provRot)]);
+      if (d.provRot !== d.rot0)
+        this.app.apply([B.setProps(d.id, { rotation: d.provRot, offset: d.provOffset ?? undefined })]);
       else this._drawOverlay();
       return;
     }
     if (d.mode === "resize") {
       if (d.provScale[0] !== d.scale0[0] || d.provScale[1] !== d.scale0[1])
-        this.app.apply([B.setScale(d.id, d.provScale)]);
+        this.app.apply([B.setProps(d.id, { scale: d.provScale, offset: d.provOffset ?? undefined })]);
       else this._drawOverlay();
       return;
     }
@@ -548,10 +593,30 @@ class DxCanvas extends LitElement {
     const t = this._text;
     this._text = null;
     if (!t) return;
+    // 생성 직후 의도치 않은 blur(포커스 경합)는 무시 — 입력 기회 보존.
+    if (!t.value && performance.now() - (t.born ?? 0) < 250) return;
     const v = t.value.replace(/\s+$/, "");
     if (!v) return;
-    const s = this.toolState;
-    this.app.apply([B.addPaintLayer(v.slice(0, 20), B.shapes([B.text(t.x, t.y, v, s.size, s.rgba)]))]);
+    const s = this.toolState ?? {};
+    const size = t.size ?? s.size ?? 32;
+    const rgba = t.rgba ?? s.rgba ?? [13, 153, 255, 255];
+    const meta = JSON.stringify({ type: "text", x: t.x, y: t.y, text: v, size, rgba });
+    const name = v.split("\n")[0].slice(0, 20);
+    if (t.editId != null) {
+      // 기존 텍스트 편집: 같은 z-순서에 재래스터(삭제 후 그 인덱스로 추가) + meta 갱신.
+      const idx = this.app.orderBottomToTop().indexOf(t.editId);
+      this.app.apply([
+        B.deleteLayer(t.editId),
+        B.addPaintLayer(name, B.shapes([B.text(t.x, t.y, v, size, rgba)]), { index: idx >= 0 ? idx : undefined, bind: "t" }),
+        B.setProps("t", { meta }),
+      ]);
+      this.app.select(null);
+    } else {
+      this.app.apply([
+        B.addPaintLayer(name, B.shapes([B.text(t.x, t.y, v, size, rgba)]), { bind: "t" }),
+        B.setProps("t", { meta }),
+      ]);
+    }
   }
 
   // ---- 오버레이 ----
@@ -613,7 +678,7 @@ class DxCanvas extends LitElement {
       <div class="wrap">
         <canvas id="base"></canvas><canvas id="overlay"></canvas>
         ${t ? html`<textarea class="txt" spellcheck="false"
-          style="left:${t.x * z}px; top:${t.y * z}px; font-size:${(s?.size ?? 32) * z}px; color:${HEX(s?.rgba ?? [13, 153, 255, 255])}"
+          style="left:${t.x * z}px; top:${t.y * z}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}"
           .value=${t.value}
           @input=${(e) => { t.value = e.target.value; e.target.style.width = "auto"; e.target.style.width = e.target.scrollWidth + "px"; e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
           @keydown=${(e) => {
@@ -787,8 +852,19 @@ class DxProps extends LitElement {
     const b = this.app.layerBounds(l.id);
     const wPx = b ? Math.round(b[2] * Math.abs(sx)) : 0;
     const hPx = b ? Math.round(b[3] * Math.abs(sy)) : 0;
-    const setW = (v) => { if (b && b[2] > 0 && v > 0) this.app.apply([B.setScale(l.id, [(v / b[2]) * Math.sign(sx || 1), sy])]); };
-    const setH = (v) => { if (b && b[3] > 0 && v > 0) this.app.apply([B.setScale(l.id, [sx, (v / b[3]) * Math.sign(sy || 1)])]); };
+    // W/H 편집: 도형 좌상단 고정(anchor) — 위치가 같이 움직이지 않게 offset 보정.
+    const tlAnchor = b ? { x: b[0], y: b[1] } : null;
+    const ctrAnchor = b ? { x: b[0] + b[2] / 2, y: b[1] + b[3] / 2 } : null;
+    const setScaleAnchored = (ns, anchor) => {
+      const off = this.app.computeAnchoredOffset(l, ns, null, anchor);
+      this.app.apply([B.setProps(l.id, { scale: ns, offset: off })]);
+    };
+    const setW = (v) => { if (b && b[2] > 0 && v > 0) setScaleAnchored([(v / b[2]) * Math.sign(sx || 1), sy], tlAnchor); };
+    const setH = (v) => { if (b && b[3] > 0 && v > 0) setScaleAnchored([sx, (v / b[3]) * Math.sign(sy || 1)], tlAnchor); };
+    const setRotAnchored = (deg) => {
+      const off = this.app.computeAnchoredOffset(l, null, deg, ctrAnchor ?? { x: 0, y: 0 });
+      this.app.apply([B.setProps(l.id, { rotation: deg, offset: off })]);
+    };
     const commitXY = (which, v) => {
       const nx = which === "x" ? (+v | 0) : ox, ny = which === "y" ? (+v | 0) : oy;
       this.app.apply([B.setOffset(l.id, [nx, ny])]);
@@ -808,12 +884,13 @@ class DxProps extends LitElement {
           ${num("Y", oy, (v) => commitXY("y", v))}
           ${num("W", wPx, (v) => setW(+v))}
           ${num("H", hPx, (v) => setH(+v))}
-          ${num("R°", Math.round((l.rotation ?? 0) * 10) / 10, (v) => this.app.apply([B.setRotation(l.id, +v || 0)]))}
+          ${num("R°", Math.round((l.rotation ?? 0) * 10) / 10, (v) => setRotAnchored(+v || 0))}
           <div class="cell"><span>S</span>
             <input type="text" .value=${`${sx} , ${sy}`} title="scale (x , y)"
               @change=${(e) => {
                 const m = e.target.value.split(",").map((s2) => parseFloat(s2));
-                if (m.length === 2 && m.every((n) => Number.isFinite(n) && n !== 0)) this.app.apply([B.setScale(l.id, m)]);
+                if (m.length === 2 && m.every((n) => Number.isFinite(n) && n !== 0))
+                  setScaleAnchored(m, ctrAnchor ?? { x: 0, y: 0 });
               }} /></div>
         </div>
       </div>

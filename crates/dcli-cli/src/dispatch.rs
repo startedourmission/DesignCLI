@@ -78,6 +78,8 @@ pub struct PropPatch {
     pub scale: Option<(f32, f32)>,
     /// 비파괴 회전(도, 시계방향). 표면 중심 기준.
     pub rotation: Option<f32>,
+    /// 임의 메타데이터(JSON 문자열 관행, 예: 텍스트 레이어 편집 정보). 빈 문자열 = 제거.
+    pub meta: Option<String>,
 }
 
 /// 블렌드 모드(문자열 직렬화).
@@ -413,6 +415,7 @@ fn try_one(
                 offset: (node.offset.0 + 12, node.offset.1 + 12),
                 scale: node.scale,
                 rotation: node.rotation,
+                meta: node.meta.clone(),
             };
             h.stage(Op::SetProps { id: new_id, props }).map_err(op_err)?;
             if let Some(b) = bind {
@@ -450,6 +453,9 @@ fn try_one(
             }
             if let Some(rot) = patch.rotation {
                 props.rotation = rot;
+            }
+            if let Some(m) = &patch.meta {
+                props.meta = if m.is_empty() { None } else { Some(m.clone()) };
             }
             h.stage(Op::SetProps { id: nid, props }).map_err(op_err)
         }

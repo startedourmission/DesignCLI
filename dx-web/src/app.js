@@ -111,6 +111,24 @@ export class App extends EventTarget {
     };
   }
 
+  /** 스케일/회전 변경 시 anchor(src 좌표)의 캔버스 위치가 고정되도록 보정된 offset.
+   *  T(p) = R(θ)·(S⊙(p−c)) + c + off 에서:
+   *  off' = off + R(θ0)(S0⊙a) − R(θ1)(S1⊙a),  a = anchor − c.
+   *  리사이즈는 반대쪽 핸들, 회전은 도형 중심을 anchor로 주면 Figma처럼 제자리 변형. */
+  computeAnchoredOffset(l, newScale, newRotation, anchorSrc) {
+    const t = this.xformOf(l);
+    const [s0x, s0y] = l.scale ?? [1, 1];
+    const [ox, oy] = l.offset ?? [0, 0];
+    const [s1x, s1y] = newScale ?? l.scale ?? [1, 1];
+    const r1 = (((newRotation ?? l.rotation ?? 0) * Math.PI) / 180);
+    const ax = anchorSrc.x - t.c.x, ay = anchorSrc.y - t.c.y;
+    const rot = (rad, x, y) => ({ x: Math.cos(rad) * x - Math.sin(rad) * y, y: Math.sin(rad) * x + Math.cos(rad) * y });
+    const r0 = (((l.rotation ?? 0) * Math.PI) / 180);
+    const p0 = rot(r0, s0x * ax, s0y * ay);
+    const p1 = rot(r1, s1x * ax, s1y * ay);
+    return [Math.round(ox + p0.x - p1.x), Math.round(oy + p0.y - p1.y)];
+  }
+
   /** 레이어의 변환 후 AABB(캔버스 좌표) {x,y,w,h} 또는 null. 정렬·표시용. */
   displayAABB(l) {
     const b = this.layerBounds(l.id);

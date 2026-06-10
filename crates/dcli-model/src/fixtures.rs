@@ -54,7 +54,7 @@ fn add_layer(h: &mut History, name: &str, surface: Surface, blend: BlendMode, op
     let id = *h.doc.order().last().unwrap();
     h.apply(crate::Op::SetProps {
         id,
-        props: NodeProps { name: name.to_string(), visible: true, opacity, blend, offset: (0, 0), scale: (1.0, 1.0), rotation: 0.0 },
+        props: NodeProps { name: name.to_string(), visible: true, opacity, blend, offset: (0, 0), scale: (1.0, 1.0), rotation: 0.0, meta: None },
     })
     .unwrap();
 }
