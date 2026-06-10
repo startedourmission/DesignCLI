@@ -9,3 +9,6 @@ Cargo.lock.bak
 
 # node
 node_modules/
+
+# 사용자 프로젝트 데이터 — 저장소에 커밋하지 않음
+/projects/

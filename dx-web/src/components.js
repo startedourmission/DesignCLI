@@ -185,7 +185,8 @@ class DxTopbar extends LitElement {
     const t = (id, ic, title) => html`<button class=${this.tool === id ? "active" : ""}
       title=${title} @click=${() => this._pick(id)}>${icon(ic)}</button>`;
     return html`
-      <span class="logo"><span class="dot"></span>DesignCLI</span>
+      <span class="logo" style="cursor:pointer" title="대시보드로"
+        @click=${() => { location.href = "/"; }}><span class="dot"></span>DesignCLI</span>
       <div class="tools">
         ${t("select", "cursor", "선택/이동 (V)")}
         <button class="dd ${isShapeTool(this.tool) ? "active" : ""}" title="도형 (${cur.label})"
