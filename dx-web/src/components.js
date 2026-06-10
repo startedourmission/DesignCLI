@@ -80,46 +80,120 @@ class DxTopbar extends LitElement {
 }
 customElements.define("dx-topbar", DxTopbar);
 
-// ───────── 플로팅 툴바 ─────────
+// ───────── 플로팅 툴바 (Google Docs 그리기식: 선택 · 도형▾ · 선 · 이미지) ─────────
+const SHAPES = [
+  { id: "rect", icon: "■", label: "사각형", key: "R" },
+  { id: "ellipse", icon: "●", label: "타원", key: "E" },
+  { id: "stroke-rect", icon: "□", label: "테두리 사각형" },
+  { id: "stroke-ellipse", icon: "○", label: "테두리 타원" },
+  { id: "rounded-rect", icon: "▢", label: "둥근 사각형" },
+];
+const isShapeTool = (t) => SHAPES.some((s) => s.id === t);
+const needsWidth = (t) => t === "line" || t === "stroke-rect" || t === "stroke-ellipse";
+
 class DxToolbar extends LitElement {
-  static properties = { tool: { state: true }, color: { state: true }, alpha: { state: true }, width: { state: true } };
+  static properties = {
+    app: { attribute: false },
+    tool: { state: true }, color: { state: true }, alpha: { state: true },
+    width: { state: true }, radius: { state: true },
+    _shape: { state: true }, _menu: { state: true },
+  };
   static styles = [controls, css`
     :host {
-      display: flex; gap: 7px; align-items: center;
+      display: flex; gap: 7px; align-items: center; position: relative;
       background: var(--surface); border: 1px solid var(--line-2); border-radius: 12px; padding: 8px;
       box-shadow: 0 8px 28px rgba(28,27,24,0.14), 0 2px 6px rgba(28,27,24,0.08);
     }
     .tools { display: flex; gap: 5px; }
-    .tools button { width: 40px; height: 40px; padding: 0; justify-content: center; font-size: 18px; }
+    .tools button { width: 40px; height: 40px; padding: 0; justify-content: center; font-size: 17px; }
+    .tools button .dd { font-size: 9px; margin-left: 2px; opacity: 0.6; }
     .sep { width: 1px; height: 28px; background: var(--line); margin: 0 5px; }
     .swatch { width: 34px; height: 34px; border: 1px solid var(--line-2); border-radius: 7px;
               padding: 0; cursor: pointer; overflow: hidden; position: relative; }
     .swatch input { position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px); border: none; padding: 0; cursor: pointer; background: none; }
     label { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); display: flex; align-items: center; gap: 6px; }
-    input[type="range"] { width: 88px; }
-    .val { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--teal); min-width: 26px; text-align: right; }
+    input[type="range"] { width: 84px; }
+    .val { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--teal); min-width: 24px; text-align: right; }
+    .menu {
+      position: absolute; left: 54px; top: 58px; z-index: 30; background: var(--surface-2);
+      border: 1px solid var(--line-2); border-radius: 9px; padding: 5px; min-width: 168px;
+      box-shadow: 0 10px 30px rgba(28,27,24,0.2); display: flex; flex-direction: column; gap: 2px;
+    }
+    .menu button {
+      border: none; background: none; height: 34px; padding: 0 10px; justify-content: flex-start;
+      font-size: 13px; color: var(--fg); border-radius: 6px; width: 100%;
+    }
+    .menu button:hover { background: var(--accent-soft); color: var(--accent-strong); }
+    .menu button.cur { color: var(--accent-strong); font-weight: 600; }
+    .menu .ic { width: 22px; font-size: 15px; }
   `];
-  constructor() { super(); this.tool = "select"; this.color = "#3a5bd9"; this.alpha = 1; this.width = 4; }
-  _pick(t) { this.tool = t; this._emit(); }
-  _toolState() { return { tool: this.tool, rgba: RGBA(this.color, this.alpha), width: this.width }; }
+  constructor() {
+    super();
+    this.tool = "select"; this.color = "#3a5bd9"; this.alpha = 1;
+    this.width = 4; this.radius = 12;
+    this._shape = "rect"; // 도형 버튼이 기억하는 마지막 도형
+    this._menu = false;
+  }
+  connectedCallback() {
+    super.connectedCallback();
+    this._onDoc = (e) => { if (this._menu && !e.composedPath().includes(this)) this._menu = false; };
+    document.addEventListener("click", this._onDoc);
+  }
+  disconnectedCallback() { document.removeEventListener("click", this._onDoc); super.disconnectedCallback(); }
+  _pick(t) {
+    this.tool = t;
+    if (isShapeTool(t)) this._shape = t;
+    this._menu = false;
+    this._emit();
+  }
+  _toolState() { return { tool: this.tool, rgba: RGBA(this.color, this.alpha), width: this.width, radius: this.radius }; }
   _emit() { this.dispatchEvent(new CustomEvent("tool-changed", { detail: this._toolState(), bubbles: true, composed: true })); }
   firstUpdated() { this._emit(); }
+  // PNG 업로드(레이어 패널과 동일 동작 — Google Docs의 이미지 버튼).
+  _addPng(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const b64 = String(reader.result).split(",")[1] || "";
+      this.app?.apply([B.addPaintLayer(file.name.replace(/\.[^.]+$/, ""), B.pngBase64(b64))]);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }
   render() {
-    const t = (id, label, key) => html`<button class=${this.tool === id ? "active" : ""}
-      title="${id} (${key})" @click=${() => this._pick(id)}>${label}</button>`;
+    const cur = SHAPES.find((s) => s.id === this._shape) ?? SHAPES[0];
+    const shapeActive = isShapeTool(this.tool);
     const isDraw = this.tool !== "select";
     return html`
       <div class="tools">
-        ${t("select", "⤡", "V")} ${t("rect", "▭", "R")} ${t("ellipse", "◯", "E")} ${t("line", "╱", "L")}
+        <button class=${this.tool === "select" ? "active" : ""} title="선택/이동 (V)"
+          @click=${() => this._pick("select")}>⤡</button>
+        <button class=${shapeActive ? "active" : ""} title="도형 (${cur.label})"
+          @click=${() => { this._menu = !this._menu; }}>${cur.icon}<span class="dd">▾</span></button>
+        <button class=${this.tool === "line" ? "active" : ""} title="선 (L)"
+          @click=${() => this._pick("line")}>╱</button>
+        <button title="이미지(PNG) 레이어"
+          @click=${() => this.renderRoot.querySelector("#png").click()}>🖼</button>
+        <input id="png" type="file" accept="image/png" style="display:none" @change=${(e) => this._addPng(e)} />
       </div>
+      ${this._menu ? html`
+        <div class="menu">
+          ${SHAPES.map((s) => html`
+            <button class=${this.tool === s.id ? "cur" : ""} @click=${() => this._pick(s.id)}>
+              <span class="ic">${s.icon}</span>${s.label}${s.key ? html`&nbsp;<span style="opacity:0.45;font-family:var(--mono);font-size:10px">${s.key}</span>` : ""}
+            </button>`)}
+        </div>` : ""}
       ${isDraw ? html`
         <span class="sep"></span>
         <span class="swatch" style="background:${this.color}">
           <input type="color" .value=${this.color} @input=${(e) => { this.color = e.target.value; this._emit(); }} /></span>
         <label>A<input type="range" min="0" max="1" step="0.05" .value=${String(this.alpha)}
           @input=${(e) => { this.alpha = +e.target.value; this._emit(); }} /><span class="val">${Math.round(this.alpha * 100)}</span></label>
-        ${this.tool === "line" ? html`<label>W<input type="range" min="1" max="30" step="1" .value=${String(this.width)}
+        ${needsWidth(this.tool) ? html`<label>W<input type="range" min="1" max="30" step="1" .value=${String(this.width)}
           @input=${(e) => { this.width = +e.target.value; this._emit(); }} /><span class="val">${this.width}</span></label>` : ""}
+        ${this.tool === "rounded-rect" ? html`<label>R<input type="range" min="1" max="60" step="1" .value=${String(this.radius)}
+          @input=${(e) => { this.radius = +e.target.value; this._emit(); }} /><span class="val">${this.radius}</span></label>` : ""}
       ` : ""}
     `;
   }
@@ -212,18 +286,35 @@ class DxCanvas extends LitElement {
     const o = this.overlay.getContext("2d");
     o.clearRect(0, 0, this.overlay.width, this.overlay.height);
     const { start, cur } = d; const s = this.toolState; const rgba = s.rgba;
+    // 드래그 박스 공통 좌표.
+    const bx = Math.min(start.x, cur.x), by = Math.min(start.y, cur.y);
+    const bw = Math.abs(cur.x - start.x), bh = Math.abs(cur.y - start.y);
+    const ecx = (start.x + cur.x) / 2, ecy = (start.y + cur.y) / 2;
     let shape, name;
-    if (s.tool === "rect") {
-      const w = Math.abs(cur.x - start.x), h = Math.abs(cur.y - start.y);
-      if (w < 1 || h < 1) return;
-      shape = B.rect(Math.min(start.x, cur.x), Math.min(start.y, cur.y), w, h, rgba); name = "rect";
-    } else if (s.tool === "ellipse") {
-      const rx = Math.abs(cur.x - start.x) / 2, ry = Math.abs(cur.y - start.y) / 2;
-      if (rx < 0.5 || ry < 0.5) return;
-      shape = B.ellipse((start.x + cur.x) / 2, (start.y + cur.y) / 2, rx, ry, rgba); name = "ellipse";
-    } else {
-      if (Math.hypot(cur.x - start.x, cur.y - start.y) < 1) return;
-      shape = B.line(start.x, start.y, cur.x, cur.y, s.width, rgba); name = "line";
+    switch (s.tool) {
+      case "rect":
+        if (bw < 1 || bh < 1) return;
+        shape = B.rect(bx, by, bw, bh, rgba); name = "rect";
+        break;
+      case "ellipse":
+        if (bw < 1 || bh < 1) return;
+        shape = B.ellipse(ecx, ecy, bw / 2, bh / 2, rgba); name = "ellipse";
+        break;
+      case "stroke-rect":
+        if (bw < 1 || bh < 1) return;
+        shape = B.strokeRect(bx, by, bw, bh, s.width, rgba); name = "stroke-rect";
+        break;
+      case "stroke-ellipse":
+        if (bw < 1 || bh < 1) return;
+        shape = B.strokeEllipse(ecx, ecy, bw / 2, bh / 2, s.width, rgba); name = "stroke-ellipse";
+        break;
+      case "rounded-rect":
+        if (bw < 1 || bh < 1) return;
+        shape = B.roundedRect(bx, by, bw, bh, s.radius, rgba); name = "rounded-rect";
+        break;
+      default: // line
+        if (Math.hypot(cur.x - start.x, cur.y - start.y) < 1) return;
+        shape = B.line(start.x, start.y, cur.x, cur.y, s.width, rgba); name = "line";
     }
     this.app.apply([B.addPaintLayer(name, B.shapes([shape]))]);
   }
@@ -235,9 +326,31 @@ class DxCanvas extends LitElement {
     o.fillStyle = `rgba(${r},${g},${b},${(a / 255) * 0.45})`;
     o.lineWidth = 1; o.setLineDash([4, 3]);
     const { start, cur } = this._drag;
-    if (s.tool === "rect") { o.fillRect(Math.min(start.x, cur.x), Math.min(start.y, cur.y), Math.abs(cur.x - start.x), Math.abs(cur.y - start.y)); o.strokeRect(Math.min(start.x, cur.x), Math.min(start.y, cur.y), Math.abs(cur.x - start.x), Math.abs(cur.y - start.y)); }
-    else if (s.tool === "ellipse") { o.beginPath(); o.ellipse((start.x + cur.x) / 2, (start.y + cur.y) / 2, Math.abs(cur.x - start.x) / 2, Math.abs(cur.y - start.y) / 2, 0, 0, 7); o.fill(); o.stroke(); }
-    else { o.setLineDash([]); o.lineWidth = s.width; o.beginPath(); o.moveTo(start.x, start.y); o.lineTo(cur.x, cur.y); o.stroke(); }
+    const bx = Math.min(start.x, cur.x), by = Math.min(start.y, cur.y);
+    const bw = Math.abs(cur.x - start.x), bh = Math.abs(cur.y - start.y);
+    switch (s.tool) {
+      case "rect":
+        o.fillRect(bx, by, bw, bh); o.strokeRect(bx, by, bw, bh);
+        break;
+      case "ellipse":
+        o.beginPath(); o.ellipse(bx + bw / 2, by + bh / 2, bw / 2, bh / 2, 0, 0, 7); o.fill(); o.stroke();
+        break;
+      case "stroke-rect":
+        o.setLineDash([]); o.lineWidth = s.width; o.strokeRect(bx, by, bw, bh);
+        break;
+      case "stroke-ellipse":
+        o.setLineDash([]); o.lineWidth = s.width;
+        o.beginPath(); o.ellipse(bx + bw / 2, by + bh / 2, bw / 2, bh / 2, 0, 0, 7); o.stroke();
+        break;
+      case "rounded-rect":
+        o.beginPath();
+        if (o.roundRect) o.roundRect(bx, by, bw, bh, s.radius); else o.rect(bx, by, bw, bh);
+        o.fill(); o.stroke();
+        break;
+      default: // line
+        o.setLineDash([]); o.lineWidth = s.width;
+        o.beginPath(); o.moveTo(start.x, start.y); o.lineTo(cur.x, cur.y); o.stroke();
+    }
     o.setLineDash([]);
   }
   // 셀렉션 박스 — 선명한 인디고(라이트 배경에서 또렷). 흰 테두리 핸들로 대비 보강.
@@ -267,7 +380,7 @@ class DxCanvas extends LitElement {
   }
   render() {
     return html`
-      <div class="floating"><dx-toolbar @tool-changed=${(e) => { this.toolState = e.detail; }}></dx-toolbar></div>
+      <div class="floating"><dx-toolbar .app=${this.app} @tool-changed=${(e) => { this.toolState = e.detail; }}></dx-toolbar></div>
       <div class="wrap"><div class="frame">
         <canvas id="base"></canvas><canvas id="overlay"></canvas>
       </div></div>

@@ -108,6 +108,45 @@ enum DrawCmd {
         #[arg(long, default_value = "line")]
         name: String,
     },
+    /// 테두리 사각형(외곽선만): 좌상단 (x,y) 크기 (w,h), 두께 --width.
+    StrokeRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        #[arg(long, default_value_t = 2.0)]
+        width: f32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "stroke-rect")]
+        name: String,
+    },
+    /// 테두리 타원(링만): 중심 (cx,cy) 반지름 (rx,ry), 두께 --width.
+    StrokeEllipse {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        #[arg(long, default_value_t = 2.0)]
+        width: f32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "stroke-ellipse")]
+        name: String,
+    },
+    /// 모서리 둥근 사각형: 좌상단 (x,y) 크기 (w,h), 반지름 --radius.
+    RoundedRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        #[arg(long, default_value_t = 8.0)]
+        radius: f32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "rounded-rect")]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -231,6 +270,18 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
         ),
         DrawCmd::Line { x0, y0, x1, y1, width, color, name } => (
             Shape::Line { x0: *x0, y0: *y0, x1: *x1, y1: *y1, width: *width, rgba: parse_rgba(color)? },
+            name.clone(),
+        ),
+        DrawCmd::StrokeRect { x, y, w, h, width, color, name } => (
+            Shape::StrokeRect { x: *x, y: *y, w: *w, h: *h, width: *width, rgba: parse_rgba(color)? },
+            name.clone(),
+        ),
+        DrawCmd::StrokeEllipse { cx, cy, rx, ry, width, color, name } => (
+            Shape::StrokeEllipse { cx: *cx, cy: *cy, rx: *rx, ry: *ry, width: *width, rgba: parse_rgba(color)? },
+            name.clone(),
+        ),
+        DrawCmd::RoundedRect { x, y, w, h, radius, color, name } => (
+            Shape::RoundedRect { x: *x, y: *y, w: *w, h: *h, radius: *radius, rgba: parse_rgba(color)? },
             name.clone(),
         ),
     })

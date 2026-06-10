@@ -56,6 +56,12 @@ pub enum Shape {
     Ellipse { cx: f32, cy: f32, rx: f32, ry: f32, rgba: [u8; 4] },
     /// 선분: (x0,y0)→(x1,y1), 두께 width.
     Line { x0: f32, y0: f32, x1: f32, y1: f32, width: f32, rgba: [u8; 4] },
+    /// 테두리 사각형: 외곽선만, 두께 width(안쪽으로).
+    StrokeRect { x: f32, y: f32, w: f32, h: f32, width: f32, rgba: [u8; 4] },
+    /// 테두리 타원: 링만, 두께 width(안쪽으로).
+    StrokeEllipse { cx: f32, cy: f32, rx: f32, ry: f32, width: f32, rgba: [u8; 4] },
+    /// 모서리 둥근 채움 사각형: 코너 반지름 radius.
+    RoundedRect { x: f32, y: f32, w: f32, h: f32, radius: f32, rgba: [u8; 4] },
 }
 
 /// 노드 속성 부분 패치(지정한 필드만 변경).
@@ -151,26 +157,40 @@ struct Binding {
     surface: Option<SurfaceId>,
 }
 
-/// straight sRGB8 PNG 바이트를 문서 크기 표면(linear-premul)으로 디코드.
+/// PNG 바이트를 문서 크기 표면(linear-premul)으로 디코드.
+///
+/// 관대한 정책: **임의 크기·컬러타입 허용.** 팔레트/그레이/16bit는 8bit RGB(A)로
+/// 정규화(EXPAND|STRIP_16)하고, 이미지를 문서 캔버스 (0,0)에 얹는다 — 문서보다 크면
+/// 잘리고 작으면 나머지는 투명. (리샘플링 없음: 원본 픽셀 보존.)
 fn decode_png(bytes: &[u8], w: u32, h: u32) -> Result<Surface, String> {
-    let dec = png::Decoder::new(bytes);
+    let mut dec = png::Decoder::new(bytes);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = dec.read_info().map_err(|e| format!("PNG 헤더 오류: {e}"))?;
     let mut buf = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).map_err(|e| format!("PNG 디코드 오류: {e}"))?;
-    if info.width != w || info.height != h {
-        return Err(format!(
-            "이미지 크기 {}x{}가 문서 {}x{}와 불일치",
-            info.width, info.height, w, h
-        ));
-    }
-    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
-        return Err("8bit RGBA PNG만 지원".to_string());
-    }
+    let (iw, ih) = (info.width, info.height);
+    let data = &buf[..info.buffer_size()];
+    // EXPAND|STRIP_16 후엔 8bit Rgb/Rgba/Grayscale/GrayscaleAlpha만 남는다.
+    let channels = match info.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Grayscale => 1,
+        png::ColorType::Indexed => return Err("PNG 팔레트 확장 실패".to_string()),
+    };
     let mut s = Surface::new(w, h);
-    for (i, px) in buf[..info.buffer_size()].chunks_exact(4).enumerate() {
-        let x = i as u32 % w;
-        let y = i as u32 / w;
-        s.set(x, y, LinearPremul::from_srgb8_straight(px[0], px[1], px[2], px[3]));
+    let (cw, ch) = (iw.min(w), ih.min(h));
+    for y in 0..ch {
+        for x in 0..cw {
+            let i = ((y * iw + x) as usize) * channels;
+            let (r, g, b, a) = match channels {
+                4 => (data[i], data[i + 1], data[i + 2], data[i + 3]),
+                3 => (data[i], data[i + 1], data[i + 2], 255),
+                2 => (data[i], data[i], data[i], data[i + 1]),
+                _ => (data[i], data[i], data[i], 255),
+            };
+            s.set(x, y, LinearPremul::from_srgb8_straight(r, g, b, a));
+        }
     }
     Ok(s)
 }
@@ -214,6 +234,15 @@ fn draw_shape(s: &mut Surface, shape: &Shape) {
         Shape::Ellipse { cx, cy, rx, ry, rgba } => shapes::fill_ellipse(s, cx, cy, rx, ry, rgba),
         Shape::Line { x0, y0, x1, y1, width, rgba } => {
             shapes::stroke_line(s, x0, y0, x1, y1, width, rgba)
+        }
+        Shape::StrokeRect { x, y, w, h, width, rgba } => {
+            shapes::stroke_rect(s, x, y, w, h, width, rgba)
+        }
+        Shape::StrokeEllipse { cx, cy, rx, ry, width, rgba } => {
+            shapes::stroke_ellipse(s, cx, cy, rx, ry, width, rgba)
+        }
+        Shape::RoundedRect { x, y, w, h, radius, rgba } => {
+            shapes::fill_rounded_rect(s, x, y, w, h, radius, rgba)
         }
     }
 }

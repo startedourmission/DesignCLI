@@ -127,7 +127,17 @@ class LiveLink {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(actions),
     });
-    if (!r.ok) console.error("apply 전송 실패:", r.status, await r.text());
+    if (!r.ok) {
+      console.error("apply 전송 실패:", r.status, await r.text());
+      return;
+    }
+    // 엔진이 거부한 편집(예: PNG 디코드 실패)을 조용히 삼키지 않는다.
+    const j = await r.json().catch(() => null);
+    if (j?.result && j.result.ok === false) {
+      const msg = j.result.issues?.[0]?.message || "적용 실패";
+      console.error("[live] 편집 거부:", j.result.issues);
+      alert(`편집 실패: ${msg}`);
+    }
   }
   async sendUndo() {
     await fetch(`/doc/${this.docId}/undo`, { method: "POST" });

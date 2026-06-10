@@ -15,6 +15,9 @@ export const pngBase64 = (data) => ({ from: "png_base64", data });
 export const rect = (x, y, w, h, rgba) => ({ shape: "rect", x, y, w, h, rgba });
 export const ellipse = (cx, cy, rx, ry, rgba) => ({ shape: "ellipse", cx, cy, rx, ry, rgba });
 export const line = (x0, y0, x1, y1, width, rgba) => ({ shape: "line", x0, y0, x1, y1, width, rgba });
+export const strokeRect = (x, y, w, h, width, rgba) => ({ shape: "stroke_rect", x, y, w, h, width, rgba });
+export const strokeEllipse = (cx, cy, rx, ry, width, rgba) => ({ shape: "stroke_ellipse", cx, cy, rx, ry, width, rgba });
+export const roundedRect = (x, y, w, h, radius, rgba) => ({ shape: "rounded_rect", x, y, w, h, radius, rgba });
 
 export const addPaintLayer = (name, source, opts = {}) => ({
   op: "add_paint_layer",

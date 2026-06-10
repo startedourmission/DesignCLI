@@ -75,6 +75,19 @@ fn pixel_coverage_1d(p: f32, a: f32, b: f32) -> f32 {
     (hi - lo).clamp(0.0, 1.0)
 }
 
+/// 픽셀 중심 (px+0.5, py+0.5)의 타원 내부 커버리지 근사(경계 1px AA). 0~1.
+#[inline]
+fn ellipse_coverage(px: u32, py: u32, cx: f32, cy: f32, rx: f32, ry: f32) -> f32 {
+    if rx <= 0.0 || ry <= 0.0 {
+        return 0.0;
+    }
+    let sx = (px as f32 + 0.5 - cx) / rx;
+    let sy = (py as f32 + 0.5 - cy) / ry;
+    let dist = (sx * sx + sy * sy).sqrt(); // 1.0이 경계.
+    let grad = 0.5 / rx.min(ry); // 대략적 1px 폭.
+    ((1.0 - dist) / grad + 0.5).clamp(0.0, 1.0)
+}
+
 /// 채워진 타원 — 중심 (cx, cy), 반지름 (rx, ry). 가장자리 AA(거리 기반).
 pub fn fill_ellipse(s: &mut Surface, cx: f32, cy: f32, rx: f32, ry: f32, rgba: [u8; 4]) {
     if rx <= 0.0 || ry <= 0.0 {
@@ -87,13 +100,94 @@ pub fn fill_ellipse(s: &mut Surface, cx: f32, cy: f32, rx: f32, ry: f32, rgba: [
     let y1 = (((cy + ry).ceil() as i64).clamp(0, s.height() as i64)) as u32;
     for py in y0..y1 {
         for px in x0..x1 {
-            // 픽셀 중심에서 타원 경계까지의 부호화 거리로 커버리지 근사(1px 폭 AA).
-            let sx = (px as f32 + 0.5 - cx) / rx;
-            let sy = (py as f32 + 0.5 - cy) / ry;
-            let dist = (sx * sx + sy * sy).sqrt(); // 1.0이 경계.
-            // 경계 근방 1픽셀에서 부드럽게 0↔1. 픽셀의 타원 좌표 스케일을 고려.
-            let grad = 0.5 / rx.min(ry); // 대략적 1px 폭.
-            let coverage = ((1.0 - dist) / grad + 0.5).clamp(0.0, 1.0);
+            blend_px(s, px, py, color, ellipse_coverage(px, py, cx, cy, rx, ry));
+        }
+    }
+}
+
+/// 테두리 사각형 — 외곽선만, 두께 `width`(안쪽으로). 채움 없음.
+///
+/// 겹치지 않는 4개 스트립(상/하/좌/우)으로 분해해 fill_rect의 AA를 그대로 재사용한다
+/// (모서리 이중 블렌딩 없음). 두께가 절반 이상이면 채움과 동일.
+pub fn stroke_rect(s: &mut Surface, x: f32, y: f32, w: f32, h: f32, width: f32, rgba: [u8; 4]) {
+    if w <= 0.0 || h <= 0.0 || width <= 0.0 {
+        return;
+    }
+    let t = width;
+    if t * 2.0 >= w.min(h) {
+        return fill_rect(s, x, y, w, h, rgba);
+    }
+    fill_rect(s, x, y, w, t, rgba); // 상
+    fill_rect(s, x, y + h - t, w, t, rgba); // 하
+    fill_rect(s, x, y + t, t, h - 2.0 * t, rgba); // 좌
+    fill_rect(s, x + w - t, y + t, t, h - 2.0 * t, rgba); // 우
+}
+
+/// 테두리 타원 — 링(외곽 타원 − 안쪽 타원), 두께 `width`(안쪽으로).
+///
+/// 커버리지를 한 패스에서 (outer − inner)로 계산해 이중 블렌딩을 피한다.
+pub fn stroke_ellipse(
+    s: &mut Surface,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    width: f32,
+    rgba: [u8; 4],
+) {
+    if rx <= 0.0 || ry <= 0.0 || width <= 0.0 {
+        return;
+    }
+    let (irx, iry) = (rx - width, ry - width);
+    if irx <= 0.0 || iry <= 0.0 {
+        return fill_ellipse(s, cx, cy, rx, ry, rgba);
+    }
+    let color = to_linear(rgba);
+    let x0 = ((cx - rx).floor().max(0.0)) as u32;
+    let y0 = ((cy - ry).floor().max(0.0)) as u32;
+    let x1 = (((cx + rx).ceil() as i64).clamp(0, s.width() as i64)) as u32;
+    let y1 = (((cy + ry).ceil() as i64).clamp(0, s.height() as i64)) as u32;
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let outer = ellipse_coverage(px, py, cx, cy, rx, ry);
+            let inner = ellipse_coverage(px, py, cx, cy, irx, iry);
+            blend_px(s, px, py, color, (outer - inner).clamp(0.0, 1.0));
+        }
+    }
+}
+
+/// 모서리 둥근 채움 사각형 — 코너 반지름 `radius`. 표준 rounded-box SDF로 1px AA.
+pub fn fill_rounded_rect(
+    s: &mut Surface,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    rgba: [u8; 4],
+) {
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let r = radius.clamp(0.0, w.min(h) * 0.5);
+    if r <= 0.0 {
+        return fill_rect(s, x, y, w, h, rgba);
+    }
+    let color = to_linear(rgba);
+    let (ccx, ccy) = (x + w * 0.5, y + h * 0.5); // 중심
+    let (hx, hy) = (w * 0.5 - r, h * 0.5 - r); // 코너 중심까지 반치수
+    let px0 = x.floor().max(0.0) as u32;
+    let py0 = y.floor().max(0.0) as u32;
+    let px1 = (((x + w).ceil() as i64).clamp(0, s.width() as i64)) as u32;
+    let py1 = (((y + h).ceil() as i64).clamp(0, s.height() as i64)) as u32;
+    for py in py0..py1 {
+        for px in px0..px1 {
+            // rounded-box 부호화 거리: 음수=내부. 경계 1px AA.
+            let qx = (px as f32 + 0.5 - ccx).abs() - hx;
+            let qy = (py as f32 + 0.5 - ccy).abs() - hy;
+            let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+            let d = outside + qx.max(qy).min(0.0) - r;
+            let coverage = (0.5 - d).clamp(0.0, 1.0);
             blend_px(s, px, py, color, coverage);
         }
     }
@@ -177,6 +271,44 @@ mod tests {
         stroke_line(&mut s, 2.0, 10.0, 18.0, 10.0, 3.0, [0, 0, 0, 255]);
         assert!(s.get(10, 10).to_srgb8_straight()[3] > 200, "선 위 픽셀 불투명");
         assert_eq!(s.get(10, 2).to_srgb8_straight()[3], 0, "선에서 먼 픽셀 투명");
+    }
+
+    #[test]
+    fn stroke_rect_hollow_center() {
+        // 테두리 사각형: 외곽선 위는 불투명, 내부는 투명.
+        let mut s = Surface::new(20, 20);
+        stroke_rect(&mut s, 2.0, 2.0, 16.0, 16.0, 2.0, [255, 0, 0, 255]);
+        assert_eq!(s.get(3, 3).to_srgb8_straight()[3], 255, "테두리 위 불투명");
+        assert_eq!(s.get(10, 10).to_srgb8_straight()[3], 0, "내부 투명");
+        assert_eq!(s.get(0, 0).to_srgb8_straight()[3], 0, "바깥 투명");
+    }
+
+    #[test]
+    fn stroke_rect_thick_degenerates_to_fill() {
+        // 두께가 절반 이상이면 채움과 동일.
+        let mut s = Surface::new(10, 10);
+        stroke_rect(&mut s, 2.0, 2.0, 6.0, 6.0, 4.0, [0, 255, 0, 255]);
+        assert_eq!(s.get(5, 5).to_srgb8_straight()[3], 255, "중심까지 채워짐");
+    }
+
+    #[test]
+    fn stroke_ellipse_ring_hollow_center() {
+        let mut s = Surface::new(30, 30);
+        stroke_ellipse(&mut s, 15.0, 15.0, 12.0, 12.0, 3.0, [0, 0, 255, 255]);
+        // 링 위(중심에서 ~10.5px 거리, 경계 12와 내부 9 사이).
+        assert!(s.get(15 + 10, 15).to_srgb8_straight()[3] > 200, "링 위 불투명");
+        assert_eq!(s.get(15, 15).to_srgb8_straight()[3], 0, "중심 투명");
+        assert_eq!(s.get(0, 0).to_srgb8_straight()[3], 0, "바깥 투명");
+    }
+
+    #[test]
+    fn rounded_rect_corners_clipped() {
+        // 둥근 사각형: 모서리 픽셀은 잘려(투명) 중심·변 중앙은 불투명.
+        let mut s = Surface::new(20, 20);
+        fill_rounded_rect(&mut s, 2.0, 2.0, 16.0, 16.0, 6.0, [255, 0, 255, 255]);
+        assert_eq!(s.get(10, 10).to_srgb8_straight()[3], 255, "중심 불투명");
+        assert!(s.get(10, 2).to_srgb8_straight()[3] > 200, "변 중앙 불투명");
+        assert_eq!(s.get(2, 2).to_srgb8_straight()[3], 0, "코너 잘림(투명)");
     }
 
     #[test]
