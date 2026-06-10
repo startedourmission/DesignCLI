@@ -134,6 +134,18 @@ enum DrawCmd {
         #[arg(long, default_value = "stroke-ellipse")]
         name: String,
     },
+    /// 텍스트(한글/라틴, 번들 폰트): 좌상단 (x,y), 내용 TEXT. '\n' 줄바꿈.
+    Text {
+        x: f32,
+        y: f32,
+        text: String,
+        #[arg(long, default_value_t = 24.0)]
+        size: f32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "text")]
+        name: String,
+    },
     /// 모서리 둥근 사각형: 좌상단 (x,y) 크기 (w,h), 반지름 --radius.
     RoundedRect {
         x: f32,
@@ -195,16 +207,27 @@ enum LayerCmd {
         #[arg(long)]
         name: Option<String>,
         /// 캔버스 X 평행이동(절대 offset, 픽셀). --y와 함께.
-        #[arg(long, requires = "y")]
+        #[arg(long, requires = "y", allow_negative_numbers = true)]
         x: Option<i32>,
         /// 캔버스 Y 평행이동(절대 offset, 픽셀). --x와 함께.
-        #[arg(long, requires = "x")]
+        #[arg(long, requires = "x", allow_negative_numbers = true)]
         y: Option<i32>,
+        /// 비파괴 X 스케일(표면 중심 기준, 음수=뒤집기). --scale-y와 함께.
+        #[arg(long, requires = "scale_y", allow_negative_numbers = true)]
+        scale_x: Option<f32>,
+        /// 비파괴 Y 스케일. --scale-x와 함께.
+        #[arg(long, requires = "scale_x", allow_negative_numbers = true)]
+        scale_y: Option<f32>,
+        /// 비파괴 회전(도, 시계방향, 표면 중심 기준).
+        #[arg(long, allow_negative_numbers = true)]
+        rotation: Option<f32>,
     },
     /// 레이어를 새 순서 인덱스로 이동.
     Move { id: u64, to: usize },
     /// 레이어 삭제.
     Delete { id: u64 },
+    /// 레이어 복제(표면+속성 복사, offset +12px).
+    Duplicate { id: u64 },
 }
 
 #[derive(Subcommand)]
@@ -283,6 +306,11 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
         DrawCmd::RoundedRect { x, y, w, h, radius, color, name } => (
             Shape::RoundedRect { x: *x, y: *y, w: *w, h: *h, radius: *radius, rgba: parse_rgba(color)? },
             name.clone(),
+        ),
+        DrawCmd::Text { x, y, text, size, color, name } => (
+            Shape::Text { x: *x, y: *y, text: text.clone(), size: *size, rgba: parse_rgba(color)? },
+            // 기본 이름이면 텍스트 내용을 레이어 이름으로(패널 가독성).
+            if name == "text" { text.chars().take(20).collect() } else { name.clone() },
         ),
     })
 }
@@ -479,14 +507,17 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             emit.layer_get(node);
             Ok(())
         }
-        LayerCmd::Set { id, opacity, visible, name, x, y } => {
-            // --x/--y는 clap requires로 항상 쌍 → 둘 다 Some일 때만 offset.
+        LayerCmd::Set { id, opacity, visible, name, x, y, scale_x, scale_y, rotation } => {
+            // --x/--y, --scale-x/--scale-y는 clap requires로 항상 쌍.
             let offset = x.zip(*y);
+            let scale = scale_x.zip(*scale_y);
             let patch = PropPatch {
                 name: name.clone(),
                 visible: *visible,
                 opacity: *opacity,
                 offset,
+                scale,
+                rotation: *rotation,
             };
             apply_one(cli, path, Action::SetProps { id: NodeRef::Node(*id), patch })?;
             emit.ok(&format!("레이어 속성 변경: n{id}"), cli.dry_run);
@@ -500,6 +531,22 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
         LayerCmd::Delete { id } => {
             apply_one(cli, path, Action::DeleteLayer { id: NodeRef::Node(*id) })?;
             emit.ok(&format!("레이어 삭제: n{id}"), cli.dry_run);
+            Ok(())
+        }
+        LayerCmd::Duplicate { id } => {
+            let res = apply_one(
+                cli,
+                path,
+                Action::DuplicateLayer { id: NodeRef::Node(*id), bind: Some("copy".into()) },
+            )?;
+            let new_id = res.bindings.get("copy").map(|b| b.node);
+            emit.ok(
+                &match new_id {
+                    Some(n) => format!("레이어 복제: n{id} → n{n}"),
+                    None => format!("레이어 복제: n{id}"),
+                },
+                cli.dry_run,
+            );
             Ok(())
         }
     }

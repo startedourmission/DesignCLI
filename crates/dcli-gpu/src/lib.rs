@@ -24,6 +24,12 @@ struct LayerMeta {
     /// 캔버스 평행이동 (dx, dy) 정수 픽셀. CPU composite_layer와 동일 매핑.
     offset_x: i32,
     offset_y: i32,
+    /// 비파괴 스케일. (1,1)+rot_sin 0+rot_cos 1 = identity → 정수 시프트 fast path.
+    scale_x: f32,
+    scale_y: f32,
+    /// 회전 sin/cos을 CPU에서 선계산해 전달(CPU·GPU 동일 입력 → parity).
+    rot_sin: f32,
+    rot_cos: f32,
 }
 
 #[repr(C)]
@@ -94,13 +100,13 @@ impl GpuContext {
     pub fn composite(&self, doc: &Document) -> anyhow::Result<Surface> {
         // bottom-to-top 가시 페인트 노드를 (blend, opacity, surface) 쌍으로 수집.
         // 표면이 스토어에 없거나 픽셀 없는 노드(그룹)는 제외(CPU 정본과 동일 규칙).
-        let visible: Vec<(BlendMode, f32, (i32, i32), &Surface)> = doc
+        let visible: Vec<(BlendMode, f32, (i32, i32), (f32, f32), f32, &Surface)> = doc
             .iter_bottom_to_top()
             .filter(|n| n.visible && n.opacity > 0.0)
             .filter_map(|n| {
                 let sid = n.surface_id()?;
                 let s = doc.pixels().get(sid)?;
-                Some((n.blend, n.opacity, n.offset, s))
+                Some((n.blend, n.opacity, n.offset, n.scale, n.rotation, s))
             })
             .collect();
         anyhow::ensure!(
@@ -130,7 +136,7 @@ impl GpuContext {
             view_formats: &[],
         });
 
-        for (i, (_, _, _, surface)) in visible.iter().enumerate() {
+        for (i, (_, _, _, _, _, surface)) in visible.iter().enumerate() {
             let data = surface_to_f32(surface);
             queue.write_texture(
                 wgpu::ImageCopyTexture {
@@ -154,13 +160,28 @@ impl GpuContext {
         });
 
         // --- uniforms ---
-        let mut layers = [LayerMeta { blend: 0, opacity: 1.0, offset_x: 0, offset_y: 0 }; MAX_LAYERS];
-        for (i, (blend, opacity, offset, _)) in visible.iter().enumerate() {
+        let identity = LayerMeta {
+            blend: 0,
+            opacity: 1.0,
+            offset_x: 0,
+            offset_y: 0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rot_sin: 0.0,
+            rot_cos: 1.0,
+        };
+        let mut layers = [identity; MAX_LAYERS];
+        for (i, (blend, opacity, offset, scale, rotation, _)) in visible.iter().enumerate() {
+            let (rot_sin, rot_cos) = rotation.to_radians().sin_cos();
             layers[i] = LayerMeta {
                 blend: blend_code(*blend),
                 opacity: *opacity,
                 offset_x: offset.0,
                 offset_y: offset.1,
+                scale_x: scale.0,
+                scale_y: scale.1,
+                rot_sin,
+                rot_cos,
             };
         }
         let uniforms = Uniforms {

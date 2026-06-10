@@ -97,8 +97,8 @@ impl Editor {
     }
 
     /// 캔버스 좌표 (x,y)에서 hit되는 최상위(top) 가시 레이어 node id를 반환한다.
-    /// 레이어 offset을 반영해 표면 픽셀의 alpha>0이면 hit. 없으면 -1(선택 해제).
-    /// 선택툴이 사용(클릭→레이어 선택). id는 JS 친화 i32(node id는 작은 값 가정).
+    /// 트랜스폼(offset/scale/rotation)을 역적용해 표면 픽셀 alpha>0이면 hit.
+    /// 없으면 -1(선택 해제). id는 JS 친화 i32(node id는 작은 값 가정).
     pub fn hit_test(&self, x: i32, y: i32) -> i32 {
         use dcli_model::NodeKind;
         // top-to-bottom: order는 bottom-to-top이라 역순.
@@ -109,12 +109,27 @@ impl Editor {
             }
             let NodeKind::Paint { surface } = node.kind else { continue };
             let Some(surf) = self.hist.doc.pixels().get(surface) else { continue };
-            let (dx, dy) = node.offset;
-            let (sx, sy) = (x - dx, y - dy);
-            if sx < 0 || sy < 0 || sx >= surf.width() as i32 || sy >= surf.height() as i32 {
+            let (swi, shi) = (surf.width() as i32, surf.height() as i32);
+            let (psx, psy) = if node.is_identity_transform() {
+                ((x - node.offset.0), (y - node.offset.1))
+            } else {
+                // 역변환(raster composite_layer_transformed와 동일 수학) 후 floor.
+                let (scx, scy) = node.scale;
+                if scx.abs() < 1e-4 || scy.abs() < 1e-4 {
+                    continue;
+                }
+                let (sin, cos) = node.rotation.to_radians().sin_cos();
+                let (cx, cy) = (swi as f32 * 0.5, shi as f32 * 0.5);
+                let qx = x as f32 + 0.5 - node.offset.0 as f32 - cx;
+                let qy = y as f32 + 0.5 - node.offset.1 as f32 - cy;
+                let rx = cos * qx + sin * qy;
+                let ry = -sin * qx + cos * qy;
+                ((rx / scx + cx).floor() as i32, (ry / scy + cy).floor() as i32)
+            };
+            if psx < 0 || psy < 0 || psx >= swi || psy >= shi {
                 continue;
             }
-            let px = surf.pixels()[(sy * surf.width() as i32 + sx) as usize];
+            let px = surf.pixels()[(psy * swi + psx) as usize];
             if px.a > 0.0 {
                 return id.0 as i32;
             }
@@ -122,8 +137,9 @@ impl Editor {
         -1
     }
 
-    /// 레이어의 불투명 픽셀 타이트 바운드(offset 반영, 캔버스 좌표) [x,y,w,h] JSON.
-    /// 셀렉션 박스가 도형에 딱 맞게 그려지도록. 빈 레이어면 null. id는 JS 친화 u32.
+    /// 레이어의 불투명 픽셀 타이트 바운드 — **표면(src) 좌표, 트랜스폼 미적용** [x,y,w,h].
+    /// 웹이 dto의 offset/scale/rotation으로 4코너를 변환해 회전 셀렉션 박스를 그린다.
+    /// 빈 레이어면 null. id는 JS 친화 u32.
     pub fn layer_bounds(&self, id: u32) -> String {
         use dcli_model::{NodeId, NodeKind};
         let Some(node) = self.hist.doc.get(NodeId(id as u64)) else { return "null".into() };
@@ -145,14 +161,7 @@ impl Editor {
         if minx > maxx {
             return "null".into(); // 완전 투명.
         }
-        let (dx, dy) = node.offset;
-        format!(
-            "[{},{},{},{}]",
-            minx + dx,
-            miny + dy,
-            maxx - minx + 1,
-            maxy - miny + 1
-        )
+        format!("[{},{},{},{}]", minx, miny, maxx - minx + 1, maxy - miny + 1)
     }
 
     pub fn width(&self) -> u32 {

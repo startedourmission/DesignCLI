@@ -825,6 +825,7 @@ dependencies = [
 name = "dcli-raster"
 version = "0.0.0"
 dependencies = [
+ "ab_glyph",
  "dcli-color",
  "dcli-model",
  "dcli-tile",

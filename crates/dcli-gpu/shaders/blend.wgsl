@@ -12,6 +12,10 @@ struct LayerMeta {
     opacity: f32,
     offset_x: i32,  // 캔버스 평행이동 (dx,dy) 정수 픽셀 (CPU composite_layer와 동일)
     offset_y: i32,
+    scale_x: f32,   // 비파괴 스케일. (1,1)+sin0+cos1 = identity → 정수 시프트 경로
+    scale_y: f32,
+    rot_sin: f32,   // 회전 sin/cos (CPU 선계산 — 동일 입력으로 parity 유지)
+    rot_cos: f32,
 };
 
 struct Uniforms {
@@ -120,6 +124,14 @@ fn blend_in_linear(dst: vec4<f32>, src: vec4<f32>, blend: u32) -> vec4<f32> {
     return vec4<f32>(rgb, out_a);
 }
 
+// 경계 밖 = 투명 탭(CPU tap()과 동일).
+fn tap(x: i32, y: i32, layer: i32, dw: i32, dh: i32) -> vec4<f32> {
+    if (x < 0 || y < 0 || x >= dw || y >= dh) {
+        return vec4<f32>(0.0);
+    }
+    return textureLoad(layer_tex, vec2<i32>(x, y), layer, 0);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
@@ -129,14 +141,39 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dh = i32(u.doc_h);
     for (var i: u32 = 0u; i < u.layer_count; i = i + 1u) {
         let lm = u.layers[i];
-        // 소스 텍셀 = dst - offset (CPU: src[(y-dy), (x-dx)]). 경계 밖이면 투명.
-        let sx = dst_px.x - lm.offset_x;
-        let sy = dst_px.y - lm.offset_y;
-        if (sx < 0 || sy < 0 || sx >= dw || sy >= dh) {
-            continue;
+        var src: vec4<f32>;
+        if (lm.scale_x == 1.0 && lm.scale_y == 1.0 && lm.rot_sin == 0.0 && lm.rot_cos == 1.0) {
+            // identity fast path: 정수 시프트(CPU composite_layer와 비트 동형).
+            let sx = dst_px.x - lm.offset_x;
+            let sy = dst_px.y - lm.offset_y;
+            if (sx < 0 || sy < 0 || sx >= dw || sy >= dh) {
+                continue;
+            }
+            src = textureLoad(layer_tex, vec2<i32>(sx, sy), i32(i), 0);
+        } else {
+            // 트랜스폼 경로: 역변환 + bilinear (CPU composite_layer_transformed와 동일 수학).
+            //   q = p_dst − off − c;  r = R(−θ)q;  p_src = r/S + c.
+            // 퇴화 스케일 가드 — CPU와 동일하게 스킵(0 나눗셈 → NaN/발산 방지).
+            if (abs(lm.scale_x) < 1e-4 || abs(lm.scale_y) < 1e-4) {
+                continue;
+            }
+            let c = vec2<f32>(f32(dw) * 0.5, f32(dh) * 0.5);
+            let q = vec2<f32>(f32(dst_px.x) + 0.5 - f32(lm.offset_x), f32(dst_px.y) + 0.5 - f32(lm.offset_y)) - c;
+            let r = vec2<f32>(lm.rot_cos * q.x + lm.rot_sin * q.y, -lm.rot_sin * q.x + lm.rot_cos * q.y);
+            let p = r / vec2<f32>(lm.scale_x, lm.scale_y) + c;
+            let f = p - vec2<f32>(0.5, 0.5);
+            let ix = i32(floor(f.x));
+            let iy = i32(floor(f.y));
+            let t = f - vec2<f32>(f32(ix), f32(iy));
+            let s00 = tap(ix, iy, i32(i), dw, dh);
+            let s10 = tap(ix + 1, iy, i32(i), dw, dh);
+            let s01 = tap(ix, iy + 1, i32(i), dw, dh);
+            let s11 = tap(ix + 1, iy + 1, i32(i), dw, dh);
+            src = mix(mix(s00, s10, t.x), mix(s01, s11, t.x), t.y);
+            if (src.a <= 0.0) {
+                continue;
+            }
         }
-        // 정수 좌표 직접 로드(필터링 없음 → CPU 인덱싱과 비트 동형).
-        var src = textureLoad(layer_tex, vec2<i32>(sx, sy), i32(i), 0);
         // 레이어 opacity 적용 (premul 불변식 유지).
         src = src * lm.opacity;
         if (u.blend_space == 1u) {

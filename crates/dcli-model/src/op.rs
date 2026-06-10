@@ -125,6 +125,8 @@ impl Op {
                 node.opacity = props.opacity.clamp(0.0, 1.0);
                 node.blend = props.blend;
                 node.offset = props.offset;
+                node.scale = props.scale;
+                node.rotation = props.rotation;
                 Ok(Inverse::RestoreProps { id: *id, props: prev })
             }
         }
@@ -159,6 +161,8 @@ impl Inverse {
                 node.opacity = props.opacity;
                 node.blend = props.blend;
                 node.offset = props.offset;
+                node.scale = props.scale;
+                node.rotation = props.rotation;
                 Ok(())
             }
         }

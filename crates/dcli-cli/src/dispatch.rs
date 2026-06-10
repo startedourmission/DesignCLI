@@ -62,6 +62,8 @@ pub enum Shape {
     StrokeEllipse { cx: f32, cy: f32, rx: f32, ry: f32, width: f32, rgba: [u8; 4] },
     /// 모서리 둥근 채움 사각형: 코너 반지름 radius.
     RoundedRect { x: f32, y: f32, w: f32, h: f32, radius: f32, rgba: [u8; 4] },
+    /// 텍스트(번들 폰트 Pretendard — 한글/라틴). (x,y)=첫 줄 좌상단, size=px, '\n' 줄바꿈.
+    Text { x: f32, y: f32, text: String, size: f32, rgba: [u8; 4] },
 }
 
 /// 노드 속성 부분 패치(지정한 필드만 변경).
@@ -72,6 +74,10 @@ pub struct PropPatch {
     pub opacity: Option<f32>,
     /// 캔버스 평행이동 (dx, dy) 정수 픽셀(Move 툴). 절대 offset으로 설정.
     pub offset: Option<(i32, i32)>,
+    /// 비파괴 스케일 (sx, sy). 표면 중심 기준, 음수 = 뒤집기.
+    pub scale: Option<(f32, f32)>,
+    /// 비파괴 회전(도, 시계방향). 표면 중심 기준.
+    pub rotation: Option<f32>,
 }
 
 /// 블렌드 모드(문자열 직렬화).
@@ -110,6 +116,12 @@ pub enum Action {
     },
     /// 레이어 삭제.
     DeleteLayer { id: NodeRef },
+    /// 레이어 복제: 표면 픽셀 + 속성 전체 복사, offset (+12,+12) 이동. bind로 새 노드 참조.
+    DuplicateLayer {
+        id: NodeRef,
+        #[serde(default)]
+        bind: Option<String>,
+    },
     /// 레이어를 새 순서 인덱스로 이동(bottom-to-top).
     MoveLayer { id: NodeRef, to: usize },
     /// 노드 속성 부분 변경.
@@ -226,23 +238,26 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<Surface, String> 
     }
 }
 
-/// 한 도형을 표면에 그린다(dcli-raster::shapes 위임).
+/// 한 도형을 표면에 그린다(dcli-raster::shapes/text 위임).
 fn draw_shape(s: &mut Surface, shape: &Shape) {
     use dcli_raster::shapes;
-    match *shape {
-        Shape::Rect { x, y, w, h, rgba } => shapes::fill_rect(s, x, y, w, h, rgba),
-        Shape::Ellipse { cx, cy, rx, ry, rgba } => shapes::fill_ellipse(s, cx, cy, rx, ry, rgba),
+    match shape {
+        Shape::Rect { x, y, w, h, rgba } => shapes::fill_rect(s, *x, *y, *w, *h, *rgba),
+        Shape::Ellipse { cx, cy, rx, ry, rgba } => shapes::fill_ellipse(s, *cx, *cy, *rx, *ry, *rgba),
         Shape::Line { x0, y0, x1, y1, width, rgba } => {
-            shapes::stroke_line(s, x0, y0, x1, y1, width, rgba)
+            shapes::stroke_line(s, *x0, *y0, *x1, *y1, *width, *rgba)
         }
         Shape::StrokeRect { x, y, w, h, width, rgba } => {
-            shapes::stroke_rect(s, x, y, w, h, width, rgba)
+            shapes::stroke_rect(s, *x, *y, *w, *h, *width, *rgba)
         }
         Shape::StrokeEllipse { cx, cy, rx, ry, width, rgba } => {
-            shapes::stroke_ellipse(s, cx, cy, rx, ry, width, rgba)
+            shapes::stroke_ellipse(s, *cx, *cy, *rx, *ry, *width, *rgba)
         }
         Shape::RoundedRect { x, y, w, h, radius, rgba } => {
-            shapes::fill_rounded_rect(s, x, y, w, h, radius, rgba)
+            shapes::fill_rounded_rect(s, *x, *y, *w, *h, *radius, *rgba)
+        }
+        Shape::Text { x, y, text, size, rgba } => {
+            dcli_raster::text::draw_text(s, *x, *y, text, *size, *rgba);
         }
     }
 }
@@ -262,6 +277,7 @@ fn action_kind(a: &Action) -> &'static str {
     match a {
         Action::AddPaintLayer { .. } => "add_paint_layer",
         Action::DeleteLayer { .. } => "delete_layer",
+        Action::DuplicateLayer { .. } => "duplicate_layer",
         Action::MoveLayer { .. } => "move_layer",
         Action::SetProps { .. } => "set_props",
         Action::SetBlend { .. } => "set_blend",
@@ -360,6 +376,53 @@ fn try_one(
             let nid = resolve_ref(id, binder)?;
             h.stage(Op::DeleteLayer { id: nid }).map_err(op_err)
         }
+        Action::DuplicateLayer { id, bind } => {
+            use dcli_model::NodeKind;
+            let nid = resolve_ref(id, binder)?;
+            let node = h
+                .doc
+                .get(nid)
+                .ok_or_else(|| ("node_not_found".to_string(), format!("노드 n{} 없음", nid.0)))?
+                .clone();
+            let NodeKind::Paint { surface } = node.kind else {
+                return Err(("not_paint".to_string(), format!("n{}는 페인트 레이어가 아님", nid.0)));
+            };
+            let surf = h
+                .doc
+                .pixels()
+                .get(surface)
+                .ok_or_else(|| ("surface_not_found".to_string(), format!("표면 {surface} 없음")))?
+                .clone();
+            let sid = h.doc.add_surface(surf);
+            owned.push(sid); // 롤백 시 회수.
+            let copy_name = format!("{} copy", node.name);
+            h.stage(Op::AddPaintLayer {
+                name: copy_name.clone(),
+                surface: sid,
+                index: None,
+                forced_id: None,
+            })
+            .map_err(op_err)?;
+            let new_id = *h.doc.order().last().expect("방금 추가됨");
+            // 원본 속성 전체 복사 + offset 살짝 이동(Figma의 duplicate 관행).
+            let props = NodeProps {
+                name: copy_name,
+                visible: node.visible,
+                opacity: node.opacity,
+                blend: node.blend,
+                offset: (node.offset.0 + 12, node.offset.1 + 12),
+                scale: node.scale,
+                rotation: node.rotation,
+            };
+            h.stage(Op::SetProps { id: new_id, props }).map_err(op_err)?;
+            if let Some(b) = bind {
+                if binder.contains_key(b) {
+                    return Err(("duplicate_bind".to_string(), format!("bind 이름 '{b}' 중복")));
+                }
+                binder.insert(b.clone(), Binding { node: new_id, surface: Some(sid) });
+            }
+            Ok(())
+        }
         Action::MoveLayer { id, to } => {
             let nid = resolve_ref(id, binder)?;
             h.stage(Op::MoveLayer { id: nid, to: *to }).map_err(op_err)
@@ -381,6 +444,12 @@ fn try_one(
             }
             if let Some(off) = patch.offset {
                 props.offset = off;
+            }
+            if let Some(sc) = patch.scale {
+                props.scale = sc;
+            }
+            if let Some(rot) = patch.rotation {
+                props.rotation = rot;
             }
             h.stage(Op::SetProps { id: nid, props }).map_err(op_err)
         }

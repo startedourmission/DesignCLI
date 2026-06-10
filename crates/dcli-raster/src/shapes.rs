@@ -33,7 +33,7 @@ fn over_coverage(dst: LinearPremul, color: LinearPremul, coverage: f32) -> Linea
 }
 
 #[inline]
-fn blend_px(s: &mut Surface, x: u32, y: u32, color: LinearPremul, coverage: f32) {
+pub(crate) fn blend_px(s: &mut Surface, x: u32, y: u32, color: LinearPremul, coverage: f32) {
     if x < s.width() && y < s.height() {
         let cur = s.get(x, y);
         s.set(x, y, over_coverage(cur, color, coverage));
@@ -41,7 +41,7 @@ fn blend_px(s: &mut Surface, x: u32, y: u32, color: LinearPremul, coverage: f32)
 }
 
 /// straight sRGB8 RGBA → linear-premul.
-fn to_linear(rgba: [u8; 4]) -> LinearPremul {
+pub(crate) fn to_linear(rgba: [u8; 4]) -> LinearPremul {
     LinearPremul::from_srgb8_straight(rgba[0], rgba[1], rgba[2], rgba[3])
 }
 

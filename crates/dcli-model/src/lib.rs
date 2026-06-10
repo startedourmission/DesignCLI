@@ -67,10 +67,20 @@ pub struct Node {
     pub opacity: f32,
     pub blend: BlendMode,
     /// 캔버스 평행이동 (dx, dy) 정수 픽셀. 표면은 그대로 두고 합성 시 이만큼 시프트한다
-    /// (Move 툴). 회전/스케일은 미지원(리샘플링 필요 → 후속). 구버전 문서 호환 위해 default.
+    /// (Move 툴). 구버전 문서 호환 위해 default.
     #[serde(default)]
     pub offset: (i32, i32),
+    /// 비파괴 스케일 (sx, sy). 표면 중심 기준, 합성 시 bilinear 리샘플. 음수 = 뒤집기.
+    #[serde(default = "default_scale")]
+    pub scale: (f32, f32),
+    /// 비파괴 회전(도, 시계방향). 표면 중심 기준.
+    #[serde(default)]
+    pub rotation: f32,
     pub kind: NodeKind,
+}
+
+fn default_scale() -> (f32, f32) {
+    (1.0, 1.0)
 }
 
 impl Node {
@@ -82,8 +92,15 @@ impl Node {
             opacity: 1.0,
             blend: BlendMode::Normal,
             offset: (0, 0),
+            scale: (1.0, 1.0),
+            rotation: 0.0,
             kind: NodeKind::Paint { surface },
         }
+    }
+
+    /// 트랜스폼이 identity(스케일 1, 회전 0)인지 — 합성기가 fast path 분기에 사용.
+    pub fn is_identity_transform(&self) -> bool {
+        self.scale == (1.0, 1.0) && self.rotation == 0.0
     }
 
     /// 이 노드가 참조하는 SurfaceId(있으면).
@@ -105,6 +122,12 @@ pub struct NodeProps {
     /// 캔버스 평행이동 (dx, dy). SetProps/RestoreProps가 이걸 운반해 이동·undo가 자동 대칭.
     #[serde(default)]
     pub offset: (i32, i32),
+    /// 비파괴 스케일 (sx, sy).
+    #[serde(default = "default_scale")]
+    pub scale: (f32, f32),
+    /// 비파괴 회전(도).
+    #[serde(default)]
+    pub rotation: f32,
 }
 
 impl NodeProps {
@@ -115,6 +138,8 @@ impl NodeProps {
             opacity: node.opacity,
             blend: node.blend,
             offset: node.offset,
+            scale: node.scale,
+            rotation: node.rotation,
         }
     }
 }

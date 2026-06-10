@@ -9,3 +9,4 @@ rust-version.workspace = true
 dcli-color.workspace = true
 dcli-tile.workspace = true
 dcli-model.workspace = true
+ab_glyph.workspace = true

@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod shapes;
+pub mod text;
 
 use dcli_color::{srgb_eotf, srgb_oetf, BlendSpace, LinearPremul};
 use dcli_model::{BlendMode, Document};
@@ -39,15 +40,30 @@ pub fn composite(doc: &Document) -> Surface {
             // 표면이 스토어에 없으면(예: JSON만 로드) 건너뛴다.
             continue;
         };
-        composite_layer(
-            &mut acc,
-            surface.pixels(),
-            (surface.width(), surface.height()),
-            node.offset,
-            node.blend,
-            node.opacity,
-            doc.blend_space,
-        );
+        if node.is_identity_transform() {
+            // 스케일 1·회전 0 → 기존 정수 시프트 경로(비트동일·최속).
+            composite_layer(
+                &mut acc,
+                surface.pixels(),
+                (surface.width(), surface.height()),
+                node.offset,
+                node.blend,
+                node.opacity,
+                doc.blend_space,
+            );
+        } else {
+            composite_layer_transformed(
+                &mut acc,
+                surface.pixels(),
+                (surface.width(), surface.height()),
+                node.offset,
+                node.scale,
+                node.rotation,
+                node.blend,
+                node.opacity,
+                doc.blend_space,
+            );
+        }
     }
     acc
 }
@@ -91,6 +107,97 @@ fn composite_layer(
             let s = src[((y - dy) * sw + (x - dx)) as usize];
             let di = (y * dw + x) as usize;
             dst[di] = blend_pixel(dst[di], s, blend, opacity, space);
+        }
+    }
+}
+
+/// 트랜스폼(스케일·회전) 레이어 합성 — 역변환 + bilinear 리샘플(비파괴).
+///
+/// 변환 정의(GPU wgsl과 1:1 동일 수학이어야 parity 게이트 통과):
+///   T(p_src) = R(θ)·(S ⊙ (p_src − c)) + c + offset,  c = 표면 중심, θ = 시계방향(도).
+/// dst 픽셀 중심을 역변환해 src 픽셀중심 격자에서 bilinear 샘플한다(premul 공간 —
+/// premul 값의 선형 보간은 색 번짐 없이 정확). 격자 밖 탭은 투명 → 가장자리 1px AA.
+#[allow(clippy::too_many_arguments)]
+fn composite_layer_transformed(
+    acc: &mut Surface,
+    src: &[LinearPremul],
+    src_dim: (u32, u32),
+    offset: (i32, i32),
+    scale: (f32, f32),
+    rotation_deg: f32,
+    blend: BlendMode,
+    opacity: f32,
+    space: BlendSpace,
+) {
+    let (dw, dh) = (acc.width() as i32, acc.height() as i32);
+    let (sw, sh) = (src_dim.0 as f32, src_dim.1 as f32);
+    let (swi, shi) = (src_dim.0 as i32, src_dim.1 as i32);
+    let (sx, sy) = scale;
+    if sx.abs() < 1e-4 || sy.abs() < 1e-4 {
+        return; // 퇴화 스케일 → 보이는 것 없음.
+    }
+    let (sin, cos) = rotation_deg.to_radians().sin_cos();
+    let (cx, cy) = (sw * 0.5, sh * 0.5);
+    let (ox, oy) = (offset.0 as f32, offset.1 as f32);
+
+    // dst 바운딩 박스 = src 4코너의 forward 변환 AABB(+1px AA 마진).
+    let fwd = |px: f32, py: f32| -> (f32, f32) {
+        let vx = (px - cx) * sx;
+        let vy = (py - cy) * sy;
+        (cos * vx - sin * vy + cx + ox, sin * vx + cos * vy + cy + oy)
+    };
+    let corners = [fwd(0.0, 0.0), fwd(sw, 0.0), fwd(0.0, sh), fwd(sw, sh)];
+    let minx = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
+    let maxx = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max);
+    let miny = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
+    let maxy = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+    let x0 = ((minx.floor() as i32) - 1).clamp(0, dw);
+    let x1 = ((maxx.ceil() as i32) + 1).clamp(0, dw);
+    let y0 = ((miny.floor() as i32) - 1).clamp(0, dh);
+    let y1 = ((maxy.ceil() as i32) + 1).clamp(0, dh);
+
+    let zero = LinearPremul { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    let tap = |ix: i32, iy: i32| -> LinearPremul {
+        if ix < 0 || iy < 0 || ix >= swi || iy >= shi {
+            zero
+        } else {
+            src[(iy * swi + ix) as usize]
+        }
+    };
+    let lerp = |a: LinearPremul, b: LinearPremul, t: f32| LinearPremul {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    };
+
+    let dst = acc.pixels_mut();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            // 역변환: q = p_dst − off − c; r = R(−θ)q; p_src = r/S + c.
+            let qx = x as f32 + 0.5 - ox - cx;
+            let qy = y as f32 + 0.5 - oy - cy;
+            let rx = cos * qx + sin * qy;
+            let ry = -sin * qx + cos * qy;
+            let psx = rx / sx + cx;
+            let psy = ry / sy + cy;
+            // bilinear: 픽셀중심(i+0.5) 격자.
+            let fx = psx - 0.5;
+            let fy = psy - 0.5;
+            let ix = fx.floor() as i32;
+            let iy = fy.floor() as i32;
+            let tx = fx - ix as f32;
+            let ty = fy - iy as f32;
+            let sp = lerp(
+                lerp(tap(ix, iy), tap(ix + 1, iy), tx),
+                lerp(tap(ix, iy + 1), tap(ix + 1, iy + 1), tx),
+                ty,
+            );
+            if sp.a <= 0.0 {
+                continue; // 완전 투명 — 블렌드 기여 없음.
+            }
+            let di = (y * dw + x) as usize;
+            dst[di] = blend_pixel(dst[di], sp, blend, opacity, space);
         }
     }
 }
@@ -263,7 +370,7 @@ mod tests {
         let id = *doc.order().last().unwrap();
         Op::SetProps {
             id,
-            props: NodeProps { name: name.into(), visible: true, opacity: 1.0, blend, offset: (0, 0) },
+            props: NodeProps { name: name.into(), visible: true, opacity: 1.0, blend, offset: (0, 0), scale: (1.0, 1.0), rotation: 0.0 },
         }
         .apply(doc)
         .unwrap();
@@ -337,6 +444,67 @@ mod tests {
         let mut b = Document::new(3, 3, BitDepth::U8);
         add(&mut b, "x", solid(3, 3, 12, 34, 56, 200), BlendMode::Normal);
         b.get_mut(*b.order().last().unwrap()).unwrap().offset = (0, 0);
+        assert_eq!(composite(&a).to_srgb8_rgba(), composite(&b).to_srgb8_rgba());
+    }
+
+    #[test]
+    fn scale_2x_enlarges_dot() {
+        // 중심 (8,8) 근처 2x2 빨강을 2배 스케일 → 중심 기준 4x4 영역으로 확대.
+        let mut doc = Document::new(16, 16, BitDepth::U8);
+        let mut s = Surface::new(16, 16);
+        for y in 7..9 {
+            for x in 7..9 {
+                s.pixels_mut()[y * 16 + x] = LinearPremul::from_srgb8_straight(255, 0, 0, 255);
+            }
+        }
+        let sid = doc.add_surface(s);
+        Op::AddPaintLayer { name: "dot".into(), surface: sid, index: None, forced_id: None }
+            .apply(&mut doc)
+            .unwrap();
+        let id = *doc.order().last().unwrap();
+        doc.get_mut(id).unwrap().scale = (2.0, 2.0);
+
+        let out = composite(&doc).to_srgb8_rgba();
+        let a = |x: usize, y: usize| out[(y * 16 + x) * 4 + 3];
+        // 원본 2x2(7..9)가 중심(8,8) 기준 2배 → 내부(7,7)/(8,8)는 완전 불투명,
+        // 가장자리(6,6)는 bilinear 부분 커버(>100), 멀리(2,2)는 투명.
+        assert_eq!(a(7, 7), 255, "확대 내부 (7,7)");
+        assert_eq!(a(8, 8), 255, "확대 내부 (8,8)");
+        assert!(a(6, 6) > 100, "확대 가장자리 AA (6,6): {}", a(6, 6));
+        assert_eq!(a(2, 2), 0, "확대 밖 투명");
+    }
+
+    #[test]
+    fn rotation_90_moves_pixel() {
+        // (12,8)의 점을 중심(8,8) 기준 90° 시계 회전 → (8,12)로 이동해야.
+        let mut doc = Document::new(16, 16, BitDepth::U8);
+        let mut s = Surface::new(16, 16);
+        s.pixels_mut()[8 * 16 + 12] = LinearPremul::from_srgb8_straight(0, 255, 0, 255);
+        let sid = doc.add_surface(s);
+        Op::AddPaintLayer { name: "p".into(), surface: sid, index: None, forced_id: None }
+            .apply(&mut doc)
+            .unwrap();
+        let id = *doc.order().last().unwrap();
+        doc.get_mut(id).unwrap().rotation = 90.0;
+
+        let out = composite(&doc).to_srgb8_rgba();
+        let a = |x: usize, y: usize| out[(y * 16 + x) * 4 + 3];
+        // src 픽셀 (12,8) 중심 (12.5,8.5), 중심 (8,8) 기준 90° 시계 →
+        // (−vy, vx) = (−0.5, 4.5) → dst 중심 (7.5, 12.5) = 픽셀 (7,12) 정중앙.
+        assert_eq!(a(7, 12), 255, "90° 회전 후 (7,12): {}", a(7, 12));
+        assert_eq!(a(12, 8), 0, "원위치는 비어야");
+    }
+
+    #[test]
+    fn identity_transform_bit_identical() {
+        // scale=(1,1), rotation=0이면 기존 경로와 비트동일(fast path 핀).
+        let mut a = Document::new(5, 5, BitDepth::U8);
+        add(&mut a, "x", solid(5, 5, 90, 120, 150, 230), BlendMode::Multiply);
+        let mut b = Document::new(5, 5, BitDepth::U8);
+        add(&mut b, "x", solid(5, 5, 90, 120, 150, 230), BlendMode::Multiply);
+        let id = *b.order().last().unwrap();
+        b.get_mut(id).unwrap().scale = (1.0, 1.0);
+        b.get_mut(id).unwrap().rotation = 0.0;
         assert_eq!(composite(&a).to_srgb8_rgba(), composite(&b).to_srgb8_rgba());
     }
 

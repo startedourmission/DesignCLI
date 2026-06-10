@@ -45,7 +45,7 @@ fn shell_and_core_composite_match_for_same_ops() {
         let id = *h.doc.order().last().unwrap();
         h.apply(Op::SetProps {
             id,
-            props: NodeProps { name: "top".into(), visible: true, opacity: 1.0, blend: BlendMode::Multiply, offset: (0, 0) },
+            props: NodeProps { name: "top".into(), visible: true, opacity: 1.0, blend: BlendMode::Multiply, offset: (0, 0), scale: (1.0, 1.0), rotation: 0.0 },
         })
         .unwrap();
         dcli_raster::composite(&h.doc).to_srgb8_rgba()

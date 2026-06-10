@@ -168,6 +168,45 @@ fn gpu_matches_cpu_oracle() {
 }
 
 #[test]
+fn gpu_matches_cpu_with_transform() {
+    // 비파괴 scale/rotation이 CPU/GPU에서 동일 매핑인지 — 트랜스폼 parity 게이트.
+    let ctx = match dcli_gpu::GpuContext::new_headless() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("GPU 미가용, skip: {e}");
+            return;
+        }
+    };
+    for depth in [BitDepth::U8, BitDepth::F32] {
+        let mut doc = spike_scene(depth);
+        let ids: Vec<_> = doc.order().to_vec();
+        // 맨 위 레이어: 스케일 + 회전 + 오프셋 동시.
+        if let Some(&top) = ids.last() {
+            let n = doc.get_mut(top).unwrap();
+            n.scale = (0.7, 1.3);
+            n.rotation = 23.0;
+            n.offset = (9, -4);
+        }
+        // 중간 레이어: 음수 스케일(뒤집기).
+        if ids.len() >= 2 {
+            let n = doc.get_mut(ids[ids.len() - 2]).unwrap();
+            n.scale = (-1.0, 1.0);
+        }
+        // 맨 아래 레이어: 퇴화 스케일(0 근접) — CPU·GPU 모두 스킵해야(P2 가드 핀).
+        if let Some(&bottom) = ids.first() {
+            doc.get_mut(bottom).unwrap().scale = (0.0, 1.0);
+        }
+        let cpu = dcli_raster::composite(&doc).to_srgb8_rgba();
+        let gpu = ctx.composite(&doc).expect("gpu composite").to_srgb8_rgba();
+        let m = max_abs(&cpu, &gpu);
+        let s = ssim_gray(&cpu, &gpu);
+        eprintln!("[transform {:?}] max-abs={} ssim={:.6}", depth, m, s);
+        assert!(m <= 2, "[transform {:?}] GPU-CPU max-abs {} > 2", depth, m);
+        assert!(s > 0.999, "[transform {:?}] GPU-CPU SSIM {} < 0.999", depth, s);
+    }
+}
+
+#[test]
 fn gpu_matches_cpu_with_offset() {
     // 레이어 offset(평행이동)이 CPU/GPU에서 동일 픽셀 매핑인지 — offset parity 게이트.
     let ctx = match dcli_gpu::GpuContext::new_headless() {

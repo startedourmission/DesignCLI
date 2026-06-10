@@ -65,6 +65,8 @@ tower-http = { version = "0.6", features = ["fs", "cors"] }
 # CLI --server 모드용 동기 HTTP 클라(작고 blocking — 단발 CLI에 적합). rustls로 vendored openssl 회피.
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 tracing = "0.1"
+# 텍스트 래스터라이저(dcli-raster) — 순수 Rust, wasm 호환. 폰트는 Pretendard(OFL) 번들.
+ab_glyph = "0.2"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
