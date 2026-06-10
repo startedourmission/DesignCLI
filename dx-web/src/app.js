@@ -8,6 +8,7 @@ export class Renderer {
     this.editor = editor;
     this._dirty = false;
     this._raf = 0;
+    this._timer = 0;
     this.excludeId = null; // 텍스트 인라인 편집 중 화면에서만 제외할 레이어(문서 무오염).
     this.viewport = { x: 0, y: 0, w: editor.width(), h: editor.height() };
     this.canvas = canvas; // setter가 ctx까지 함께 잡는다.
@@ -34,8 +35,18 @@ export class Renderer {
     this.markDirty();
   }
   markDirty() {
+    clearTimeout(this._timer);
+    this._timer = 0;
     this._dirty = true;
     if (!this._raf) this._raf = requestAnimationFrame(() => this._frame());
+  }
+  markDirtySoon(delay = 70) {
+    this._dirty = true;
+    if (this._raf || this._timer) return;
+    this._timer = setTimeout(() => {
+      this._timer = 0;
+      this.markDirty();
+    }, delay);
   }
   _frame() {
     this._raf = 0;
@@ -62,12 +73,50 @@ export class App extends EventTarget {
     this.selectedIds = []; // 선택툴이 고른 레이어 node id 배열(빈 배열=선택 없음). [0]이 primary.
     this.selectedFrameId = null;
     this.clipboardIds = []; // 앱 내부 클립보드 — Cmd+C로 기억한 레이어 id들(문서 내 복제용).
+    this._cache = {};
+  }
+
+  _invalidateCache() {
+    this._cache = {};
+    if (this._warmHandle) {
+      const cancel = window.cancelIdleCallback ?? clearTimeout;
+      cancel(this._warmHandle);
+      this._warmHandle = 0;
+    }
+  }
+
+  _scheduleGeometryWarmup() {
+    if (this._warmHandle) return;
+    const schedule = window.requestIdleCallback ?? ((fn) => setTimeout(() => fn({ timeRemaining: () => 8 }), 120));
+    this._warmHandle = schedule(() => {
+      this._warmHandle = 0;
+      try {
+        for (const l of this.layers()) this.layerBounds(l.id);
+        this.frames();
+      } catch {
+        // Geometry warmup is opportunistic; normal lazy reads still handle failures.
+      }
+    }, { timeout: 700 });
+  }
+
+  _isOffsetOnly(actions) {
+    return Array.isArray(actions) && actions.length > 0 && actions.every((a) => {
+      if (a?.op !== "set_props") return false;
+      const keys = Object.keys(a.patch ?? {});
+      return keys.length === 1 && keys[0] === "offset";
+    });
   }
 
   /** Frame 목록(무한 작업영역의 export 단위). 구버전 wasm이면 빈 배열. */
   frames() {
     if (typeof this.editor.frames !== "function") return [];
-    try { return JSON.parse(this.editor.frames()).frames ?? []; } catch { return []; }
+    if (this._cache.frames) return this._cache.frames;
+    try {
+      this._cache.frames = JSON.parse(this.editor.frames()).frames ?? [];
+    } catch {
+      this._cache.frames = [];
+    }
+    return this._cache.frames;
   }
 
   /** Frame 추가(자동 id). */
@@ -227,7 +276,11 @@ export class App extends EventTarget {
 
   /** 레이어 불투명 바운드 [x,y,w,h](offset 반영) 또는 null. */
   layerBounds(id) {
-    return JSON.parse(this.editor.layer_bounds(id));
+    const cache = this._cache.layerBounds ??= new Map();
+    if (cache.has(id)) return cache.get(id);
+    const bounds = JSON.parse(this.editor.layer_bounds(id));
+    cache.set(id, bounds);
+    return bounds;
   }
 
   /** 레이어 복제(Cmd+D). 데몬/로컬 공통 — DuplicateLayer Action. */
@@ -362,6 +415,32 @@ export class App extends EventTarget {
     return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
   }
 
+  sceneBounds() {
+    if (this._cache.sceneBounds) return this._cache.sceneBounds;
+    const boxes = [{ x: 0, y: 0, w: this.editor.width(), h: this.editor.height() }];
+    for (const l of this.layers()) {
+      if (!l.visible) continue;
+      const box = this.displayAABB(l);
+      if (box) boxes.push(box);
+    }
+    for (const f of this.frames()) boxes.push({ x: f.x, y: f.y, w: f.w, h: f.h });
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const b of boxes) {
+      x0 = Math.min(x0, b.x);
+      y0 = Math.min(y0, b.y);
+      x1 = Math.max(x1, b.x + b.w);
+      y1 = Math.max(y1, b.y + b.h);
+    }
+    const pad = 128;
+    this._cache.sceneBounds = {
+      x: Math.floor(x0 - pad),
+      y: Math.floor(y0 - pad),
+      w: Math.max(1, Math.ceil(x1 - x0 + pad * 2)),
+      h: Math.max(1, Math.ceil(y1 - y0 + pad * 2)),
+    };
+    return this._cache.sceneBounds;
+  }
+
   /** 문서 기준 정렬 setOffset Action 생성(계산 불가면 null). */
   _alignAction(l, mode) {
     const box = this.displayAABB(l);
@@ -465,32 +544,51 @@ export class App extends EventTarget {
   replaceEditor(editor) {
     this.editor = editor;
     this.renderer.editor = editor;
+    this._invalidateCache();
     this.renderer.resize();
     this._notify();
+    this._scheduleGeometryWarmup();
   }
 
   /** 원격(데몬 broadcast) 적용 후 화면·패널 갱신. */
   afterRemoteApply() {
+    this._invalidateCache();
     this.renderer.markDirty();
     this._notify();
+    this._scheduleGeometryWarmup();
+  }
+
+  afterOptimisticAck() {
+    this._scheduleGeometryWarmup();
   }
 
   /** Action 배열을 적용한다(단일 쓰기 funnel).
-   *  로컬 모드: 즉시 wasm 적용. 라이브 모드: 데몬에만 보내고 적용은 broadcast 수신 시. */
+   *  로컬/라이브 모두 먼저 로컬 editor에 적용한다. 라이브 echo는 LiveLink가 seq만 소비한다. */
   apply(actions) {
-    if (this.live) {
-      this.live.sendApply(actions);
-      return { ok: true, deferred: true };
-    }
-    const res = JSON.parse(this.editor.apply_actions(JSON.stringify(actions)));
+    const encoded = JSON.stringify(actions);
+    const offsetOnly = this._isOffsetOnly(actions);
+    const res = JSON.parse(this.editor.apply_actions(encoded));
     if (!res.ok) {
       console.error("apply 실패:", res.issues);
+      this._invalidateCache();
       this._notify();
       return res;
     }
-    this.renderer.markDirty();
-    this._notify();
-    return res;
+    this._invalidateCache();
+    if (offsetOnly) {
+      this.renderer.markDirtySoon();
+      this._notify({ geometryOnly: true });
+      this._scheduleGeometryWarmup();
+    } else {
+      this.renderer.markDirty();
+      this._notify();
+      this._scheduleGeometryWarmup();
+    }
+    if (this.live) {
+      this.live.sendApply(actions, encoded);
+      return { ...res, optimistic: true, geometryOnly: offsetOnly };
+    }
+    return { ...res, geometryOnly: offsetOnly };
   }
 
   undo() {
@@ -499,8 +597,10 @@ export class App extends EventTarget {
       return;
     }
     if (this.editor.undo()) {
+      this._invalidateCache();
       this.renderer.markDirty();
       this._notify();
+      this._scheduleGeometryWarmup();
     }
   }
   redo() {
@@ -509,35 +609,41 @@ export class App extends EventTarget {
       return;
     }
     if (this.editor.redo()) {
+      this._invalidateCache();
       this.renderer.markDirty();
       this._notify();
+      this._scheduleGeometryWarmup();
     }
   }
 
   /** 레이어 목록(파생 뷰, top-to-bottom). */
   layerTree() {
+    if (this._cache.layerTree) return this._cache.layerTree;
     const j = JSON.parse(this.editor.layers());
-    return j.layers.slice().reverse(); // bottom-to-top → 표시용 top-to-bottom
+    this._cache.layerTree = j.layers.slice().reverse(); // bottom-to-top → 표시용 top-to-bottom
+    return this._cache.layerTree;
   }
   layers() {
+    if (this._cache.layers) return this._cache.layers;
     const out = [];
     const visit = (l) => {
       out.push(l);
       for (const child of l.children ?? []) visit(child);
     };
     for (const root of this.layerTree()) visit(root);
-    return out;
+    this._cache.layers = out;
+    return this._cache.layers;
   }
   canUndo() { return this.editor.can_undo(); }
   canRedo() { return this.editor.can_redo(); }
   docInfo() { return JSON.parse(this.editor.doc_info()); }
 
-  _notify() {
+  _notify(detail = null) {
     // 삭제된 레이어 id가 선택에 남지 않도록 정리.
     if (this.selectedIds.length) {
       const alive = new Set(this.layers().map((l) => l.id));
       this.selectedIds = this.selectedIds.filter((id) => alive.has(id));
     }
-    this.dispatchEvent(new CustomEvent("changed"));
+    this.dispatchEvent(new CustomEvent("changed", { detail }));
   }
 }

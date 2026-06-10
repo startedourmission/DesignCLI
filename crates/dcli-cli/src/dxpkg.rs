@@ -6,13 +6,19 @@
 //!
 //! 레이아웃(little-endian):
 //!   "DXPKG\0"(6B) | version u32 | doc.json len u32 | [doc.json] |
-//!   surface 개수 u32 | (SurfaceId u64 | bytes len u32 | [Surface::to_bytes])*
+//!   v1: surface 개수 u32 | (SurfaceId u64 | bytes len u32 | [Surface::to_bytes])*
+//!   v2: surface 개수 u32 |
+//!       (SurfaceId u64 | codec u8 | decoded len u32 | stored len u32 | [bytes])*
 
 use dcli_model::Document;
 use dcli_tile::{PixelStore, Surface, SurfaceId};
+use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use std::io::{Read, Write};
 
 const MAGIC: &[u8; 6] = b"DXPKG\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+const CODEC_RAW: u8 = 0;
+const CODEC_ZLIB: u8 = 1;
 
 /// 문서를 `.dxpkg` 단일 파일 바이트로 직렬화(저장/스냅샷).
 pub fn encode(doc: &Document) -> Vec<u8> {
@@ -35,10 +41,36 @@ pub fn encode(doc: &Document) -> Vec<u8> {
     for (id, surface) in surfaces {
         out.extend_from_slice(&id.0.to_le_bytes());
         let bytes = surface.to_bytes();
+        let packed = compress_surface_bytes(&bytes);
+        out.push(packed.codec);
         out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        out.extend_from_slice(&bytes);
+        out.extend_from_slice(&(packed.bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&packed.bytes);
     }
     out
+}
+
+struct PackedSurface {
+    codec: u8,
+    bytes: Vec<u8>,
+}
+
+fn compress_surface_bytes(bytes: &[u8]) -> PackedSurface {
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+    if enc.write_all(bytes).is_ok() {
+        if let Ok(compressed) = enc.finish() {
+            if compressed.len() + 16 < bytes.len() {
+                return PackedSurface {
+                    codec: CODEC_ZLIB,
+                    bytes: compressed,
+                };
+            }
+        }
+    }
+    PackedSurface {
+        codec: CODEC_RAW,
+        bytes: bytes.to_vec(),
+    }
 }
 
 /// `.dxpkg` 바이트에서 문서를 복원(열기).
@@ -60,7 +92,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         return Err("dxpkg: magic 불일치".into());
     }
     let version = u32le(&mut cur)?;
-    if version != VERSION {
+    if version != 1 && version != VERSION {
         return Err(format!("dxpkg: 미지원 버전 {version}"));
     }
 
@@ -73,9 +105,35 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
     let count = u32le(&mut cur)?;
     for _ in 0..count {
         let id = SurfaceId(u64::from_le_bytes(take(&mut cur, 8)?.try_into().unwrap()));
-        let blen = u32le(&mut cur)? as usize;
-        let sbytes = take(&mut cur, blen)?;
-        let surface = Surface::from_bytes(sbytes).ok_or("dxpkg: 표면 디코드 실패")?;
+        let sbytes = if version == 1 {
+            let blen = u32le(&mut cur)? as usize;
+            take(&mut cur, blen)?.to_vec()
+        } else {
+            let codec = take(&mut cur, 1)?[0];
+            let decoded_len = u32le(&mut cur)? as usize;
+            let stored_len = u32le(&mut cur)? as usize;
+            let stored = take(&mut cur, stored_len)?;
+            match codec {
+                CODEC_RAW => {
+                    if stored.len() != decoded_len {
+                        return Err("dxpkg: raw 표면 길이 불일치".into());
+                    }
+                    stored.to_vec()
+                }
+                CODEC_ZLIB => {
+                    let mut dec = ZlibDecoder::new(stored);
+                    let mut out = Vec::with_capacity(decoded_len);
+                    dec.read_to_end(&mut out)
+                        .map_err(|e| format!("dxpkg: zlib 표면 디코드: {e}"))?;
+                    if out.len() != decoded_len {
+                        return Err("dxpkg: zlib 표면 길이 불일치".into());
+                    }
+                    out
+                }
+                other => return Err(format!("dxpkg: 알 수 없는 표면 codec {other}")),
+            }
+        };
+        let surface = Surface::from_bytes(&sbytes).ok_or("dxpkg: 표면 디코드 실패")?;
         store.restore(id, surface);
     }
     doc.set_pixels(store);
@@ -101,5 +159,36 @@ mod tests {
     fn bad_magic_rejected() {
         assert!(decode(b"NOPE..").is_err());
         assert!(decode(b"").is_err());
+    }
+
+    #[test]
+    fn repeated_surface_payload_is_compressed() {
+        use dcli_color::LinearPremul;
+        use dcli_model::{History, Op};
+        let mut hist = History::new(Document::new(512, 512, BitDepth::U8));
+        let sid = hist.doc.add_surface(Surface::filled(
+            512,
+            512,
+            LinearPremul::from_srgb8_straight(244, 235, 218, 255),
+        ));
+        hist.apply(Op::AddPaintLayer {
+            name: "bg".into(),
+            surface: sid,
+            index: None,
+            forced_id: None,
+        })
+        .unwrap();
+        let raw_len = hist.doc.pixels().get(sid).unwrap().to_bytes().len();
+        let pkg = encode(&hist.doc);
+        assert!(
+            pkg.len() < raw_len / 20,
+            "압축 효과 부족: raw={raw_len} pkg={}",
+            pkg.len()
+        );
+        let back = decode(&pkg).unwrap();
+        assert_eq!(
+            back.pixels().get(sid).unwrap().to_bytes(),
+            hist.doc.pixels().get(sid).unwrap().to_bytes()
+        );
     }
 }

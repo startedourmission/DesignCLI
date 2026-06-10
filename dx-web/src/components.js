@@ -68,6 +68,8 @@ const SHAPES = [
 ];
 const isShapeTool = (t) => SHAPES.some((s) => s.id === t);
 const needsWidth = (t) => t === "line" || t === "stroke-rect" || t === "stroke-ellipse" || t === "brush";
+const MAX_VIEWPORT_SIDE = 4096;
+const MAX_VIEWPORT_PIXELS = 12_000_000;
 
 // 공용 컨트롤 스타일(Figma풍: 28px 컨트롤, 보더리스 input, 블루 포커스).
 const controls = css`
@@ -312,7 +314,10 @@ class DxCanvas extends LitElement {
     :host([data-bg="solid"]) { background-image: none; background: var(--bg-canvas); }
     .wrap { position: absolute; inset: 0; }
     canvas { display: block; position: absolute; left: 0; top: 0; transform-origin: 0 0; }
-    #base { box-shadow: 0 0 0 1px var(--line), 0 10px 34px rgba(0,0,0,0.32); }
+    #base {
+      will-change: transform;
+      contain: layout paint size;
+    }
     #overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
     textarea.txt {
       position: absolute; z-index: 20; background: transparent; color: var(--fg);
@@ -342,7 +347,19 @@ class DxCanvas extends LitElement {
   }
   connectedCallback() {
     super.connectedCallback();
-    this._onChange = () => { this._v++; this._drawOverlay(); };
+    this._onChange = (e) => {
+      this._v++;
+      if (e?.detail?.geometryOnly) {
+        clearTimeout(this._pendingMoveTimer);
+        this._pendingMoveTimer = setTimeout(() => {
+          this._pendingMove = null;
+          this._drawOverlay();
+        }, 140);
+      } else {
+        this._pendingMove = null;
+      }
+      this._drawOverlay();
+    };
     this.app?.addEventListener("changed", this._onChange);
     this._mv = (e) => this._move(e); this._up = (e) => this._end(e);
     window.addEventListener("pointermove", this._mv);
@@ -361,6 +378,7 @@ class DxCanvas extends LitElement {
   }
   disconnectedCallback() {
     this.app?.removeEventListener("changed", this._onChange);
+    clearTimeout(this._pendingMoveTimer);
     window.removeEventListener("pointermove", this._mv);
     window.removeEventListener("pointerup", this._up);
     window.removeEventListener("keydown", this._kd);
@@ -376,7 +394,7 @@ class DxCanvas extends LitElement {
     this.base = this.renderRoot.querySelector("#base");
     this.overlay = this.renderRoot.querySelector("#overlay");
     this.app.renderer.canvas = this.base;
-    this._applyZoom();
+    this._applyZoom(true);
     this.base.addEventListener("pointerdown", (e) => this._down(e));
     this.base.addEventListener("dblclick", (e) => this._dblclick(e));
     this.addEventListener("contextmenu", (e) => this._context(e));
@@ -466,24 +484,77 @@ class DxCanvas extends LitElement {
   }
   updated() { this._applyZoom(); this._drawOverlay(); }
 
+  _scheduleOverlay() {
+    if (this._overlayRaf) return;
+    this._overlayRaf = requestAnimationFrame(() => {
+      this._overlayRaf = 0;
+      this._drawOverlay();
+    });
+  }
+
+  _scheduleViewportRefresh(delay = 90) {
+    clearTimeout(this._viewportTimer);
+    this._viewportTimer = setTimeout(() => {
+      this._viewportTimer = 0;
+      this._applyZoom(false, true);
+      this._drawOverlay();
+    }, delay);
+  }
+
+  _setStylePx(el, prop, value) {
+    const next = `${value}px`;
+    if (el.style[prop] !== next) el.style[prop] = next;
+  }
+
   // ---- 줌/팬 ----
   get zoom() { return this._zoom; }
-  _applyZoom() {
+  _applyZoom(force = false, render = true) {
     if (!this.base) return;
     const z = this._zoom;
-    const vw = Math.max(1, Math.ceil(this.clientWidth / z));
-    const vh = Math.max(1, Math.ceil(this.clientHeight / z));
-    this.app.renderer.setViewport(this._origin.x, this._origin.y, vw, vh);
-    this.base.style.width = `${vw * z}px`;
-    this.base.style.height = `${vh * z}px`;
+    const cw = Math.max(1, this.clientWidth);
+    const ch = Math.max(1, this.clientHeight);
+    const visible = {
+      x0: Math.floor(this._origin.x),
+      y0: Math.floor(this._origin.y),
+      x1: Math.ceil(this._origin.x + cw / z),
+      y1: Math.ceil(this._origin.y + ch / z),
+    };
+    const pad = Math.max(32, Math.ceil(Math.max(cw, ch) / z));
+    const target = this._viewportTarget(visible, pad);
+    const vp = this.app.renderer.viewport;
+    const covered = !force && vp
+      && vp.x <= target.x && vp.y <= target.y
+      && vp.x + vp.w >= target.x + target.w && vp.y + vp.h >= target.y + target.h;
+    if (!covered && render) {
+      this.app.renderer.setViewport(target.x, target.y, target.w, target.h);
+    }
+    const rv = this.app.renderer.viewport;
+    this._setStylePx(this.base, "width", rv.w * z);
+    this._setStylePx(this.base, "height", rv.h * z);
+    this.base.style.transform = `translate3d(${(rv.x - this._origin.x) * z}px, ${(rv.y - this._origin.y) * z}px, 0)`;
     this.base.style.imageRendering = z >= 1 ? "pixelated" : "auto";
-    const ow = Math.max(1, this.clientWidth), oh = Math.max(1, this.clientHeight);
-    if (this.overlay.width !== ow) this.overlay.width = ow;
-    if (this.overlay.height !== oh) this.overlay.height = oh;
-    this.overlay.style.width = `${ow}px`;
-    this.overlay.style.height = `${oh}px`;
+    const ow = cw, oh = ch;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const bw = Math.max(1, Math.round(ow * dpr));
+    const bh = Math.max(1, Math.round(oh * dpr));
+    if (this.overlay.width !== bw) this.overlay.width = bw;
+    if (this.overlay.height !== bh) this.overlay.height = bh;
+    this._overlayDpr = dpr;
+    this._overlayW = ow;
+    this._overlayH = oh;
+    this._setStylePx(this.overlay, "width", ow);
+    this._setStylePx(this.overlay, "height", oh);
   }
-  _setZoom(z, cx, cy) {
+
+  _overlayCtx(clear = false) {
+    const o = this.overlay.getContext("2d");
+    const dpr = this._overlayDpr || Math.max(1, window.devicePixelRatio || 1);
+    o.setTransform(dpr, 0, 0, dpr, 0, 0);
+    o.imageSmoothingEnabled = false;
+    if (clear) o.clearRect(0, 0, this._overlayW || this.clientWidth, this._overlayH || this.clientHeight);
+    return o;
+  }
+  _setZoom(z, cx, cy, immediate = false) {
     const old = this._zoom;
     z = Math.min(8, Math.max(0.05, z));
     if (z === old) return;
@@ -493,19 +564,27 @@ class DxCanvas extends LitElement {
     const world = { x: this._origin.x + px / old, y: this._origin.y + py / old };
     this._zoom = z;
     this._origin = { x: world.x - px / z, y: world.y - py / z };
-    this._applyZoom();
-    this._drawOverlay();
+    if (immediate) {
+      clearTimeout(this._viewportTimer);
+      this._viewportTimer = 0;
+      this._applyZoom(true);
+      this._drawOverlay();
+    } else {
+      this._applyZoom(false, false);
+      this._scheduleViewportRefresh(70);
+      this._scheduleOverlay();
+    }
     this.dispatchEvent(new CustomEvent("zoom-changed", { detail: z, bubbles: true, composed: true }));
   }
   zoomCmd(action) {
     if (action === "in") this._setZoom(this._zoom * 1.25);
     else if (action === "out") this._setZoom(this._zoom / 1.25);
-    else if (action === "reset") this._setZoom(1);
+    else if (action === "reset") this._setZoom(1, undefined, undefined, true);
     else if (action === "fit") {
       const W = this.app.editor.width(), H = this.app.editor.height();
       const z = Math.min((this.clientWidth - 96) / W, (this.clientHeight - 96) / H);
       this._origin = { x: -48 / Math.max(z, 0.05), y: -48 / Math.max(z, 0.05) };
-      this._setZoom(z);
+      this._setZoom(z, undefined, undefined, true);
     }
   }
   _wheel(e) {
@@ -522,8 +601,9 @@ class DxCanvas extends LitElement {
       x: this._origin.x + dx / this._zoom,
       y: this._origin.y + dy / this._zoom,
     };
-    this._applyZoom();
-    this._drawOverlay();
+    this._applyZoom(false, false);
+    this._scheduleViewportRefresh();
+    this._scheduleOverlay();
   }
 
   // ---- 좌표 ----
@@ -535,18 +615,77 @@ class DxCanvas extends LitElement {
     };
   }
 
+  _dragDistanceFromStart(d, p) {
+    return Math.hypot(p.x - d.start.x, p.y - d.start.y);
+  }
+
+  _intersectRect(a, b) {
+    const x0 = Math.max(a.x, b.x);
+    const y0 = Math.max(a.y, b.y);
+    const x1 = Math.min(a.x + a.w, b.x + b.w);
+    const y1 = Math.min(a.y + a.h, b.y + b.h);
+    if (x1 <= x0 || y1 <= y0) return null;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  _viewportTarget(visible, pad) {
+    const desired = {
+      x: visible.x0 - pad,
+      y: visible.y0 - pad,
+      w: visible.x1 - visible.x0 + pad * 2,
+      h: visible.y1 - visible.y0 + pad * 2,
+    };
+    const scene = this.app.sceneBounds?.();
+    const bounded = scene ? (this._intersectRect(desired, scene) ?? scene) : desired;
+    return this._capViewportTarget(bounded, visible);
+  }
+
+  _capViewportTarget(target, visible) {
+    let { x, y, w, h } = target;
+    const cx = (visible.x0 + visible.x1) / 2;
+    const cy = (visible.y0 + visible.y1) / 2;
+    let maxW = MAX_VIEWPORT_SIDE;
+    let maxH = MAX_VIEWPORT_SIDE;
+    if (maxW * maxH > MAX_VIEWPORT_PIXELS) {
+      const s = Math.sqrt(MAX_VIEWPORT_PIXELS / (maxW * maxH));
+      maxW = Math.floor(maxW * s);
+      maxH = Math.floor(maxH * s);
+    }
+    if (w > maxW) {
+      const nx = Math.max(x, Math.min(x + w - maxW, Math.floor(cx - maxW / 2)));
+      x = nx;
+      w = maxW;
+    }
+    if (h > maxH) {
+      const ny = Math.max(y, Math.min(y + h - maxH, Math.floor(cy - maxH / 2)));
+      y = ny;
+      h = maxH;
+    }
+    return { x, y, w: Math.max(1, w), h: Math.max(1, h) };
+  }
+
   _screen(p) {
     return { x: (p.x - this._origin.x) * this._zoom, y: (p.y - this._origin.y) * this._zoom };
   }
 
-  _frameAt(p) {
+  _frameLabelHit(f, e) {
+    if (!e) return false;
+    const host = this.getBoundingClientRect();
+    const sx = e.clientX - host.left;
+    const sy = e.clientY - host.top;
+    const fp = this._screen({ x: f.x, y: f.y });
+    const labelW = Math.max(70, String(f.name ?? "").length * 7 + 12);
+    return sx >= fp.x - 3 && sx <= fp.x + labelW && sy >= fp.y - 22 && sy <= fp.y + 4;
+  }
+
+  _frameAt(p, e = null) {
     const tol = 6 / (this._zoom || 1);
     for (const f of [...(this.app.frames?.() ?? [])].reverse()) {
+      if (this._frameLabelHit(f, e)) return f;
       const inside = p.x >= f.x - tol && p.x <= f.x + f.w + tol && p.y >= f.y - tol && p.y <= f.y + f.h + tol;
       if (!inside) continue;
       const edge = Math.min(Math.abs(p.x - f.x), Math.abs(p.x - (f.x + f.w)), Math.abs(p.y - f.y), Math.abs(p.y - (f.y + f.h)));
-      const label = p.x >= f.x && p.x <= f.x + 120 && p.y >= f.y - 24 && p.y <= f.y;
-      if (edge <= tol || label) return f;
+      if (edge <= tol) return f;
     }
     return null;
   }
@@ -555,7 +694,7 @@ class DxCanvas extends LitElement {
     e.preventDefault();
     const p = this._coords(e);
     const host = this.getBoundingClientRect();
-    const frame = this._frameAt(p);
+    const frame = this._frameAt(p, e);
     if (frame) {
       this.app.selectFrame(frame.id);
       this._ctx = { kind: "frame", x: e.clientX - host.left, y: e.clientY - host.top, id: frame.id };
@@ -626,6 +765,29 @@ class DxCanvas extends LitElement {
     if (!sel) return null;
     return this._selGeomFor(sel);
   }
+
+  _drawSelectionGeom(o, g, acc, single, dx = 0, dy = 0) {
+    o.beginPath();
+    o.moveTo(g.c4[0].x + dx, g.c4[0].y + dy);
+    for (let i = 1; i < 4; i++) o.lineTo(g.c4[i].x + dx, g.c4[i].y + dy);
+    o.closePath();
+    o.fillStyle = "rgba(13,153,255,0.08)";
+    o.fill();
+    o.strokeStyle = acc; o.lineWidth = 2;
+    o.stroke();
+    if (!single) return;
+    const tm = { x: (g.c4[0].x + g.c4[1].x) / 2 + dx, y: (g.c4[0].y + g.c4[1].y) / 2 + dy };
+    o.beginPath(); o.moveTo(tm.x, tm.y); o.lineTo(g.rot.x + dx, g.rot.y + dy); o.stroke();
+    o.beginPath(); o.arc(g.rot.x + dx, g.rot.y + dy, 4.5, 0, 7); o.fillStyle = "#fff"; o.fill(); o.stroke();
+    for (const h of g.handles) {
+      const hx = Math.round(h.p.x + dx), hy = Math.round(h.p.y + dy);
+      o.fillStyle = "#fff";
+      o.fillRect(hx - HANDLE / 2, hy - HANDLE / 2, HANDLE, HANDLE);
+      o.strokeStyle = acc; o.lineWidth = 1;
+      o.strokeRect(hx - HANDLE / 2 + 0.5, hy - HANDLE / 2 + 0.5, HANDLE - 1, HANDLE - 1);
+    }
+  }
+
   _hitHandle(e) {
     const g = this._selGeom();
     if (!g) return null;
@@ -742,7 +904,7 @@ class DxCanvas extends LitElement {
         return;
       }
       if (hit == null) {
-        const frame = this._frameAt(p);
+        const frame = this._frameAt(p, e);
         if (frame) {
           this.app.selectFrame(frame.id);
           return;
@@ -755,11 +917,14 @@ class DxCanvas extends LitElement {
       if (!this.app.selectedIds.includes(hit)) this.app.select(hit);
       const all = this.app.layers();
       const bases = new Map();
+      const overlayGeoms = [];
       let box = null; // 선택 레이어들의 합쳐진 AABB(스냅 기준 — 이동 중엔 dx/dy만 더하면 됨).
       for (const id of this.app.selectedIds) {
         const l = all.find((v) => v.id === id);
         if (!l) continue;
         bases.set(id, l.offset ?? [0, 0]);
+        const geom = this._selGeomFor(l);
+        if (geom) overlayGeoms.push(geom);
         const bb = this.app.displayAABB(l);
         if (!bb) continue;
         if (!box) box = { ...bb };
@@ -771,7 +936,7 @@ class DxCanvas extends LitElement {
       }
       this._drag = {
         mode: "move", ids: [...this.app.selectedIds], bases, start: p, dx: 0, dy: 0,
-        box, snap: this._snapTargets(this.app.selectedIds), guides: null,
+        box, snap: null, guides: null, overlayGeoms,
       };
       this.style.cursor = "grabbing";
       return;
@@ -787,8 +952,9 @@ class DxCanvas extends LitElement {
         x: d.ox - (e.clientX - d.sx) / this._zoom,
         y: d.oy - (e.clientY - d.sy) / this._zoom,
       };
-      this._applyZoom();
-      this._drawOverlay();
+      this._applyZoom(false, false);
+      this._scheduleViewportRefresh();
+      this._scheduleOverlay();
       return;
     }
     const p = this._coords(e);
@@ -797,6 +963,9 @@ class DxCanvas extends LitElement {
       d.dy = Math.round(p.y - d.start.y);
       // ★스냅★ 합쳐진 AABB의 left/centerX/right(+세로)를 타깃과 비교, 화면 6px 이내면 보정.
       d.guides = null;
+      if (!d.snap && this._dragDistanceFromStart(d, p) > 2 / (this._zoom || 1)) {
+        d.snap = this._snapTargets(this.app.selectedIds);
+      }
       if (d.box && d.snap) {
         const thr = 6 / (this._zoom || 1);
         const bx = this._snapAxis(
@@ -807,10 +976,10 @@ class DxCanvas extends LitElement {
         if (by) d.dy = Math.round(d.dy + by.diff);
         if (bx || by) d.guides = { x: bx ? [bx.t] : [], y: by ? [by.t] : [] };
       }
-      this._drawOverlay();
+      this._scheduleOverlay();
     } else if (d.mode === "marquee") {
       d.cur = p;
-      this._drawOverlay();
+      this._scheduleOverlay();
     } else if (d.mode === "rotate") {
       const a = Math.atan2(p.y - d.pv.y, p.x - d.pv.x);
       let deg = d.rot0 + ((a - d.a0) * 180) / Math.PI;
@@ -818,7 +987,7 @@ class DxCanvas extends LitElement {
       d.provRot = Math.round(deg * 10) / 10;
       // 도형 중심(피벗)이 제자리에 머물도록 offset 보정.
       d.provOffset = this.app.computeAnchoredOffset(d.sel, null, d.provRot, d.pivot);
-      this._drawOverlay();
+      this._scheduleOverlay();
     } else if (d.mode === "resize") {
       const sel = d.sel;
       // anchor 기준 유도: S' = R⁻¹(p − A) ⊘ (h − a). 분모 = bbox 폭/높이(0 폭발 없음).
@@ -840,7 +1009,7 @@ class DxCanvas extends LitElement {
       d.provScale = [clampS(Math.round(nsx * 1000) / 1000), clampS(Math.round(nsy * 1000) / 1000)];
       // 반대쪽 핸들(anchor)이 제자리에 머물도록 offset 보정.
       d.provOffset = this.app.computeAnchoredOffset(d.sel, d.provScale, null, d.asrc);
-      this._drawOverlay();
+      this._scheduleOverlay();
     } else if (d.mode === "brush") {
       // 점 간 최소 간격(줌 보정)으로 thinning — 과밀 점 방지.
       const minD = 1.5 / (this._zoom || 1);
@@ -851,7 +1020,7 @@ class DxCanvas extends LitElement {
       }
     } else if (d.mode === "frame") {
       d.cur = p;
-      this._drawOverlay();
+      this._scheduleOverlay();
     } else if (d.mode === "draw") {
       d.cur = p;
       this._drawGhost();
@@ -874,10 +1043,17 @@ class DxCanvas extends LitElement {
   _end() {
     const d = this._drag;
     if (!d) return;
-    this._drag = null;
     this.style.cursor = this._space ? "grab" : "";
-    if (d.mode === "pan") return;
+    if (d.mode === "pan") {
+      this._drag = null;
+      clearTimeout(this._viewportTimer);
+      this._viewportTimer = 0;
+      this._applyZoom(false, true);
+      this._drawOverlay();
+      return;
+    }
     if (d.mode === "brush") {
+      this._drag = null;
       const s = this.toolState;
       if (d.pts.length >= 2) {
         this.app.apply([
@@ -889,6 +1065,7 @@ class DxCanvas extends LitElement {
       return;
     }
     if (d.mode === "frame") {
+      this._drag = null;
       const x = Math.min(d.start.x, d.cur.x), y = Math.min(d.start.y, d.cur.y);
       const w = Math.abs(d.cur.x - d.start.x), h = Math.abs(d.cur.y - d.start.y);
       if (w >= 8 && h >= 8) {
@@ -907,12 +1084,21 @@ class DxCanvas extends LitElement {
             return base ? B.setOffset(id, [base[0] + d.dx, base[1] + d.dy]) : null;
           })
           .filter(Boolean);
-        if (acts.length) this.app.apply(acts);
-        else this._drawOverlay();
+        if (acts.length) {
+          const res = this.app.apply(acts);
+          if (res?.deferred || res?.optimistic || res?.geometryOnly) {
+            this._pendingMove = d;
+            this._drag = null;
+            this._drawOverlay();
+            return;
+          }
+        } else this._drawOverlay();
       } else this._drawOverlay();
+      this._drag = null;
       return;
     }
     if (d.mode === "marquee") {
+      this._drag = null;
       const x0 = Math.min(d.start.x, d.cur.x), y0 = Math.min(d.start.y, d.cur.y);
       const mw = Math.abs(d.cur.x - d.start.x), mh = Math.abs(d.cur.y - d.start.y);
       if (mw < 2 && mh < 2) {
@@ -931,20 +1117,22 @@ class DxCanvas extends LitElement {
       return;
     }
     if (d.mode === "rotate") {
+      this._drag = null;
       if (d.provRot !== d.rot0)
         this.app.apply([B.setProps(d.id, { rotation: d.provRot, offset: d.provOffset ?? undefined })]);
       else this._drawOverlay();
       return;
     }
     if (d.mode === "resize") {
+      this._drag = null;
       if (d.provScale[0] !== d.scale0[0] || d.provScale[1] !== d.scale0[1])
         this.app.apply([B.setProps(d.id, { scale: d.provScale, offset: d.provOffset ?? undefined })]);
       else this._drawOverlay();
       return;
     }
+    this._drag = null;
     // draw 확정
-    const o = this.overlay.getContext("2d");
-    o.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    const o = this._overlayCtx(true);
     const { start, cur } = d;
     const s = this.toolState; const rgba = s.rgba;
     const bx = Math.min(start.x, cur.x), by = Math.min(start.y, cur.y);
@@ -1007,9 +1195,9 @@ class DxCanvas extends LitElement {
 
   // ---- 오버레이 ----
   _drawGhost() {
-    const o = this.overlay.getContext("2d");
+    const o = this._overlayCtx();
     const z = this._zoom;
-    o.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    o.clearRect(0, 0, this._overlayW || this.clientWidth, this._overlayH || this.clientHeight);
     this._drawFrames(o, z);
     const s = this.toolState; const [r, g, b, a] = s.rgba;
     o.strokeStyle = `rgba(${r},${g},${b},${a / 255})`;
@@ -1031,9 +1219,9 @@ class DxCanvas extends LitElement {
   }
   /** 브러시 진행 중 폴리라인 ghost. */
   _drawBrushGhost() {
-    const o = this.overlay.getContext("2d");
+    const o = this._overlayCtx();
     const z = this._zoom;
-    o.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    o.clearRect(0, 0, this._overlayW || this.clientWidth, this._overlayH || this.clientHeight);
     this._drawFrames(o, z);
     const d = this._drag, s = this.toolState;
     if (!d || d.pts.length < 2) return;
@@ -1053,21 +1241,28 @@ class DxCanvas extends LitElement {
   /** Frame 외곽선 + 이름 라벨(항상 표시 — Figma의 캔버스). */
   _drawFrames(o, z) {
     const frames = this.app.frames?.() ?? [];
-    const fg = getComputedStyle(this).getPropertyValue("--fg-3").trim() || "#7f7f7f";
+    const fg = getComputedStyle(this).getPropertyValue("--fg-2").trim() || "#555";
     o.save();
-    o.font = "11px Inter, sans-serif";
+    o.font = "600 11px Inter, sans-serif";
+    o.textBaseline = "alphabetic";
     for (const f of frames) {
-      o.strokeStyle = fg; o.lineWidth = 1; o.setLineDash([]);
+      let frameColor = fg;
+      o.strokeStyle = frameColor; o.lineWidth = 1; o.setLineDash([]);
       const p = this._screen({ x: f.x, y: f.y });
+      const x = Math.round(p.x) + 0.5;
+      const y = Math.round(p.y) + 0.5;
+      const w = Math.round(f.w * z);
+      const h = Math.round(f.h * z);
       if (this.app.selectedFrameId === f.id) {
         o.fillStyle = "rgba(135,185,207,0.08)";
-        o.fillRect(p.x, p.y, f.w * z, f.h * z);
-        o.strokeStyle = getComputedStyle(this).getPropertyValue("--accent").trim() || "#87b9cf";
+        o.fillRect(x, y, w, h);
+        frameColor = getComputedStyle(this).getPropertyValue("--accent").trim() || "#87b9cf";
+        o.strokeStyle = frameColor;
         o.lineWidth = 1.5;
       }
-      o.strokeRect(p.x + 0.5, p.y + 0.5, f.w * z, f.h * z);
-      o.fillStyle = fg;
-      o.fillText(f.name, p.x, p.y - 5);
+      o.strokeRect(x, y, w, h);
+      o.fillStyle = frameColor;
+      o.fillText(f.name, Math.round(p.x), Math.round(p.y - 5));
     }
     // 프레임 드래그 중 미리보기.
     const d = this._drag;
@@ -1077,7 +1272,7 @@ class DxCanvas extends LitElement {
       const w = Math.abs(d.cur.x - d.start.x) * z, h = Math.abs(d.cur.y - d.start.y) * z;
       o.setLineDash([5, 4]);
       o.strokeStyle = fg;
-      o.strokeRect(x, y, w, h);
+      o.strokeRect(Math.round(x) + 0.5, Math.round(y) + 0.5, Math.round(w), Math.round(h));
       o.setLineDash([]);
     }
     o.restore();
@@ -1085,8 +1280,7 @@ class DxCanvas extends LitElement {
 
   _drawOverlay() {
     if (!this.overlay) return;
-    const o = this.overlay.getContext("2d");
-    o.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    const o = this._overlayCtx(true);
     this._drawFrames(o, this._zoom);
     if (this._text) return; // 텍스트 편집 중엔 셀렉션 크롬 숨김(입력에 집중).
     if (this._drag?.mode === "draw") { this._drawGhost(); return; }
@@ -1121,28 +1315,17 @@ class DxCanvas extends LitElement {
         o.stroke();
       }
     }
-    for (const sel of this.app.selectedLayers?.() ?? []) {
-      const g = this._selGeomFor(sel);
-      if (!g) continue;
-      o.beginPath();
-      o.moveTo(g.c4[0].x, g.c4[0].y);
-      for (let i = 1; i < 4; i++) o.lineTo(g.c4[i].x, g.c4[i].y);
-      o.closePath();
-      o.fillStyle = "rgba(13,153,255,0.08)";
-      o.fill();
-      o.strokeStyle = acc; o.lineWidth = 2;
-      o.stroke();
-      if (!single) continue;
-      // 회전 핸들(상단 중앙 바깥 원).
-      const tm = { x: (g.c4[0].x + g.c4[1].x) / 2, y: (g.c4[0].y + g.c4[1].y) / 2 };
-      o.beginPath(); o.moveTo(tm.x, tm.y); o.lineTo(g.rot.x, g.rot.y); o.stroke();
-      o.beginPath(); o.arc(g.rot.x, g.rot.y, 4.5, 0, 7); o.fillStyle = "#fff"; o.fill(); o.stroke();
-      // 리사이즈 핸들 8개(흰 채움 + 액센트 보더).
-      for (const h of g.handles) {
-        o.fillStyle = "#fff";
-        o.fillRect(h.p.x - HANDLE / 2, h.p.y - HANDLE / 2, HANDLE, HANDLE);
-        o.strokeStyle = acc; o.lineWidth = 1;
-        o.strokeRect(h.p.x - HANDLE / 2 + 0.5, h.p.y - HANDLE / 2 + 0.5, HANDLE - 1, HANDLE - 1);
+    const movePreview = this._drag?.mode === "move" ? this._drag : this._pendingMove;
+    if (movePreview?.overlayGeoms) {
+      const sx = movePreview.dx * this._zoom;
+      const sy = movePreview.dy * this._zoom;
+      for (const g of movePreview.overlayGeoms) {
+        this._drawSelectionGeom(o, g, acc, single, sx, sy);
+      }
+    } else {
+      for (const sel of this.app.selectedLayers?.() ?? []) {
+        const g = this._selGeomFor(sel);
+        if (g) this._drawSelectionGeom(o, g, acc, single);
       }
     }
     // 스냅 가이드(move 드래그가 스냅 중일 때만) — 1px 빨간 라인, 캔버스 전체 길이.
@@ -1152,11 +1335,11 @@ class DxCanvas extends LitElement {
       o.strokeStyle = "#f24822"; o.lineWidth = 1;
       for (const gx of gd.x) {
         const px = Math.round((gx - this._origin.x) * z) + 0.5;
-        o.beginPath(); o.moveTo(px, 0); o.lineTo(px, this.overlay.height); o.stroke();
+        o.beginPath(); o.moveTo(px, 0); o.lineTo(px, this._overlayH || this.clientHeight); o.stroke();
       }
       for (const gy of gd.y) {
         const py = Math.round((gy - this._origin.y) * z) + 0.5;
-        o.beginPath(); o.moveTo(0, py); o.lineTo(this.overlay.width, py); o.stroke();
+        o.beginPath(); o.moveTo(0, py); o.lineTo(this._overlayW || this.clientWidth, py); o.stroke();
       }
     }
   }

@@ -23,7 +23,11 @@ use std::path::PathBuf;
 use storage::DocPath;
 
 #[derive(Parser)]
-#[command(name = "dx", version, about = "DesignCLI — CLI로 조작하는 이미지 에디터")]
+#[command(
+    name = "dx",
+    version,
+    about = "DesignCLI — CLI로 조작하는 이미지 에디터"
+)]
 struct Cli {
     /// 작업 대상 문서 폴더(.dxdoc). 대부분의 명령이 사용.
     /// --server 모드에서는 이 문자열(파일명 stem)이 데몬의 문서 id가 된다.
@@ -218,6 +222,8 @@ enum DocCmd {
     },
     /// 문서 메타 정보를 출력한다(희소).
     Info,
+    /// 구버전/비대한 텍스트 표면을 내용 크기로 압축해 저장한다.
+    Compact,
 }
 
 #[derive(Subcommand)]
@@ -351,36 +357,144 @@ fn parse_rgba(s: &str) -> Result<[u8; 4]> {
 /// DrawCmd를 dispatch Shape + 레이어 이름으로 변환.
 fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
     Ok(match cmd {
-        DrawCmd::Rect { x, y, w, h, color, name } => (
-            Shape::Rect { x: *x, y: *y, w: *w, h: *h, rgba: parse_rgba(color)? },
+        DrawCmd::Rect {
+            x,
+            y,
+            w,
+            h,
+            color,
+            name,
+        } => (
+            Shape::Rect {
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+                rgba: parse_rgba(color)?,
+            },
             name.clone(),
         ),
-        DrawCmd::Ellipse { cx, cy, rx, ry, color, name } => (
-            Shape::Ellipse { cx: *cx, cy: *cy, rx: *rx, ry: *ry, rgba: parse_rgba(color)? },
+        DrawCmd::Ellipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            color,
+            name,
+        } => (
+            Shape::Ellipse {
+                cx: *cx,
+                cy: *cy,
+                rx: *rx,
+                ry: *ry,
+                rgba: parse_rgba(color)?,
+            },
             name.clone(),
         ),
-        DrawCmd::Line { x0, y0, x1, y1, width, color, name } => (
-            Shape::Line { x0: *x0, y0: *y0, x1: *x1, y1: *y1, width: *width, rgba: parse_rgba(color)? },
+        DrawCmd::Line {
+            x0,
+            y0,
+            x1,
+            y1,
+            width,
+            color,
+            name,
+        } => (
+            Shape::Line {
+                x0: *x0,
+                y0: *y0,
+                x1: *x1,
+                y1: *y1,
+                width: *width,
+                rgba: parse_rgba(color)?,
+            },
             name.clone(),
         ),
-        DrawCmd::StrokeRect { x, y, w, h, width, color, name } => (
-            Shape::StrokeRect { x: *x, y: *y, w: *w, h: *h, width: *width, rgba: parse_rgba(color)? },
+        DrawCmd::StrokeRect {
+            x,
+            y,
+            w,
+            h,
+            width,
+            color,
+            name,
+        } => (
+            Shape::StrokeRect {
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+                width: *width,
+                rgba: parse_rgba(color)?,
+            },
             name.clone(),
         ),
-        DrawCmd::StrokeEllipse { cx, cy, rx, ry, width, color, name } => (
-            Shape::StrokeEllipse { cx: *cx, cy: *cy, rx: *rx, ry: *ry, width: *width, rgba: parse_rgba(color)? },
+        DrawCmd::StrokeEllipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            width,
+            color,
+            name,
+        } => (
+            Shape::StrokeEllipse {
+                cx: *cx,
+                cy: *cy,
+                rx: *rx,
+                ry: *ry,
+                width: *width,
+                rgba: parse_rgba(color)?,
+            },
             name.clone(),
         ),
-        DrawCmd::RoundedRect { x, y, w, h, radius, color, name } => (
-            Shape::RoundedRect { x: *x, y: *y, w: *w, h: *h, radius: *radius, rgba: parse_rgba(color)? },
+        DrawCmd::RoundedRect {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            color,
+            name,
+        } => (
+            Shape::RoundedRect {
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+                radius: *radius,
+                rgba: parse_rgba(color)?,
+            },
             name.clone(),
         ),
-        DrawCmd::Text { x, y, text, size, color, name } => (
-            Shape::Text { x: *x, y: *y, text: text.clone(), size: *size, rgba: parse_rgba(color)? },
+        DrawCmd::Text {
+            x,
+            y,
+            text,
+            size,
+            color,
+            name,
+        } => (
+            Shape::Text {
+                x: *x,
+                y: *y,
+                text: text.clone(),
+                size: *size,
+                rgba: parse_rgba(color)?,
+            },
             // 기본 이름이면 텍스트 내용을 레이어 이름으로(패널 가독성).
-            if name == "text" { text.chars().take(20).collect() } else { name.clone() },
+            if name == "text" {
+                text.chars().take(20).collect()
+            } else {
+                name.clone()
+            },
         ),
-        DrawCmd::Path { points, width, color, name } => {
+        DrawCmd::Path {
+            points,
+            width,
+            color,
+            name,
+        } => {
             // "x,y x,y ..." → 평탄 좌표 배열.
             let mut flat = Vec::new();
             for pair in points.split_whitespace() {
@@ -391,7 +505,14 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
                 flat.push(y.trim().parse::<f32>().context("y 좌표")?);
             }
             anyhow::ensure!(flat.len() >= 2, "점이 최소 1개 필요");
-            (Shape::Path { points: flat, width: *width, rgba: parse_rgba(color)? }, name.clone())
+            (
+                Shape::Path {
+                    points: flat,
+                    width: *width,
+                    rgba: parse_rgba(color)?,
+                },
+                name.clone(),
+            )
         }
     })
 }
@@ -422,7 +543,10 @@ fn apply_actions(cli: &Cli, path: &DocPath, actions: Vec<Action>) -> Result<Batc
         if !res.ok {
             anyhow::bail!(
                 "{}",
-                res.issues.first().map(|i| i.message.clone()).unwrap_or_else(|| "적용 실패".into())
+                res.issues
+                    .first()
+                    .map(|i| i.message.clone())
+                    .unwrap_or_else(|| "적용 실패".into())
             );
         }
         return Ok(res);
@@ -435,7 +559,9 @@ fn apply_actions(cli: &Cli, path: &DocPath, actions: Vec<Action>) -> Result<Batc
         let issue = res.issues.first();
         anyhow::bail!(
             "{}",
-            issue.map(|i| i.message.clone()).unwrap_or_else(|| "적용 실패".into())
+            issue
+                .map(|i| i.message.clone())
+                .unwrap_or_else(|| "적용 실패".into())
         );
     }
     if !cli.dry_run {
@@ -461,7 +587,11 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 emit.doc_created(&cli.doc, &doc, false);
                 return Ok(());
             }
-            anyhow::ensure!(!path.exists() || cli.dry_run, "이미 문서가 존재: {}", cli.doc.display());
+            anyhow::ensure!(
+                !path.exists() || cli.dry_run,
+                "이미 문서가 존재: {}",
+                cli.doc.display()
+            );
             let doc = Document::new(*w, *h, depth_bd);
             if !cli.dry_run {
                 path.save(&doc)?;
@@ -480,10 +610,27 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             emit.doc_info(&doc);
             Ok(())
         }
+        Command::Doc(DocCmd::Compact) => {
+            anyhow::ensure!(cli.server.is_none(), "doc compact는 디스크 모드 전용");
+            let mut doc = path.load()?;
+            let changed = dispatch::compact_text_surfaces(&mut doc);
+            if changed > 0 && !cli.dry_run {
+                path.save(&doc)?;
+            }
+            emit.ok(&format!("문서 압축: 텍스트 표면 {changed}개"), cli.dry_run);
+            Ok(())
+        }
         Command::Layer(cmd) => run_layer(cli, emit, &path, cmd),
         Command::Blend(BlendCmd::Set { id, mode }) => {
             let mode = parse_blend(mode)?;
-            apply_one(cli, &path, Action::SetBlend { id: NodeRef::Node(*id), mode })?;
+            apply_one(
+                cli,
+                &path,
+                Action::SetBlend {
+                    id: NodeRef::Node(*id),
+                    mode,
+                },
+            )?;
             emit.ok(&format!("블렌드 설정: n{id} = {mode:?}"), cli.dry_run);
             Ok(())
         }
@@ -492,19 +639,31 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             // 한 도형을 새 레이어로 그린다(layer add의 Shapes source).
             let mut actions = vec![Action::AddPaintLayer {
                 name: name.clone(),
-                source: PixelSource::Shapes { items: vec![shape.clone()] },
+                source: PixelSource::Shapes {
+                    items: vec![shape.clone()],
+                },
                 index: None,
                 bind: Some("new".into()),
             }];
             // 텍스트는 편집용 meta를 자동 저장(웹 더블클릭 편집과 호환).
-            if let Shape::Text { x, y, text, size, rgba } = &shape {
+            if let Shape::Text {
+                x,
+                y,
+                text,
+                size,
+                rgba,
+            } = &shape
+            {
                 let meta = serde_json::json!({
                     "type": "text", "x": x, "y": y, "text": text, "size": size, "rgba": rgba,
                 })
                 .to_string();
                 actions.push(Action::SetProps {
                     id: NodeRef::Bind("new".into()),
-                    patch: PropPatch { meta: Some(meta), ..Default::default() },
+                    patch: PropPatch {
+                        meta: Some(meta),
+                        ..Default::default()
+                    },
                 });
             }
             apply_actions(cli, &path, actions)?;
@@ -527,7 +686,13 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             } else if let Some(r) = region {
                 let v: Vec<i64> = r.split(',').filter_map(|s| s.trim().parse().ok()).collect();
                 anyhow::ensure!(v.len() == 4 && v[2] > 0 && v[3] > 0, "region은 x,y,w,h");
-                dcli_raster::composite_region(&doc, v[0] as i32, v[1] as i32, v[2] as u32, v[3] as u32)
+                dcli_raster::composite_region(
+                    &doc,
+                    v[0] as i32,
+                    v[1] as i32,
+                    v[2] as u32,
+                    v[3] as u32,
+                )
             } else {
                 dcli_raster::composite(&doc)
             };
@@ -547,7 +712,12 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 path.save(&doc)?;
             }
             emit.ok(
-                &format!("PSD import: {} → {} (레이어 {}개)", input.display(), cli.doc.display(), doc.node_count()),
+                &format!(
+                    "PSD import: {} → {} (레이어 {}개)",
+                    input.display(),
+                    cli.doc.display(),
+                    doc.node_count()
+                ),
                 cli.dry_run,
             );
             Ok(())
@@ -559,7 +729,10 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             if !cli.dry_run {
                 std::fs::write(out, &bytes).context("PSD 쓰기")?;
             }
-            emit.ok(&format!("PSD export: {} ({} bytes)", out.display(), bytes.len()), cli.dry_run);
+            emit.ok(
+                &format!("PSD export: {} ({} bytes)", out.display(), bytes.len()),
+                cli.dry_run,
+            );
             Ok(())
         }
         Command::Undo => {
@@ -567,7 +740,14 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 anyhow::anyhow!("undo는 --server 모드 전용(디스크 모드는 세션 히스토리 없음)")
             })?;
             let changed = srv.undo()?;
-            emit.ok(if changed { "되돌림" } else { "되돌릴 항목 없음" }, false);
+            emit.ok(
+                if changed {
+                    "되돌림"
+                } else {
+                    "되돌릴 항목 없음"
+                },
+                false,
+            );
             Ok(())
         }
         Command::Redo => {
@@ -575,7 +755,14 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 anyhow::anyhow!("redo는 --server 모드 전용(디스크 모드는 세션 히스토리 없음)")
             })?;
             let changed = srv.redo()?;
-            emit.ok(if changed { "다시 적용" } else { "다시 적용할 항목 없음" }, false);
+            emit.ok(
+                if changed {
+                    "다시 적용"
+                } else {
+                    "다시 적용할 항목 없음"
+                },
+                false,
+            );
             Ok(())
         }
     }
@@ -602,7 +789,14 @@ fn current_frames(cli: &Cli, path: &DocPath) -> Result<Vec<dispatch::FrameDto>> 
     Ok(doc
         .frames
         .iter()
-        .map(|f| dispatch::FrameDto { id: f.id, name: f.name.clone(), x: f.x, y: f.y, w: f.w, h: f.h })
+        .map(|f| dispatch::FrameDto {
+            id: f.id,
+            name: f.name.clone(),
+            x: f.x,
+            y: f.y,
+            w: f.w,
+            h: f.h,
+        })
         .collect())
 }
 
@@ -610,11 +804,24 @@ fn run_frame(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &FrameCmd) -> Resul
     match cmd {
         FrameCmd::Add { name, x, y, w, h } => {
             let mut frames = current_frames(cli, path)?;
-            anyhow::ensure!(!frames.iter().any(|f| &f.name == name), "frame 이름 중복: {name}");
+            anyhow::ensure!(
+                !frames.iter().any(|f| &f.name == name),
+                "frame 이름 중복: {name}"
+            );
             let id = frames.iter().map(|f| f.id).max().map_or(0, |m| m + 1);
-            frames.push(dispatch::FrameDto { id, name: name.clone(), x: *x, y: *y, w: *w, h: *h });
+            frames.push(dispatch::FrameDto {
+                id,
+                name: name.clone(),
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+            });
             apply_one(cli, path, Action::SetFrames { frames })?;
-            emit.ok(&format!("frame 추가: \"{name}\" ({x},{y} {w}x{h})"), cli.dry_run);
+            emit.ok(
+                &format!("frame 추가: \"{name}\" ({x},{y} {w}x{h})"),
+                cli.dry_run,
+            );
             Ok(())
         }
         FrameCmd::List => {
@@ -625,7 +832,10 @@ fn run_frame(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &FrameCmd) -> Resul
                 println!("frame 없음 — dx frame add <이름> <x> <y> <w> <h>");
             } else {
                 for f in &frames {
-                    println!("  [{}] \"{}\" ({},{}) {}x{}", f.id, f.name, f.x, f.y, f.w, f.h);
+                    println!(
+                        "  [{}] \"{}\" ({},{}) {}x{}",
+                        f.id, f.name, f.x, f.y, f.w, f.h
+                    );
                 }
             }
             Ok(())
@@ -644,12 +854,19 @@ fn run_frame(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &FrameCmd) -> Resul
 
 fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Result<()> {
     match cmd {
-        LayerCmd::Add { name, image, fill, index } => {
+        LayerCmd::Add {
+            name,
+            image,
+            fill,
+            index,
+        } => {
             // CLI 인자를 dispatch PixelSource로 변환.
             let source = if let Some(img) = image {
                 PixelSource::PngPath { path: img.clone() }
             } else if let Some(f) = fill {
-                PixelSource::Fill { rgba: parse_rgba(f)? }
+                PixelSource::Fill {
+                    rgba: parse_rgba(f)?,
+                }
             } else {
                 PixelSource::Transparent
             };
@@ -665,7 +882,12 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                 emit.ok(&format!("레이어 추가(dry-run): \"{name}\""), true);
             } else {
                 let b = &res.bindings["new"];
-                emit.layer_added(NodeId(b.node), name, dcli_tile::SurfaceId(b.surface.unwrap()), false);
+                emit.layer_added(
+                    NodeId(b.node),
+                    name,
+                    dcli_tile::SurfaceId(b.surface.unwrap()),
+                    false,
+                );
             }
             Ok(())
         }
@@ -694,11 +916,24 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                 return Ok(());
             }
             let doc = path.load()?;
-            let node = doc.get(NodeId(*id)).ok_or_else(|| anyhow::anyhow!("레이어 없음: n{id}"))?;
+            let node = doc
+                .get(NodeId(*id))
+                .ok_or_else(|| anyhow::anyhow!("레이어 없음: n{id}"))?;
             emit.layer_get(node);
             Ok(())
         }
-        LayerCmd::Set { id, opacity, visible, name, x, y, scale_x, scale_y, rotation, meta } => {
+        LayerCmd::Set {
+            id,
+            opacity,
+            visible,
+            name,
+            x,
+            y,
+            scale_x,
+            scale_y,
+            rotation,
+            meta,
+        } => {
             // --x/--y, --scale-x/--scale-y는 clap requires로 항상 쌍.
             let offset = x.zip(*y);
             let scale = scale_x.zip(*scale_y);
@@ -711,28 +946,65 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                 rotation: *rotation,
                 meta: meta.clone(),
             };
-            apply_one(cli, path, Action::SetProps { id: NodeRef::Node(*id), patch })?;
+            apply_one(
+                cli,
+                path,
+                Action::SetProps {
+                    id: NodeRef::Node(*id),
+                    patch,
+                },
+            )?;
             emit.ok(&format!("레이어 속성 변경: n{id}"), cli.dry_run);
             Ok(())
         }
         LayerCmd::Move { id, to } => {
-            apply_one(cli, path, Action::MoveLayer { id: NodeRef::Node(*id), to: *to })?;
+            apply_one(
+                cli,
+                path,
+                Action::MoveLayer {
+                    id: NodeRef::Node(*id),
+                    to: *to,
+                },
+            )?;
             emit.ok(&format!("레이어 이동: n{id} → idx {to}"), cli.dry_run);
             Ok(())
         }
         LayerCmd::Delete { id } => {
-            apply_one(cli, path, Action::DeleteLayer { id: NodeRef::Node(*id) })?;
+            apply_one(
+                cli,
+                path,
+                Action::DeleteLayer {
+                    id: NodeRef::Node(*id),
+                },
+            )?;
             emit.ok(&format!("레이어 삭제: n{id}"), cli.dry_run);
             Ok(())
         }
         LayerCmd::Group { ids, name } => {
             let refs: Vec<NodeRef> = ids.iter().map(|i| NodeRef::Node(*i)).collect();
-            apply_one(cli, path, Action::GroupLayers { ids: refs, name: name.clone(), bind: None })?;
-            emit.ok(&format!("그룹 생성: \"{name}\" ({}개)", ids.len()), cli.dry_run);
+            apply_one(
+                cli,
+                path,
+                Action::GroupLayers {
+                    ids: refs,
+                    name: name.clone(),
+                    bind: None,
+                },
+            )?;
+            emit.ok(
+                &format!("그룹 생성: \"{name}\" ({}개)", ids.len()),
+                cli.dry_run,
+            );
             Ok(())
         }
         LayerCmd::Ungroup { id } => {
-            apply_one(cli, path, Action::Ungroup { id: NodeRef::Node(*id) })?;
+            apply_one(
+                cli,
+                path,
+                Action::Ungroup {
+                    id: NodeRef::Node(*id),
+                },
+            )?;
             emit.ok(&format!("그룹 해제: n{id}"), cli.dry_run);
             Ok(())
         }
@@ -740,7 +1012,10 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             let res = apply_one(
                 cli,
                 path,
-                Action::DuplicateLayer { id: NodeRef::Node(*id), bind: Some("copy".into()) },
+                Action::DuplicateLayer {
+                    id: NodeRef::Node(*id),
+                    bind: Some("copy".into()),
+                },
             )?;
             let new_id = res.bindings.get("copy").map(|b| b.node);
             emit.ok(

@@ -33,7 +33,10 @@ impl Emitter {
             println!("{value}");
         } else {
             println!("{human_label}:");
-            println!("{}", serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+            );
         }
     }
 
@@ -64,7 +67,11 @@ impl Emitter {
             &format!(
                 "{}문서 생성: {} ({}x{}, {:?}, {:?} 합성)",
                 if dry_run { "[dry-run] " } else { "" },
-                path.display(), doc.width, doc.height, doc.bit_depth, doc.blend_space
+                path.display(),
+                doc.width,
+                doc.height,
+                doc.bit_depth,
+                doc.blend_space
             ),
         );
     }
@@ -74,7 +81,11 @@ impl Emitter {
             dto::doc_info_json(doc),
             &format!(
                 "{}x{}, {:?}, {:?} 합성, 레이어 {}개",
-                doc.width, doc.height, doc.bit_depth, doc.blend_space, doc.node_count()
+                doc.width,
+                doc.height,
+                doc.bit_depth,
+                doc.blend_space,
+                doc.node_count()
             ),
         );
     }
@@ -87,7 +98,9 @@ impl Emitter {
             &format!(
                 "{}레이어 추가: n{} \"{}\" (표면 {})",
                 if dry_run { "[dry-run] " } else { "" },
-                id.0, name, sid
+                id.0,
+                name,
+                sid
             ),
         );
     }
@@ -113,7 +126,9 @@ impl Emitter {
             &format!(
                 "{}export: {} ({}x{})",
                 if dry_run { "[dry-run] " } else { "" },
-                out.display(), w, h
+                out.display(),
+                w,
+                h
             ),
         );
     }

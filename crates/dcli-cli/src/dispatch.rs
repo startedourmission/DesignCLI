@@ -10,7 +10,7 @@
 
 use anyhow::Result;
 use dcli_color::LinearPremul;
-use dcli_model::{BlendMode, History, NodeId, NodeProps, Op};
+use dcli_model::{BlendMode, Document, History, NodeId, NodeKind, NodeProps, Op};
 use dcli_tile::{Surface, SurfaceId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -46,9 +46,20 @@ pub enum PixelSource {
     /// 단색 채우기 (straight sRGB8 RGBA).
     Fill { rgba: [u8; 4] },
     /// 선형 그라디언트 — (x0,y0)→(x1,y1) 축 투영이 t. 표면 전체를 채운다.
-    LinearGradient { x0: f32, y0: f32, x1: f32, y1: f32, stops: Vec<GradientStop> },
+    LinearGradient {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        stops: Vec<GradientStop>,
+    },
     /// 원형(방사형) 그라디언트 — 중심 (cx,cy) 거리/radius가 t. 표면 전체를 채운다.
-    RadialGradient { cx: f32, cy: f32, radius: f32, stops: Vec<GradientStop> },
+    RadialGradient {
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        stops: Vec<GradientStop>,
+    },
     /// base64 인코딩된 PNG(8bit RGBA).
     PngBase64 { data: String },
     /// 디스크의 PNG 경로. (fs-sources 전용 — wasm 빌드에는 없음)
@@ -63,21 +74,71 @@ pub enum PixelSource {
 #[serde(tag = "shape", rename_all = "snake_case")]
 pub enum Shape {
     /// 채워진 사각형: 좌상단 (x,y), 크기 (w,h).
-    Rect { x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4] },
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        rgba: [u8; 4],
+    },
     /// 채워진 타원: 중심 (cx,cy), 반지름 (rx,ry).
-    Ellipse { cx: f32, cy: f32, rx: f32, ry: f32, rgba: [u8; 4] },
+    Ellipse {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        rgba: [u8; 4],
+    },
     /// 선분: (x0,y0)→(x1,y1), 두께 width.
-    Line { x0: f32, y0: f32, x1: f32, y1: f32, width: f32, rgba: [u8; 4] },
+    Line {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        width: f32,
+        rgba: [u8; 4],
+    },
     /// 테두리 사각형: 외곽선만, 두께 width(안쪽으로).
-    StrokeRect { x: f32, y: f32, w: f32, h: f32, width: f32, rgba: [u8; 4] },
+    StrokeRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        width: f32,
+        rgba: [u8; 4],
+    },
     /// 테두리 타원: 링만, 두께 width(안쪽으로).
-    StrokeEllipse { cx: f32, cy: f32, rx: f32, ry: f32, width: f32, rgba: [u8; 4] },
+    StrokeEllipse {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        width: f32,
+        rgba: [u8; 4],
+    },
     /// 모서리 둥근 채움 사각형: 코너 반지름 radius.
-    RoundedRect { x: f32, y: f32, w: f32, h: f32, radius: f32, rgba: [u8; 4] },
+    RoundedRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        rgba: [u8; 4],
+    },
     /// 텍스트(번들 폰트 Pretendard — 한글/라틴). (x,y)=첫 줄 좌상단, size=px, '\n' 줄바꿈.
-    Text { x: f32, y: f32, text: String, size: f32, rgba: [u8; 4] },
+    Text {
+        x: f32,
+        y: f32,
+        text: String,
+        size: f32,
+        rgba: [u8; 4],
+    },
     /// 자유곡선(브러시) — 점들을 둥근 끝(capsule) 선분으로 연결. points = [x0,y0,x1,y1,...].
-    Path { points: Vec<f32>, width: f32, rgba: [u8; 4] },
+    Path {
+        points: Vec<f32>,
+        width: f32,
+        rgba: [u8; 4],
+    },
 }
 
 /// 노드 속성 부분 패치(지정한 필드만 변경).
@@ -183,12 +244,94 @@ pub struct FrameDto {
 
 impl From<FrameDto> for dcli_model::Frame {
     fn from(f: FrameDto) -> Self {
-        dcli_model::Frame { id: f.id, name: f.name, x: f.x, y: f.y, w: f.w, h: f.h }
+        dcli_model::Frame {
+            id: f.id,
+            name: f.name,
+            x: f.x,
+            y: f.y,
+            w: f.w,
+            h: f.h,
+        }
     }
 }
 
 fn default_layer_name() -> String {
     "layer".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct TextMeta {
+    #[serde(rename = "type")]
+    kind: String,
+    x: f32,
+    y: f32,
+    text: String,
+    size: f32,
+    rgba: [u8; 4],
+}
+
+/// 구버전 문서의 텍스트 레이어를 내용 크기 표면으로 다시 굽는다.
+///
+/// 예전에는 텍스트 shape가 문서 전체 크기 표면으로 저장되어, 에이전트가 줄별 텍스트 레이어를
+/// 많이 만들면 `.dxpkg` snapshot과 브라우저 WASM 메모리가 급격히 커졌다. 텍스트 meta가
+/// 남아있고 transform이 identity인 paint layer만 안전하게 압축한다.
+pub fn compact_text_surfaces(doc: &mut Document) -> usize {
+    let ids: Vec<NodeId> = doc.order().to_vec();
+    let mut jobs = Vec::new();
+    for id in ids {
+        let Some(node) = doc.get(id) else { continue };
+        if !node.is_identity_transform() {
+            continue;
+        }
+        let NodeKind::Paint { surface } = node.kind else {
+            continue;
+        };
+        let Some(meta) = node.meta.as_deref() else {
+            continue;
+        };
+        let Ok(tm) = serde_json::from_str::<TextMeta>(meta) else {
+            continue;
+        };
+        if tm.kind != "text" || tm.size <= 0.0 || tm.text.is_empty() {
+            continue;
+        }
+        let Some(old) = doc.pixels().get(surface) else {
+            continue;
+        };
+        let doc_area = (doc.width as u64).saturating_mul(doc.height as u64);
+        let old_area = (old.width() as u64).saturating_mul(old.height() as u64);
+        if old_area < doc_area / 2 {
+            continue;
+        }
+        let source = PixelSource::Shapes {
+            items: vec![Shape::Text {
+                x: tm.x,
+                y: tm.y,
+                text: tm.text,
+                size: tm.size,
+                rgba: tm.rgba,
+            }],
+        };
+        let Ok((new_surface, local_offset)) = materialize(&source, doc.width, doc.height) else {
+            continue;
+        };
+        let new_area = (new_surface.width() as u64).saturating_mul(new_surface.height() as u64);
+        if new_area >= old_area {
+            continue;
+        }
+        jobs.push((id, surface, new_surface, local_offset));
+    }
+
+    let mut changed = 0usize;
+    for (id, sid, surface, local_offset) in jobs {
+        if let Some(node) = doc.get_mut(id) {
+            node.offset.0 += local_offset.0;
+            node.offset.1 += local_offset.1;
+        }
+        doc.pixels_mut().restore(sid, surface);
+        changed += 1;
+    }
+    changed
 }
 
 /// batch 실행 이슈(self-correction용 구조화 에러).
@@ -236,7 +379,9 @@ fn decode_png(bytes: &[u8], w: u32, h: u32) -> Result<Surface, String> {
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = dec.read_info().map_err(|e| format!("PNG 헤더 오류: {e}"))?;
     let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(|e| format!("PNG 디코드 오류: {e}"))?;
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("PNG 디코드 오류: {e}"))?;
     let (iw, ih) = (info.width, info.height);
     let data = &buf[..info.buffer_size()];
     // EXPAND|STRIP_16 후엔 8bit Rgb/Rgba/Grayscale/GrayscaleAlpha만 남는다.
@@ -268,12 +413,21 @@ fn decode_png(bytes: &[u8], w: u32, h: u32) -> Result<Surface, String> {
 fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<(Surface, (i32, i32)), String> {
     match source {
         PixelSource::Transparent => Ok((Surface::new(w, h), (0, 0))),
-        PixelSource::Fill { rgba } => Ok((Surface::filled(
-            w,
-            h,
-            LinearPremul::from_srgb8_straight(rgba[0], rgba[1], rgba[2], rgba[3]),
-        ), (0, 0))),
-        PixelSource::LinearGradient { x0, y0, x1, y1, stops } => {
+        PixelSource::Fill { rgba } => Ok((
+            Surface::filled(
+                w,
+                h,
+                LinearPremul::from_srgb8_straight(rgba[0], rgba[1], rgba[2], rgba[3]),
+            ),
+            (0, 0),
+        )),
+        PixelSource::LinearGradient {
+            x0,
+            y0,
+            x1,
+            y1,
+            stops,
+        } => {
             if stops.is_empty() {
                 return Err("그라디언트 stops가 비어 있음".to_string());
             }
@@ -282,7 +436,12 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<(Surface, (i32, i
             dcli_raster::shapes::fill_linear_gradient(&mut s, *x0, *y0, *x1, *y1, &pairs);
             Ok((s, (0, 0)))
         }
-        PixelSource::RadialGradient { cx, cy, radius, stops } => {
+        PixelSource::RadialGradient {
+            cx,
+            cy,
+            radius,
+            stops,
+        } => {
             if stops.is_empty() {
                 return Err("그라디언트 stops가 비어 있음".to_string());
             }
@@ -304,13 +463,6 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<(Surface, (i32, i
             decode_png(&bytes, w, h).map(|s| (s, (0, 0)))
         }
         PixelSource::Shapes { items } => {
-            if items.iter().any(|s| matches!(s, Shape::Text { .. })) {
-                let mut s = Surface::new(w, h);
-                for shape in items {
-                    draw_shape(&mut s, shape);
-                }
-                return Ok((s, (0, 0)));
-            }
             let Some((x0, y0, x1, y1)) = shape_bounds(items) else {
                 return Ok((Surface::new(1, 1), (0, 0)));
             };
@@ -342,7 +494,9 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
                     add(*x - 1.0, *y - 1.0, *x + *w + 1.0, *y + *h + 1.0);
                 }
             }
-            Shape::StrokeRect { x, y, w, h, width, .. } => {
+            Shape::StrokeRect {
+                x, y, w, h, width, ..
+            } => {
                 if *w > 0.0 && *h > 0.0 && *width > 0.0 {
                     let m = width.max(1.0);
                     add(*x - m, *y - m, *x + *w + m, *y + *h + m);
@@ -350,19 +504,43 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
             }
             Shape::Ellipse { cx, cy, rx, ry, .. } => {
                 if *rx > 0.0 && *ry > 0.0 {
-                    add(*cx - *rx - 1.0, *cy - *ry - 1.0, *cx + *rx + 1.0, *cy + *ry + 1.0);
+                    add(
+                        *cx - *rx - 1.0,
+                        *cy - *ry - 1.0,
+                        *cx + *rx + 1.0,
+                        *cy + *ry + 1.0,
+                    );
                 }
             }
-            Shape::StrokeEllipse { cx, cy, rx, ry, width, .. } => {
+            Shape::StrokeEllipse {
+                cx,
+                cy,
+                rx,
+                ry,
+                width,
+                ..
+            } => {
                 if *rx > 0.0 && *ry > 0.0 && *width > 0.0 {
                     let m = width.max(1.0);
                     add(*cx - *rx - m, *cy - *ry - m, *cx + *rx + m, *cy + *ry + m);
                 }
             }
-            Shape::Line { x0, y0, x1, y1, width, .. } => {
+            Shape::Line {
+                x0,
+                y0,
+                x1,
+                y1,
+                width,
+                ..
+            } => {
                 if *width > 0.0 {
                     let m = width * 0.5 + 1.0;
-                    add(x0.min(*x1) - m, y0.min(*y1) - m, x0.max(*x1) + m, y0.max(*y1) + m);
+                    add(
+                        x0.min(*x1) - m,
+                        y0.min(*y1) - m,
+                        x0.max(*x1) + m,
+                        y0.max(*y1) + m,
+                    );
                 }
             }
             Shape::Path { points, width, .. } => {
@@ -370,7 +548,9 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
                     let m = width * 0.5 + 1.0;
                     let mut xs = points.iter().step_by(2).copied();
                     let mut ys = points.iter().skip(1).step_by(2).copied();
-                    let (Some(mut minx), Some(mut miny)) = (xs.next(), ys.next()) else { continue };
+                    let (Some(mut minx), Some(mut miny)) = (xs.next(), ys.next()) else {
+                        continue;
+                    };
                     let (mut maxx, mut maxy) = (minx, miny);
                     for x in xs {
                         minx = minx.min(x);
@@ -383,7 +563,15 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
                     add(minx - m, miny - m, maxx + m, maxy + m);
                 }
             }
-            Shape::Text { .. } => {}
+            Shape::Text {
+                x, y, text, size, ..
+            } => {
+                let (tw, th) = dcli_raster::text::measure_text(text, *size);
+                if tw > 0.0 && th > 0.0 {
+                    let m = size.max(1.0) * 0.15 + 2.0;
+                    add(*x - m, *y - m, *x + tw + m, *y + th + m);
+                }
+            }
         }
     }
     b
@@ -391,21 +579,104 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
 
 fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
     match shape {
-        Shape::Rect { x, y, w, h, rgba } =>
-            Shape::Rect { x: x + dx, y: y + dy, w: *w, h: *h, rgba: *rgba },
-        Shape::Ellipse { cx, cy, rx, ry, rgba } =>
-            Shape::Ellipse { cx: cx + dx, cy: cy + dy, rx: *rx, ry: *ry, rgba: *rgba },
-        Shape::Line { x0, y0, x1, y1, width, rgba } =>
-            Shape::Line { x0: x0 + dx, y0: y0 + dy, x1: x1 + dx, y1: y1 + dy, width: *width, rgba: *rgba },
-        Shape::StrokeRect { x, y, w, h, width, rgba } =>
-            Shape::StrokeRect { x: x + dx, y: y + dy, w: *w, h: *h, width: *width, rgba: *rgba },
-        Shape::StrokeEllipse { cx, cy, rx, ry, width, rgba } =>
-            Shape::StrokeEllipse { cx: cx + dx, cy: cy + dy, rx: *rx, ry: *ry, width: *width, rgba: *rgba },
-        Shape::RoundedRect { x, y, w, h, radius, rgba } =>
-            Shape::RoundedRect { x: x + dx, y: y + dy, w: *w, h: *h, radius: *radius, rgba: *rgba },
-        Shape::Text { x, y, text, size, rgba } =>
-            Shape::Text { x: x + dx, y: y + dy, text: text.clone(), size: *size, rgba: *rgba },
-        Shape::Path { points, width, rgba } => {
+        Shape::Rect { x, y, w, h, rgba } => Shape::Rect {
+            x: x + dx,
+            y: y + dy,
+            w: *w,
+            h: *h,
+            rgba: *rgba,
+        },
+        Shape::Ellipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            rgba,
+        } => Shape::Ellipse {
+            cx: cx + dx,
+            cy: cy + dy,
+            rx: *rx,
+            ry: *ry,
+            rgba: *rgba,
+        },
+        Shape::Line {
+            x0,
+            y0,
+            x1,
+            y1,
+            width,
+            rgba,
+        } => Shape::Line {
+            x0: x0 + dx,
+            y0: y0 + dy,
+            x1: x1 + dx,
+            y1: y1 + dy,
+            width: *width,
+            rgba: *rgba,
+        },
+        Shape::StrokeRect {
+            x,
+            y,
+            w,
+            h,
+            width,
+            rgba,
+        } => Shape::StrokeRect {
+            x: x + dx,
+            y: y + dy,
+            w: *w,
+            h: *h,
+            width: *width,
+            rgba: *rgba,
+        },
+        Shape::StrokeEllipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            width,
+            rgba,
+        } => Shape::StrokeEllipse {
+            cx: cx + dx,
+            cy: cy + dy,
+            rx: *rx,
+            ry: *ry,
+            width: *width,
+            rgba: *rgba,
+        },
+        Shape::RoundedRect {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            rgba,
+        } => Shape::RoundedRect {
+            x: x + dx,
+            y: y + dy,
+            w: *w,
+            h: *h,
+            radius: *radius,
+            rgba: *rgba,
+        },
+        Shape::Text {
+            x,
+            y,
+            text,
+            size,
+            rgba,
+        } => Shape::Text {
+            x: x + dx,
+            y: y + dy,
+            text: text.clone(),
+            size: *size,
+            rgba: *rgba,
+        },
+        Shape::Path {
+            points,
+            width,
+            rgba,
+        } => {
             let mut p = points.clone();
             for chunk in p.chunks_mut(2) {
                 if let [x, y] = chunk {
@@ -413,7 +684,11 @@ fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
                     *y += dy;
                 }
             }
-            Shape::Path { points: p, width: *width, rgba: *rgba }
+            Shape::Path {
+                points: p,
+                width: *width,
+                rgba: *rgba,
+            }
         }
     }
 }
@@ -423,23 +698,59 @@ fn draw_shape(s: &mut Surface, shape: &Shape) {
     use dcli_raster::shapes;
     match shape {
         Shape::Rect { x, y, w, h, rgba } => shapes::fill_rect(s, *x, *y, *w, *h, *rgba),
-        Shape::Ellipse { cx, cy, rx, ry, rgba } => shapes::fill_ellipse(s, *cx, *cy, *rx, *ry, *rgba),
-        Shape::Line { x0, y0, x1, y1, width, rgba } => {
-            shapes::stroke_line(s, *x0, *y0, *x1, *y1, *width, *rgba)
-        }
-        Shape::StrokeRect { x, y, w, h, width, rgba } => {
-            shapes::stroke_rect(s, *x, *y, *w, *h, *width, *rgba)
-        }
-        Shape::StrokeEllipse { cx, cy, rx, ry, width, rgba } => {
-            shapes::stroke_ellipse(s, *cx, *cy, *rx, *ry, *width, *rgba)
-        }
-        Shape::RoundedRect { x, y, w, h, radius, rgba } => {
-            shapes::fill_rounded_rect(s, *x, *y, *w, *h, *radius, *rgba)
-        }
-        Shape::Text { x, y, text, size, rgba } => {
+        Shape::Ellipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            rgba,
+        } => shapes::fill_ellipse(s, *cx, *cy, *rx, *ry, *rgba),
+        Shape::Line {
+            x0,
+            y0,
+            x1,
+            y1,
+            width,
+            rgba,
+        } => shapes::stroke_line(s, *x0, *y0, *x1, *y1, *width, *rgba),
+        Shape::StrokeRect {
+            x,
+            y,
+            w,
+            h,
+            width,
+            rgba,
+        } => shapes::stroke_rect(s, *x, *y, *w, *h, *width, *rgba),
+        Shape::StrokeEllipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            width,
+            rgba,
+        } => shapes::stroke_ellipse(s, *cx, *cy, *rx, *ry, *width, *rgba),
+        Shape::RoundedRect {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            rgba,
+        } => shapes::fill_rounded_rect(s, *x, *y, *w, *h, *radius, *rgba),
+        Shape::Text {
+            x,
+            y,
+            text,
+            size,
+            rgba,
+        } => {
             dcli_raster::text::draw_text(s, *x, *y, text, *size, *rgba);
         }
-        Shape::Path { points, width, rgba } => {
+        Shape::Path {
+            points,
+            width,
+            rgba,
+        } => {
             // 둥근 끝 선분 연쇄 — capsule 거리 AA라 관절이 자연스럽게 이어진다.
             for seg in points.windows(4).step_by(2) {
                 shapes::stroke_line(s, seg[0], seg[1], seg[2], seg[3], *width, *rgba);
@@ -456,10 +767,12 @@ fn draw_shape(s: &mut Surface, shape: &Shape) {
 fn resolve_ref(r: &NodeRef, binder: &HashMap<String, Binding>) -> Result<NodeId, (String, String)> {
     match r {
         NodeRef::Node(id) => Ok(NodeId(*id)),
-        NodeRef::Bind(name) => binder
-            .get(name)
-            .map(|b| b.node)
-            .ok_or_else(|| ("unresolved_ref".to_string(), format!("bind 이름 '{name}' 미해결"))),
+        NodeRef::Bind(name) => binder.get(name).map(|b| b.node).ok_or_else(|| {
+            (
+                "unresolved_ref".to_string(),
+                format!("bind 이름 '{name}' 미해결"),
+            )
+        }),
     }
 }
 
@@ -517,7 +830,13 @@ pub fn apply_batch(h: &mut History, actions: &[Action], dry_run: bool) -> BatchR
             bindings: binder
                 .into_iter()
                 .map(|(k, v)| {
-                    (k, BindingOut { node: v.node.0, surface: v.surface.map(|s| s.0) })
+                    (
+                        k,
+                        BindingOut {
+                            node: v.node.0,
+                            surface: v.surface.map(|s| s.0),
+                        },
+                    )
                 })
                 .collect(),
             issues,
@@ -550,26 +869,48 @@ fn try_one(
     hh: u32,
 ) -> Result<(), (String, String)> {
     match action {
-        Action::AddPaintLayer { name, source, index, bind } => {
+        Action::AddPaintLayer {
+            name,
+            source,
+            index,
+            bind,
+        } => {
             let (surface, offset) =
                 materialize(source, w, hh).map_err(|m| ("bad_surface_source".to_string(), m))?;
             let sid = h.doc.add_surface(surface);
             owned.push(sid); // 롤백 시 회수 대상으로 추적.
-            h.stage(Op::AddPaintLayer { name: name.clone(), surface: sid, index: *index, forced_id: None })
-                .map_err(op_err)?;
+            h.stage(Op::AddPaintLayer {
+                name: name.clone(),
+                surface: sid,
+                index: *index,
+                forced_id: None,
+            })
+            .map_err(op_err)?;
             let node = *h.doc.order().last().expect("방금 추가됨");
             if offset != (0, 0) {
                 let props = {
                     let n = h.doc.get(node).expect("방금 추가됨");
-                    NodeProps { offset, ..NodeProps::of(n) }
+                    NodeProps {
+                        offset,
+                        ..NodeProps::of(n)
+                    }
                 };
                 h.stage(Op::SetProps { id: node, props }).map_err(op_err)?;
             }
             if let Some(b) = bind {
                 if binder.contains_key(b) {
-                    return Err(("duplicate_bind".to_string(), format!("bind 이름 '{b}' 중복")));
+                    return Err((
+                        "duplicate_bind".to_string(),
+                        format!("bind 이름 '{b}' 중복"),
+                    ));
                 }
-                binder.insert(b.clone(), Binding { node, surface: Some(sid) });
+                binder.insert(
+                    b.clone(),
+                    Binding {
+                        node,
+                        surface: Some(sid),
+                    },
+                );
             }
             Ok(())
         }
@@ -583,16 +924,29 @@ fn try_one(
             let node = h
                 .doc
                 .get(nid)
-                .ok_or_else(|| ("node_not_found".to_string(), format!("노드 n{} 없음", nid.0)))?
+                .ok_or_else(|| {
+                    (
+                        "node_not_found".to_string(),
+                        format!("노드 n{} 없음", nid.0),
+                    )
+                })?
                 .clone();
             let NodeKind::Paint { surface } = node.kind else {
-                return Err(("not_paint".to_string(), format!("n{}는 페인트 레이어가 아님", nid.0)));
+                return Err((
+                    "not_paint".to_string(),
+                    format!("n{}는 페인트 레이어가 아님", nid.0),
+                ));
             };
             let surf = h
                 .doc
                 .pixels()
                 .get(surface)
-                .ok_or_else(|| ("surface_not_found".to_string(), format!("표면 {surface} 없음")))?
+                .ok_or_else(|| {
+                    (
+                        "surface_not_found".to_string(),
+                        format!("표면 {surface} 없음"),
+                    )
+                })?
                 .clone();
             let sid = h.doc.add_surface(surf);
             owned.push(sid); // 롤백 시 회수.
@@ -616,12 +970,22 @@ fn try_one(
                 rotation: node.rotation,
                 meta: node.meta.clone(),
             };
-            h.stage(Op::SetProps { id: new_id, props }).map_err(op_err)?;
+            h.stage(Op::SetProps { id: new_id, props })
+                .map_err(op_err)?;
             if let Some(b) = bind {
                 if binder.contains_key(b) {
-                    return Err(("duplicate_bind".to_string(), format!("bind 이름 '{b}' 중복")));
+                    return Err((
+                        "duplicate_bind".to_string(),
+                        format!("bind 이름 '{b}' 중복"),
+                    ));
                 }
-                binder.insert(b.clone(), Binding { node: new_id, surface: Some(sid) });
+                binder.insert(
+                    b.clone(),
+                    Binding {
+                        node: new_id,
+                        surface: Some(sid),
+                    },
+                );
             }
             Ok(())
         }
@@ -632,7 +996,10 @@ fn try_one(
         Action::SetProps { id, patch } => {
             let nid = resolve_ref(id, binder)?;
             let node = h.doc.get(nid).ok_or_else(|| {
-                ("node_not_found".to_string(), format!("노드 n{} 없음", nid.0))
+                (
+                    "node_not_found".to_string(),
+                    format!("노드 n{} 없음", nid.0),
+                )
             })?;
             let mut props = NodeProps::of(node);
             if let Some(n) = &patch.name {
@@ -661,9 +1028,15 @@ fn try_one(
         Action::SetBlend { id, mode } => {
             let nid = resolve_ref(id, binder)?;
             let node = h.doc.get(nid).ok_or_else(|| {
-                ("node_not_found".to_string(), format!("노드 n{} 없음", nid.0))
+                (
+                    "node_not_found".to_string(),
+                    format!("노드 n{} 없음", nid.0),
+                )
             })?;
-            let props = NodeProps { blend: (*mode).into(), ..NodeProps::of(node) };
+            let props = NodeProps {
+                blend: (*mode).into(),
+                ..NodeProps::of(node)
+            };
             h.stage(Op::SetProps { id: nid, props }).map_err(op_err)
         }
         Action::GroupLayers { ids, name, bind } => {
@@ -671,8 +1044,12 @@ fn try_one(
                 .iter()
                 .map(|r| resolve_ref(r, binder))
                 .collect::<Result<_, _>>()?;
-            h.stage(Op::GroupLayers { ids: nids, name: name.clone(), forced_id: None })
-                .map_err(op_err)?;
+            h.stage(Op::GroupLayers {
+                ids: nids,
+                name: name.clone(),
+                forced_id: None,
+            })
+            .map_err(op_err)?;
             // 그룹 노드는 order에 새로 들어간 노드 — 멤버 최상단 위치라 last가 아닐 수 있음.
             // GroupLayers op은 새 id를 발급하므로 next 직전 id를 찾는다: order에서 kind=Group이며
             // 방금 생성된(가장 큰 id) 노드.
@@ -685,9 +1062,18 @@ fn try_one(
                 .expect("그룹 생성됨");
             if let Some(b) = bind {
                 if binder.contains_key(b) {
-                    return Err(("duplicate_bind".to_string(), format!("bind 이름 '{b}' 중복")));
+                    return Err((
+                        "duplicate_bind".to_string(),
+                        format!("bind 이름 '{b}' 중복"),
+                    ));
                 }
-                binder.insert(b.clone(), Binding { node: gid, surface: None });
+                binder.insert(
+                    b.clone(),
+                    Binding {
+                        node: gid,
+                        surface: None,
+                    },
+                );
             }
             Ok(())
         }
@@ -696,8 +1082,7 @@ fn try_one(
             h.stage(Op::Ungroup { id: nid }).map_err(op_err)
         }
         Action::SetFrames { frames } => {
-            let frames: Vec<dcli_model::Frame> =
-                frames.iter().cloned().map(Into::into).collect();
+            let frames: Vec<dcli_model::Frame> = frames.iter().cloned().map(Into::into).collect();
             h.stage(Op::SetFrames { frames }).map_err(op_err)
         }
     }
@@ -731,9 +1116,17 @@ mod tests {
     fn batch_add_with_named_binding() {
         let mut h = History::new(doc());
         let actions = vec![
-            Action::AddPaintLayer { name: "bg".into(), source: fill(255, 0, 0, 255), index: None, bind: Some("bg".into()) },
+            Action::AddPaintLayer {
+                name: "bg".into(),
+                source: fill(255, 0, 0, 255),
+                index: None,
+                bind: Some("bg".into()),
+            },
             // 같은 batch에서 방금 만든 노드를 bind로 참조.
-            Action::SetBlend { id: NodeRef::Bind("bg".into()), mode: BlendModeDto::Multiply },
+            Action::SetBlend {
+                id: NodeRef::Bind("bg".into()),
+                mode: BlendModeDto::Multiply,
+            },
         ];
         let res = apply_batch(&mut h, &actions, false);
         assert!(res.ok, "issues: {:?}", res.issues);
@@ -749,10 +1142,22 @@ mod tests {
         let mut h = History::new(doc());
         let before_surfaces = h.doc.pixels().len();
         let actions = vec![
-            Action::AddPaintLayer { name: "a".into(), source: fill(1, 2, 3, 255), index: None, bind: None },
-            Action::AddPaintLayer { name: "b".into(), source: fill(4, 5, 6, 255), index: None, bind: None },
+            Action::AddPaintLayer {
+                name: "a".into(),
+                source: fill(1, 2, 3, 255),
+                index: None,
+                bind: None,
+            },
+            Action::AddPaintLayer {
+                name: "b".into(),
+                source: fill(4, 5, 6, 255),
+                index: None,
+                bind: None,
+            },
             // 존재하지 않는 노드 참조 → 실패.
-            Action::DeleteLayer { id: NodeRef::Node(999) },
+            Action::DeleteLayer {
+                id: NodeRef::Node(999),
+            },
         ];
         let res = apply_batch(&mut h, &actions, false);
         assert!(!res.ok);
@@ -766,7 +1171,9 @@ mod tests {
     #[test]
     fn unresolved_bind_fails() {
         let mut h = History::new(doc());
-        let actions = vec![Action::DeleteLayer { id: NodeRef::Bind("nope".into()) }];
+        let actions = vec![Action::DeleteLayer {
+            id: NodeRef::Bind("nope".into()),
+        }];
         let res = apply_batch(&mut h, &actions, false);
         assert!(!res.ok);
         assert_eq!(res.issues[0].code, "unresolved_ref");
@@ -795,7 +1202,13 @@ mod tests {
         let actions = vec![Action::AddPaintLayer {
             name: "shapes".into(),
             source: PixelSource::Shapes {
-                items: vec![Shape::Rect { x: 4.0, y: 4.0, w: 8.0, h: 8.0, rgba: [255, 0, 0, 255] }],
+                items: vec![Shape::Rect {
+                    x: 4.0,
+                    y: 4.0,
+                    w: 8.0,
+                    h: 8.0,
+                    rgba: [255, 0, 0, 255],
+                }],
             },
             index: None,
             bind: None,
@@ -816,7 +1229,13 @@ mod tests {
         let actions = vec![Action::AddPaintLayer {
             name: "outside".into(),
             source: PixelSource::Shapes {
-                items: vec![Shape::Rect { x: 20.0, y: 4.0, w: 6.0, h: 6.0, rgba: [255, 0, 0, 255] }],
+                items: vec![Shape::Rect {
+                    x: 20.0,
+                    y: 4.0,
+                    w: 6.0,
+                    h: 6.0,
+                    rgba: [255, 0, 0, 255],
+                }],
             },
             index: None,
             bind: None,
@@ -827,10 +1246,120 @@ mod tests {
         let node = h.doc.get(id).unwrap();
         assert_eq!(node.offset, (19, 3), "표면 원점은 AA 여백 포함 bounds");
         let full = dcli_raster::composite(&h.doc).to_srgb8_rgba();
-        assert!(full.iter().all(|v| *v == 0), "문서 export 영역 밖이라 full doc에는 안 보임");
+        assert!(
+            full.iter().all(|v| *v == 0),
+            "문서 export 영역 밖이라 full doc에는 안 보임"
+        );
         let region = dcli_raster::composite_region(&h.doc, 18, 0, 12, 12).to_srgb8_rgba();
         let idx = ((6 * 12) + 4) * 4;
-        assert_eq!(&region[idx..idx + 4], &[255, 0, 0, 255], "문서 밖 region에서는 보임");
+        assert_eq!(
+            &region[idx..idx + 4],
+            &[255, 0, 0, 255],
+            "문서 밖 region에서는 보임"
+        );
+    }
+
+    #[test]
+    fn text_shapes_use_content_sized_surface() {
+        let mut h = History::new(Document::new(1080, 1080, BitDepth::U8));
+        let actions = vec![Action::AddPaintLayer {
+            name: "text".into(),
+            source: PixelSource::Shapes {
+                items: vec![Shape::Text {
+                    x: 120.0,
+                    y: 230.0,
+                    text: "CLI로 만든".into(),
+                    size: 78.0,
+                    rgba: [23, 38, 35, 255],
+                }],
+            },
+            index: None,
+            bind: Some("text".into()),
+        }];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        let sid = dcli_tile::SurfaceId(res.bindings["text"].surface.unwrap());
+        let surface = h.doc.pixels().get(sid).unwrap();
+        assert!(
+            surface.width() < 500,
+            "텍스트 표면 폭이 문서 전체에 가까움: {}",
+            surface.width()
+        );
+        assert!(
+            surface.height() < 140,
+            "텍스트 표면 높이가 문서 전체에 가까움: {}",
+            surface.height()
+        );
+        let node = h.doc.get(h.doc.order()[0]).unwrap();
+        assert!(
+            node.offset.0 > 90 && node.offset.0 < 130,
+            "텍스트 offset x 비정상: {}",
+            node.offset.0
+        );
+        assert!(
+            node.offset.1 > 190 && node.offset.1 < 240,
+            "텍스트 offset y 비정상: {}",
+            node.offset.1
+        );
+    }
+
+    #[test]
+    fn compact_text_surfaces_shrinks_legacy_full_canvas_text() {
+        let mut h = History::new(Document::new(1080, 1080, BitDepth::U8));
+        let actions = vec![
+            Action::AddPaintLayer {
+                name: "legacy text".into(),
+                source: PixelSource::Transparent,
+                index: None,
+                bind: Some("text".into()),
+            },
+            Action::SetProps {
+                id: NodeRef::Bind("text".into()),
+                patch: PropPatch {
+                    meta: Some(
+                        serde_json::json!({
+                            "type": "text",
+                            "x": 120.0,
+                            "y": 230.0,
+                            "text": "CLI로 만든",
+                            "size": 78.0,
+                            "rgba": [23, 38, 35, 255],
+                        })
+                        .to_string(),
+                    ),
+                    ..Default::default()
+                },
+            },
+        ];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        let sid = dcli_tile::SurfaceId(res.bindings["text"].surface.unwrap());
+        assert_eq!(h.doc.pixels().get(sid).unwrap().width(), 1080);
+
+        let changed = compact_text_surfaces(&mut h.doc);
+        assert_eq!(changed, 1);
+        let surface = h.doc.pixels().get(sid).unwrap();
+        assert!(
+            surface.width() < 500,
+            "압축 후 폭이 너무 큼: {}",
+            surface.width()
+        );
+        assert!(
+            surface.height() < 140,
+            "압축 후 높이가 너무 큼: {}",
+            surface.height()
+        );
+        let node = h.doc.get(h.doc.order()[0]).unwrap();
+        assert!(
+            node.offset.0 > 90 && node.offset.0 < 130,
+            "압축 후 offset x 비정상: {}",
+            node.offset.0
+        );
+        assert!(
+            node.offset.1 > 190 && node.offset.1 < 240,
+            "압축 후 offset y 비정상: {}",
+            node.offset.1
+        );
     }
 
     #[test]
@@ -846,8 +1375,14 @@ mod tests {
                 x1: 15.5,
                 y1: 0.0,
                 stops: vec![
-                    GradientStop { at: 0.0, rgba: [0, 0, 0, 255] },
-                    GradientStop { at: 1.0, rgba: [255, 255, 255, 255] },
+                    GradientStop {
+                        at: 0.0,
+                        rgba: [0, 0, 0, 255],
+                    },
+                    GradientStop {
+                        at: 1.0,
+                        rgba: [255, 255, 255, 255],
+                    },
                 ],
             },
             index: None,
@@ -868,8 +1403,18 @@ mod tests {
     fn duplicate_bind_rejected() {
         let mut h = History::new(doc());
         let actions = vec![
-            Action::AddPaintLayer { name: "a".into(), source: fill(1, 1, 1, 255), index: None, bind: Some("dup".into()) },
-            Action::AddPaintLayer { name: "b".into(), source: fill(2, 2, 2, 255), index: None, bind: Some("dup".into()) },
+            Action::AddPaintLayer {
+                name: "a".into(),
+                source: fill(1, 1, 1, 255),
+                index: None,
+                bind: Some("dup".into()),
+            },
+            Action::AddPaintLayer {
+                name: "b".into(),
+                source: fill(2, 2, 2, 255),
+                index: None,
+                bind: Some("dup".into()),
+            },
         ];
         let res = apply_batch(&mut h, &actions, false);
         assert!(!res.ok);

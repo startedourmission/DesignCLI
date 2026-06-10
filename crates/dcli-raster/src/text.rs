@@ -20,7 +20,14 @@ fn font() -> &'static FontRef<'static> {
 /// 텍스트를 (x, y)에 그린다 — (x, y)는 첫 줄의 **좌상단** 기준, `size`는 px 단위.
 ///
 /// 반환: 그린 텍스트의 (width, height) 픽셀 (레이아웃 측정값, 빈 문자열이면 0,0).
-pub fn draw_text(s: &mut Surface, x: f32, y: f32, text: &str, size: f32, rgba: [u8; 4]) -> (f32, f32) {
+pub fn draw_text(
+    s: &mut Surface,
+    x: f32,
+    y: f32,
+    text: &str,
+    size: f32,
+    rgba: [u8; 4],
+) -> (f32, f32) {
     if size <= 0.0 || text.is_empty() {
         return (0.0, 0.0);
     }
@@ -47,7 +54,8 @@ pub fn draw_text(s: &mut Surface, x: f32, y: f32, text: &str, size: f32, rgba: [
         if let Some(p) = prev {
             caret_x += scaled.kern(p, gid);
         }
-        let glyph = gid.with_scale_and_position(PxScale::from(size), ab_glyph::point(caret_x, baseline));
+        let glyph =
+            gid.with_scale_and_position(PxScale::from(size), ab_glyph::point(caret_x, baseline));
         if let Some(og) = f.outline_glyph(glyph) {
             let b = og.px_bounds();
             og.draw(|gx, gy, cov| {
@@ -63,6 +71,41 @@ pub fn draw_text(s: &mut Surface, x: f32, y: f32, text: &str, size: f32, rgba: [
     }
     max_w = max_w.max(caret_x - x);
     let total_h = baseline - y + (scaled.height() - ascent); // 마지막 줄 descent 포함.
+    (max_w, total_h)
+}
+
+/// 텍스트 레이아웃 크기만 계산한다. `draw_text`와 같은 advance/line-height contract를 쓴다.
+pub fn measure_text(text: &str, size: f32) -> (f32, f32) {
+    if size <= 0.0 || text.is_empty() {
+        return (0.0, 0.0);
+    }
+    let f = font();
+    let scaled = f.as_scaled(PxScale::from(size));
+    let ascent = scaled.ascent();
+    let line_h = scaled.height() + scaled.line_gap();
+
+    let mut caret_x = 0.0f32;
+    let mut baseline = ascent;
+    let mut max_w = 0.0f32;
+    let mut prev: Option<ab_glyph::GlyphId> = None;
+
+    for ch in text.chars() {
+        if ch == '\n' {
+            max_w = max_w.max(caret_x);
+            caret_x = 0.0;
+            baseline += line_h;
+            prev = None;
+            continue;
+        }
+        let gid = scaled.glyph_id(ch);
+        if let Some(p) = prev {
+            caret_x += scaled.kern(p, gid);
+        }
+        caret_x += scaled.h_advance(gid);
+        prev = Some(gid);
+    }
+    max_w = max_w.max(caret_x);
+    let total_h = baseline + (scaled.height() - ascent);
     (max_w, total_h)
 }
 
@@ -97,6 +140,15 @@ mod tests {
         let mut s2 = Surface::new(100, 100);
         let (_, h2) = draw_text(&mut s2, 0.0, 0.0, "a\na", 20.0, [0, 0, 0, 255]);
         assert!(h2 > h1 * 1.5, "줄바꿈이 높이를 늘려야: {h1} → {h2}");
+    }
+
+    #[test]
+    fn measure_matches_draw_layout() {
+        let text = "CLI\n카드뉴스";
+        let measured = measure_text(text, 24.0);
+        let mut s = Surface::new(300, 120);
+        let drawn = draw_text(&mut s, 0.0, 0.0, text, 24.0, [0, 0, 0, 255]);
+        assert_eq!(measured, drawn);
     }
 
     #[test]

@@ -159,6 +159,9 @@ MCP와 CLI는 같은 dispatch 엔진을 공유합니다. `batch_apply`는 여러
 트랜잭션으로 적용하고, 실패하면 전체를 롤백합니다. `doc_snapshot`은 현재 합성 결과를 PNG로
 반환해 에이전트가 편집 결과를 확인할 수 있게 합니다.
 
+새 에이전트 세션이 바로 디자인 작업을 시작해야 할 때는
+[DesignCLI Agent System Prompt](docs/agent-system-prompt.md)를 시스템 프롬프트로 사용하세요.
+
 ## 렌더링 Contract
 
 초기 리스크는 픽셀 결과가 플랫폼이나 경로마다 달라지는 문제였습니다. DesignCLI는 아래

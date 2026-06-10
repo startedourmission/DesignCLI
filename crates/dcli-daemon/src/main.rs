@@ -27,9 +27,14 @@ use tower_http::services::ServeDir;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // workspace tracing-subscriber는 fmt만(env-filter feature 없음) → 단순 fmt 로거.
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
-    let port: u16 = std::env::var("DX_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8137);
+    let port: u16 = std::env::var("DX_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8137);
     let web_dir = web_dir();
     let projects_dir = projects_dir();
 
@@ -41,12 +46,7 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(entries) = std::fs::read_dir(&projects_dir) {
         let names: Vec<String> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path().is_dir()
-                    && e.path()
-                        .extension()
-                        .map_or(false, |x| x == "dxdoc")
-            })
+            .filter(|e| e.path().is_dir() && e.path().extension().map_or(false, |x| x == "dxdoc"))
             .filter_map(|e| {
                 e.path()
                     .file_stem()
@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/doc/:id/undo", post(routes::undo))
         .route("/doc/:id/redo", post(routes::redo))
         .route("/doc/:id/snapshot", get(routes::snapshot))
+        .route("/doc/:id/snapshot.bin", get(routes::snapshot_bin))
         .route("/doc/:id/export.png", get(routes::export_png))
         .route("/doc/:id/thumb.png", get(routes::thumb_png))
         .route("/doc/:id/state", get(routes::state))
@@ -97,7 +98,10 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("dx-daemon 기동: http://{addr}  (web: {})", web_dir.display());
+    tracing::info!(
+        "dx-daemon 기동: http://{addr}  (web: {})",
+        web_dir.display()
+    );
     tracing::info!("문서 생성 예: curl -X POST 'http://{addr}/doc/demo/create?w=800&h=600'");
     tracing::info!("브라우저:    http://{addr}/?doc=demo");
     tracing::info!("대시보드:    http://{addr}/");

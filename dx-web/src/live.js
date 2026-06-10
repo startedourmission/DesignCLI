@@ -28,6 +28,7 @@ class LiveLink {
     this.lastSeq = 0;
     this.ws = null;
     this._resyncing = false;
+    this._pendingOptimistic = [];
   }
 
   async start() {
@@ -39,10 +40,21 @@ class LiveLink {
 
   // 현재 데몬 상태를 .dxpkg로 받아 editor를 교체하고 seq를 동기화.
   async _loadSnapshot() {
-    const r = await fetch(`/doc/${this.docId}/snapshot`);
-    if (!r.ok) throw new Error(`snapshot 실패: ${r.status} ${await r.text()}`);
-    const { seq, dxpkg_base64 } = await r.json();
-    const ed = Editor.from_dxpkg(b64ToBytes(dxpkg_base64));
+    let seq;
+    let bytes;
+    const bin = await fetch(`/doc/${this.docId}/snapshot.bin`);
+    if (bin.ok) {
+      seq = Number(bin.headers.get("x-dx-seq") || 0);
+      bytes = new Uint8Array(await bin.arrayBuffer());
+    } else {
+      const r = await fetch(`/doc/${this.docId}/snapshot`);
+      if (!r.ok) throw new Error(`snapshot 실패: ${r.status} ${await r.text()}`);
+      const json = await r.json();
+      seq = json.seq;
+      bytes = b64ToBytes(json.dxpkg_base64);
+    }
+    const ed = Editor.from_dxpkg(bytes);
+    this._pendingOptimistic = [];
     this.app.replaceEditor(ed); // 렌더러/패널까지 새 editor로 재배선
     this.lastSeq = seq;
   }
@@ -107,36 +119,58 @@ class LiveLink {
       return;
     }
     const ed = this.app.editor;
+    let optimisticEcho = false;
     try {
-      if (msg.type === "ops") ed.apply_actions(JSON.stringify(msg.actions));
-      else if (msg.type === "undo") ed.undo();
-      else if (msg.type === "redo") ed.redo();
+      if (msg.type === "ops") {
+        const encoded = JSON.stringify(msg.actions);
+        if (this._pendingOptimistic[0] === encoded) {
+          this._pendingOptimistic.shift();
+          optimisticEcho = true;
+        } else if (this._pendingOptimistic.length) {
+          this._resync();
+          return;
+        } else {
+          ed.apply_actions(encoded);
+        }
+      } else if (msg.type === "undo") {
+        this._pendingOptimistic = [];
+        ed.undo();
+      } else if (msg.type === "redo") {
+        this._pendingOptimistic = [];
+        ed.redo();
+      }
     } catch (e) {
       console.error("원격 적용 실패:", e);
       this._resync();
       return;
     }
     this.lastSeq = msg.seq;
-    this.app.afterRemoteApply();
+    if (optimisticEcho) this.app.afterOptimisticAck();
+    else this.app.afterRemoteApply();
   }
 
   // ---- App이 호출하는 송신 funnel (로컬 적용 안 함, 데몬에만 보냄) ----
-  async sendApply(actions) {
+  async sendApply(actions, encoded = JSON.stringify(actions)) {
+    this._pendingOptimistic.push(encoded);
     const r = await fetch(`/doc/${this.docId}/apply`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(actions),
+      body: encoded,
     });
     if (!r.ok) {
+      this._pendingOptimistic = this._pendingOptimistic.filter((v) => v !== encoded);
       console.error("apply 전송 실패:", r.status, await r.text());
+      this._resync();
       return;
     }
     // 엔진이 거부한 편집(예: PNG 디코드 실패)을 조용히 삼키지 않는다.
     const j = await r.json().catch(() => null);
     if (j?.result && j.result.ok === false) {
+      this._pendingOptimistic = this._pendingOptimistic.filter((v) => v !== encoded);
       const msg = j.result.issues?.[0]?.message || "적용 실패";
       console.error("[live] 편집 거부:", j.result.issues);
       alert(`편집 실패: ${msg}`);
+      this._resync();
     }
   }
   async sendUndo() {

@@ -744,6 +744,7 @@ dependencies = [
  "dcli-psd",
  "dcli-raster",
  "dcli-tile",
+ "flate2",
  "png 0.17.16",
  "schemars",
  "serde",

@@ -49,7 +49,13 @@ impl DocState {
     pub fn new(hist: History) -> Self {
         // 버퍼 256: 느린 클라가 잠깐 밀려도 hello→snapshot 재동기로 복구.
         let (tx, _rx) = broadcast::channel(256);
-        DocState { hist, seq: 0, tx, dirty: false, last_edit: None }
+        DocState {
+            hist,
+            seq: 0,
+            tx,
+            dirty: false,
+            last_edit: None,
+        }
     }
 
     /// 편집 성공 후 dirty + 타이머 갱신.
@@ -71,7 +77,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(projects_dir: PathBuf) -> Self {
-        AppState { docs: Mutex::new(HashMap::new()), projects_dir }
+        AppState {
+            docs: Mutex::new(HashMap::new()),
+            projects_dir,
+        }
     }
 
     /// 문서 폴더 경로 반환.

@@ -12,8 +12,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::StatusCode,
-    response::IntoResponse,
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use base64::Engine;
@@ -31,10 +31,7 @@ type Shared = State<Arc<AppState>>;
 
 /// 메모리에서 문서를 찾거나, 디스크에서 lazy load한다.
 /// None이면 디스크에도 없는 것(→ 404).
-fn ensure_doc<'a>(
-    app: &'a AppState,
-    id: &str,
-) -> Option<()> {
+fn ensure_doc<'a>(app: &'a AppState, id: &str) -> Option<()> {
     let mut docs = app.docs.lock().unwrap();
     if docs.contains_key(id) {
         return Some(());
@@ -45,9 +42,15 @@ fn ensure_doc<'a>(
         return None;
     }
     match path.load() {
-        Ok(doc) => {
+        Ok(mut doc) => {
             tracing::info!("lazy load: {}", id);
-            docs.insert(id.to_string(), DocState::new(History::new(doc)));
+            let compacted = dispatch::compact_text_surfaces(&mut doc);
+            let mut ds = DocState::new(History::new(doc));
+            if compacted > 0 {
+                tracing::info!("lazy load compacted {} text surfaces: {}", compacted, id);
+                ds.mark_dirty();
+            }
+            docs.insert(id.to_string(), ds);
             Some(())
         }
         Err(e) => {
@@ -69,13 +72,19 @@ pub struct CreateParams {
     #[serde(default = "default_depth")]
     depth: String,
 }
-fn default_w() -> u32 { 512 }
-fn default_h() -> u32 { 512 }
-fn default_depth() -> String { "u8".into() }
+fn default_w() -> u32 {
+    512
+}
+fn default_h() -> u32 {
+    512
+}
+fn default_depth() -> String {
+    "u8".into()
+}
 
 fn parse_depth(s: &str) -> Result<BitDepth, String> {
     match s {
-        "u8"  => Ok(BitDepth::U8),
+        "u8" => Ok(BitDepth::U8),
         "u16" => Ok(BitDepth::U16),
         "f32" => Ok(BitDepth::F32),
         other => Err(format!("알 수 없는 비트깊이: {other} (u8|u16|f32)")),
@@ -100,16 +109,27 @@ pub async fn create_doc(
     // 디스크에도 이미 있으면 충돌.
     let path = app.doc_path(&id);
     if path.exists() {
-        return (StatusCode::CONFLICT, format!("프로젝트 '{id}' 이미 존재(디스크)")).into_response();
+        return (
+            StatusCode::CONFLICT,
+            format!("프로젝트 '{id}' 이미 존재(디스크)"),
+        )
+            .into_response();
     }
     let doc = Document::new(p.w, p.h, depth);
     // 디스크에 즉시 저장(폴더 생성).
     if let Err(e) = path.save(&doc) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("디스크 저장 실패: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("디스크 저장 실패: {e}"),
+        )
+            .into_response();
     }
     let mut docs = app.docs.lock().unwrap();
     docs.insert(id.clone(), DocState::new(History::new(doc)));
-    (StatusCode::CREATED, Json(json!({ "id": id, "w": p.w, "h": p.h, "depth": p.depth, "seq": 0 })))
+    (
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "w": p.w, "h": p.h, "depth": p.depth, "seq": 0 })),
+    )
         .into_response()
 }
 
@@ -154,9 +174,13 @@ pub async fn list_projects(State(app): Shared) -> impl IntoResponse {
 
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_dir() { continue; }
+        if !path.is_dir() {
+            continue;
+        }
         let ext = path.extension().and_then(|s| s.to_str());
-        if ext != Some("dxdoc") { continue; }
+        if ext != Some("dxdoc") {
+            continue;
+        }
         let name = match path.file_stem().and_then(|s| s.to_str()) {
             Some(n) => n.to_string(),
             None => continue,
@@ -188,7 +212,13 @@ pub async fn list_projects(State(app): Shared) -> impl IntoResponse {
             (None, None)
         };
 
-        result.push(ProjectEntry { name, open, modified, w, h });
+        result.push(ProjectEntry {
+            name,
+            open,
+            modified,
+            w,
+            h,
+        });
     }
 
     // 이름 오름차순 정렬.
@@ -281,7 +311,11 @@ pub async fn rename_project(
         if let Err(e) = save_path.save(&ds.hist.doc) {
             let mut docs = app.docs.lock().unwrap();
             docs.insert(old.clone(), moved_state.take().unwrap());
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("이름 변경 전 저장 실패: {e}")).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("이름 변경 전 저장 실패: {e}"),
+            )
+                .into_response();
         }
         ds.dirty = false;
     } else if !old_path.exists() {
@@ -292,7 +326,11 @@ pub async fn rename_project(
         if let Some(ds) = moved_state.take() {
             app.docs.lock().unwrap().insert(old.clone(), ds);
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("폴더 이름 변경 실패: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("폴더 이름 변경 실패: {e}"),
+        )
+            .into_response();
     }
 
     if let Some(ds) = moved_state {
@@ -302,10 +340,7 @@ pub async fn rename_project(
     (StatusCode::OK, Json(json!({ "old": old, "name": new }))).into_response()
 }
 
-pub async fn delete_project(
-    State(app): Shared,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+pub async fn delete_project(State(app): Shared, Path(name): Path<String>) -> impl IntoResponse {
     let path = app.projects_dir.join(format!("{}.dxdoc", name));
     if !path.exists() {
         // 메모리에도 없으면 404.
@@ -319,7 +354,11 @@ pub async fn delete_project(
     // 디스크 폴더 삭제.
     if path.exists() {
         if let Err(e) = std::fs::remove_dir_all(&path) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("폴더 삭제 실패: {e}")).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("폴더 삭제 실패: {e}"),
+            )
+                .into_response();
         }
     }
     tracing::info!("프로젝트 삭제: {}", name);
@@ -343,9 +382,15 @@ pub async fn apply(
     if res.ok {
         ds.seq += 1;
         ds.mark_dirty();
-        let _ = ds.tx.send(LiveMsg::Ops { seq: ds.seq, actions });
+        let _ = ds.tx.send(LiveMsg::Ops {
+            seq: ds.seq,
+            actions,
+        });
     }
-    (StatusCode::OK, Json(json!({ "seq": ds.seq, "result": serde_json::to_value(&res).unwrap() })))
+    (
+        StatusCode::OK,
+        Json(json!({ "seq": ds.seq, "result": serde_json::to_value(&res).unwrap() })),
+    )
         .into_response()
 }
 
@@ -391,14 +436,42 @@ pub async fn redo(State(app): Shared, Path(id): Path<String>) -> impl IntoRespon
 
 /// GET /doc/:id/snapshot — {seq, dxpkg_base64}. 웹 초기화용.
 pub async fn snapshot(State(app): Shared, Path(id): Path<String>) -> impl IntoResponse {
-    if ensure_doc(&app, &id).is_none() {
+    let Some((seq, bytes)) = snapshot_bytes(&app, &id) else {
         return doc_not_found(&id);
-    }
-    let docs = app.docs.lock().unwrap();
-    let ds = docs.get(&id).unwrap();
-    let bytes = dxpkg::encode(&ds.hist.doc);
+    };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Json(json!({ "seq": ds.seq, "dxpkg_base64": b64 })).into_response()
+    Json(json!({ "seq": seq, "dxpkg_base64": b64 })).into_response()
+}
+
+/// GET /doc/:id/snapshot.bin — raw .dxpkg bytes. `x-dx-seq` 헤더에 snapshot seq.
+pub async fn snapshot_bin(State(app): Shared, Path(id): Path<String>) -> impl IntoResponse {
+    let Some((seq, bytes)) = snapshot_bytes(&app, &id) else {
+        return doc_not_found(&id);
+    };
+    let mut resp: Response = bytes.into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&seq.to_string()) {
+        resp.headers_mut().insert("x-dx-seq", v);
+    }
+    resp
+}
+
+fn snapshot_bytes(app: &AppState, id: &str) -> Option<(u64, Vec<u8>)> {
+    if ensure_doc(app, id).is_none() {
+        return None;
+    }
+    let mut docs = app.docs.lock().unwrap();
+    let ds = docs.get_mut(id)?;
+    let compacted = dispatch::compact_text_surfaces(&mut ds.hist.doc);
+    if compacted > 0 {
+        tracing::info!("snapshot compacted {} text surfaces: {}", compacted, id);
+        ds.mark_dirty();
+    }
+    let bytes = dxpkg::encode(&ds.hist.doc);
+    Some((ds.seq, bytes))
 }
 
 /// GET /doc/:id/export.png — 합성 결과를 8bit RGBA PNG로 응답(디스크 export와 동일 인코딩).
@@ -437,10 +510,7 @@ pub async fn export_png(
 }
 
 /// GET /doc/:id/thumb.png — 최대 256px nearest 다운스케일 PNG(대시보드 카드용).
-pub async fn thumb_png(
-    State(app): Shared,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn thumb_png(State(app): Shared, Path(id): Path<String>) -> impl IntoResponse {
     if ensure_doc(&app, &id).is_none() {
         return doc_not_found(&id);
     }
@@ -473,8 +543,15 @@ pub async fn thumb_png(
     let mut enc = png::Encoder::new(&mut buf, nw, nh);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
-    if let Err(e) = enc.write_header().and_then(|mut w| w.write_image_data(&dst)) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("PNG 인코딩 실패: {e}")).into_response();
+    if let Err(e) = enc
+        .write_header()
+        .and_then(|mut w| w.write_image_data(&dst))
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("PNG 인코딩 실패: {e}"),
+        )
+            .into_response();
     }
     ([(axum::http::header::CONTENT_TYPE, "image/png")], buf).into_response()
 }
@@ -540,7 +617,9 @@ async fn live_socket(
             // 느린 클라가 버퍼 초과로 밀림 → 끊어서 클라가 snapshot 재동기하게 함.
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                 let _ = socket
-                    .send(Message::Text(json!({ "type": "lagged" }).to_string().into()))
+                    .send(Message::Text(
+                        json!({ "type": "lagged" }).to_string().into(),
+                    ))
                     .await;
                 break;
             }
@@ -561,8 +640,15 @@ fn png_response(surface: dcli_tile::Surface) -> axum::response::Response {
     let mut enc = png::Encoder::new(&mut buf, surface.width(), surface.height());
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
-    if let Err(e) = enc.write_header().and_then(|mut w| w.write_image_data(&pixels)) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("PNG 인코딩 실패: {e}")).into_response();
+    if let Err(e) = enc
+        .write_header()
+        .and_then(|mut w| w.write_image_data(&pixels))
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("PNG 인코딩 실패: {e}"),
+        )
+            .into_response();
     }
     ([(axum::http::header::CONTENT_TYPE, "image/png")], buf).into_response()
 }
