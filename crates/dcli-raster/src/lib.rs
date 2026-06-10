@@ -266,6 +266,26 @@ fn blend_in_gamma(dst: LinearPremul, src: LinearPremul, blend: BlendMode) -> Lin
             screen(dg.rgb.1, sg.rgb.1),
             screen(dg.rgb.2, sg.rgb.2),
         ),
+        BlendMode::Darken => (
+            dg.rgb.0.min(sg.rgb.0),
+            dg.rgb.1.min(sg.rgb.1),
+            dg.rgb.2.min(sg.rgb.2),
+        ),
+        BlendMode::Lighten => (
+            dg.rgb.0.max(sg.rgb.0),
+            dg.rgb.1.max(sg.rgb.1),
+            dg.rgb.2.max(sg.rgb.2),
+        ),
+        BlendMode::Overlay => (
+            overlay(dg.rgb.0, sg.rgb.0),
+            overlay(dg.rgb.1, sg.rgb.1),
+            overlay(dg.rgb.2, sg.rgb.2),
+        ),
+        BlendMode::Difference => (
+            (dg.rgb.0 - sg.rgb.0).abs(),
+            (dg.rgb.1 - sg.rgb.1).abs(),
+            (dg.rgb.2 - sg.rgb.2).abs(),
+        ),
     };
 
     // 블렌드된 감마 색을 다시 linear straight로.
@@ -329,6 +349,28 @@ fn blend_rgb_premul(
             screen(dst.1, src.1),
             screen(dst.2, src.2),
         ),
+        // 신규 4종도 기존 Multiply/Screen과 같은 관행으로 premul 성분에 직접
+        // 동일 공식을 적용한다 (linear 경로의 단순화된 정의 — GPU wgsl과 1:1).
+        BlendMode::Darken => (
+            dst.0.min(src.0),
+            dst.1.min(src.1),
+            dst.2.min(src.2),
+        ),
+        BlendMode::Lighten => (
+            dst.0.max(src.0),
+            dst.1.max(src.1),
+            dst.2.max(src.2),
+        ),
+        BlendMode::Overlay => (
+            overlay(dst.0, src.0),
+            overlay(dst.1, src.1),
+            overlay(dst.2, src.2),
+        ),
+        BlendMode::Difference => (
+            (dst.0 - src.0).abs(),
+            (dst.1 - src.1).abs(),
+            (dst.2 - src.2).abs(),
+        ),
     }
 }
 
@@ -348,6 +390,16 @@ fn over(dst: LinearPremul, src: LinearPremul, blended_src_rgb: (f32, f32, f32)) 
 #[inline]
 fn screen(a: f32, b: f32) -> f32 {
     1.0 - (1.0 - a) * (1.0 - b)
+}
+
+/// Overlay: dst가 어두우면 multiply 계열(2ds), 밝으면 screen 계열(1−2(1−d)(1−s)).
+#[inline]
+fn overlay(d: f32, s: f32) -> f32 {
+    if d <= 0.5 {
+        2.0 * d * s
+    } else {
+        1.0 - 2.0 * (1.0 - d) * (1.0 - s)
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +462,56 @@ mod tests {
         let out = composite(&g).to_srgb8_rgba();
         let expected = dcli_color::quantize_u8(0.501_960_8_f32 * 0.501_960_8);
         assert!((out[0] as i32 - expected as i32).abs() <= 1, "got {} expected {}", out[0], expected);
+    }
+
+    #[test]
+    fn gamma_darken_lighten_pick_min_max() {
+        // 감마 공간: 50%회색(128) 위 25%회색(64).
+        // darken = min(감마값) → 64, lighten = max(감마값) → 128.
+        let mut d = Document::new(1, 1, BitDepth::U8);
+        add(&mut d, "bg", solid(1, 1, 128, 128, 128, 255), BlendMode::Normal);
+        add(&mut d, "t", solid(1, 1, 64, 64, 64, 255), BlendMode::Darken);
+        let out = composite(&d).to_srgb8_rgba();
+        assert!((out[0] as i32 - 64).abs() <= 1, "darken got {}", out[0]);
+
+        let mut l = Document::new(1, 1, BitDepth::U8);
+        add(&mut l, "bg", solid(1, 1, 128, 128, 128, 255), BlendMode::Normal);
+        add(&mut l, "t", solid(1, 1, 64, 64, 64, 255), BlendMode::Lighten);
+        let out = composite(&l).to_srgb8_rgba();
+        assert!((out[0] as i32 - 128).abs() <= 1, "lighten got {}", out[0]);
+    }
+
+    #[test]
+    fn gamma_overlay_both_branches() {
+        // 감마 공간 overlay 양쪽 분기 검증 (d = dst 감마값 기준 분기).
+        let d128 = 128.0_f32 / 255.0; // ≈0.50196 > 0.5 → screen 분기
+        let d64 = 64.0_f32 / 255.0; //  ≈0.25098 ≤ 0.5 → multiply 분기
+
+        // dst=50%회색(128), src=25%회색(64): 1 − 2(1−d)(1−s).
+        let mut a = Document::new(1, 1, BitDepth::U8);
+        add(&mut a, "bg", solid(1, 1, 128, 128, 128, 255), BlendMode::Normal);
+        add(&mut a, "t", solid(1, 1, 64, 64, 64, 255), BlendMode::Overlay);
+        let out = composite(&a).to_srgb8_rgba();
+        let expected = dcli_color::quantize_u8(1.0 - 2.0 * (1.0 - d128) * (1.0 - d64));
+        assert!((out[0] as i32 - expected as i32).abs() <= 1, "overlay(screen 분기) got {} expected {}", out[0], expected);
+
+        // dst=25%회색(64), src=50%회색(128): 2ds.
+        let mut b = Document::new(1, 1, BitDepth::U8);
+        add(&mut b, "bg", solid(1, 1, 64, 64, 64, 255), BlendMode::Normal);
+        add(&mut b, "t", solid(1, 1, 128, 128, 128, 255), BlendMode::Overlay);
+        let out = composite(&b).to_srgb8_rgba();
+        let expected = dcli_color::quantize_u8(2.0 * d64 * d128);
+        assert!((out[0] as i32 - expected as i32).abs() <= 1, "overlay(multiply 분기) got {} expected {}", out[0], expected);
+    }
+
+    #[test]
+    fn gamma_difference_is_abs_delta() {
+        // 감마 공간: |128/255 − 64/255| = 64/255 → 64.
+        let mut d = Document::new(1, 1, BitDepth::U8);
+        add(&mut d, "bg", solid(1, 1, 128, 128, 128, 255), BlendMode::Normal);
+        add(&mut d, "t", solid(1, 1, 64, 64, 64, 255), BlendMode::Difference);
+        let out = composite(&d).to_srgb8_rgba();
+        assert!((out[0] as i32 - 64).abs() <= 1, "difference got {}", out[0]);
     }
 
     #[test]

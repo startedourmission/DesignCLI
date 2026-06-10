@@ -89,6 +89,10 @@ pub enum BlendModeDto {
     Normal,
     Multiply,
     Screen,
+    Darken,
+    Lighten,
+    Overlay,
+    Difference,
 }
 
 impl From<BlendModeDto> for BlendMode {
@@ -97,6 +101,10 @@ impl From<BlendModeDto> for BlendMode {
             BlendModeDto::Normal => BlendMode::Normal,
             BlendModeDto::Multiply => BlendMode::Multiply,
             BlendModeDto::Screen => BlendMode::Screen,
+            BlendModeDto::Darken => BlendMode::Darken,
+            BlendModeDto::Lighten => BlendMode::Lighten,
+            BlendModeDto::Overlay => BlendMode::Overlay,
+            BlendModeDto::Difference => BlendMode::Difference,
         }
     }
 }

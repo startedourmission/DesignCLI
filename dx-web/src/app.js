@@ -8,6 +8,7 @@ export class Renderer {
     this.editor = editor;
     this._dirty = false;
     this._raf = 0;
+    this.excludeId = null; // 텍스트 인라인 편집 중 화면에서만 제외할 레이어(문서 무오염).
     this.canvas = canvas; // setter가 ctx까지 함께 잡는다.
   }
   // 캔버스 교체 시 ctx도 반드시 같이 갱신(dx-canvas가 실제 캔버스를 주입할 때).
@@ -33,7 +34,9 @@ export class Renderer {
     if (!this._dirty) return;
     this._dirty = false;
     // 매 프레임 새 복사본을 받는다(메모리 detach 무관 — wasm이 소유 복사본 반환).
-    const buf = this.editor.composite_rgba();
+    const buf = this.excludeId != null
+      ? this.editor.composite_rgba_excluding(this.excludeId)
+      : this.editor.composite_rgba();
     const img = new ImageData(buf, this.editor.width(), this.editor.height());
     this.ctx.putImageData(img, 0, 0);
   }
@@ -45,19 +48,45 @@ export class App extends EventTarget {
     this.editor = editor;
     this.renderer = renderer;
     this.live = null; // 라이브 모드면 LiveLink. 설정 시 쓰기가 데몬을 경유.
-    this.selectedId = null; // 선택툴이 고른 레이어 node id(null=선택 없음).
+    this.selectedIds = []; // 선택툴이 고른 레이어 node id 배열(빈 배열=선택 없음). [0]이 primary.
   }
 
-  /** 레이어 선택(선택툴). null이면 해제. changed로 캔버스·패널 동기. */
+  /** 단일 선택(교체). null이면 해제. changed로 캔버스·패널 동기. */
   select(id) {
-    this.selectedId = id;
+    this.selectedIds = id == null ? [] : [id];
     this._notify();
   }
 
-  /** 선택된 레이어 객체(top-to-bottom 목록에서 조회). 없으면 null. */
+  /** Shift+클릭 토글 — 이미 선택이면 제거, 아니면 추가. */
+  toggleSelect(id) {
+    if (id == null) return;
+    this.selectedIds = this.selectedIds.includes(id)
+      ? this.selectedIds.filter((v) => v !== id)
+      : [...this.selectedIds, id];
+    this._notify();
+  }
+
+  /** 다중 선택 교체(마퀴 등). 중복 제거. */
+  selectMany(ids) {
+    this.selectedIds = [...new Set(ids ?? [])];
+    this._notify();
+  }
+
+  /** 기존 단일 선택 호환 — 첫 번째 선택 id(없으면 null). */
+  get selectedId() {
+    return this.selectedIds[0] ?? null;
+  }
+
+  /** 선택된 레이어 객체(첫 번째, top-to-bottom 목록에서 조회). 없으면 null. */
   getSelected() {
     if (this.selectedId == null) return null;
     return this.layers().find((l) => l.id === this.selectedId) || null;
+  }
+
+  /** 선택된 모든 레이어 객체(top-to-bottom 순). */
+  selectedLayers() {
+    const set = new Set(this.selectedIds);
+    return this.layers().filter((l) => set.has(l.id));
   }
 
   /** 캔버스 좌표 hit-test → 최상위 레이어 id(없으면 null). */
@@ -77,12 +106,38 @@ export class App extends EventTarget {
     this.apply([B.duplicateLayer(id)]);
   }
 
+  /** 여러 레이어 복제 — 하나의 apply 배치로. */
+  duplicateMany(ids) {
+    if (!ids?.length) return;
+    this.apply(ids.map((id) => B.duplicateLayer(id)));
+  }
+
+  /** 여러 레이어 삭제 — 하나의 apply 배치로. */
+  deleteMany(ids) {
+    if (!ids?.length) return;
+    this.apply(ids.map((id) => B.deleteLayer(id)));
+  }
+
   /** 선택 레이어 offset 상대이동(화살표 nudge). */
   nudge(id, dx, dy) {
     const l = this.layers().find((v) => v.id === id);
     if (!l) return;
     const [ox, oy] = l.offset ?? [0, 0];
     this.apply([B.setOffset(id, [ox + dx, oy + dy])]);
+  }
+
+  /** 여러 레이어 offset 상대이동 — 하나의 apply 배치로. */
+  nudgeMany(ids, dx, dy) {
+    if (!ids?.length) return;
+    const layers = this.layers();
+    const acts = [];
+    for (const id of ids) {
+      const l = layers.find((v) => v.id === id);
+      if (!l) continue;
+      const [ox, oy] = l.offset ?? [0, 0];
+      acts.push(B.setOffset(id, [ox + dx, oy + dy]));
+    }
+    if (acts.length) this.apply(acts);
   }
 
   /** 레이어의 표시 트랜스폼(엔진과 동일 수학: 표면 중심 기준 scale→rotate→offset). */
@@ -143,12 +198,10 @@ export class App extends EventTarget {
     return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
   }
 
-  /** 선택 레이어를 문서 기준 정렬: left|center-h|right|top|center-v|bottom */
-  align(id, mode) {
-    const l = this.layers().find((v) => v.id === id);
-    if (!l) return;
+  /** 문서 기준 정렬 setOffset Action 생성(계산 불가면 null). */
+  _alignAction(l, mode) {
     const box = this.displayAABB(l);
-    if (!box) return;
+    if (!box) return null;
     const W = this.editor.width(), H = this.editor.height();
     const [ox, oy] = l.offset ?? [0, 0];
     let dx = 0, dy = 0;
@@ -158,7 +211,27 @@ export class App extends EventTarget {
     else if (mode === "top") dy = -box.y;
     else if (mode === "center-v") dy = (H - box.h) / 2 - box.y;
     else if (mode === "bottom") dy = H - box.h - box.y;
-    this.apply([B.setOffset(id, [Math.round(ox + dx), Math.round(oy + dy)])]);
+    return B.setOffset(l.id, [Math.round(ox + dx), Math.round(oy + dy)]);
+  }
+
+  /** 선택 레이어를 문서 기준 정렬: left|center-h|right|top|center-v|bottom */
+  align(id, mode) {
+    const l = this.layers().find((v) => v.id === id);
+    const a = l ? this._alignAction(l, mode) : null;
+    if (a) this.apply([a]);
+  }
+
+  /** 여러 레이어를 문서 기준 정렬 — 하나의 apply 배치로(각자 정렬). */
+  alignMany(ids, mode) {
+    if (!ids?.length) return;
+    const layers = this.layers();
+    const acts = ids
+      .map((id) => {
+        const l = layers.find((v) => v.id === id);
+        return l ? this._alignAction(l, mode) : null;
+      })
+      .filter(Boolean);
+    if (acts.length) this.apply(acts);
   }
 
   /** bottom-to-top 순서(엔진 order). moveLayer의 to는 이 인덱스 기준. */
@@ -180,6 +253,43 @@ export class App extends EventTarget {
     const i = order.indexOf(id);
     if (i <= 0) return;
     this.apply([B.moveLayer(id, i - 1)]);
+  }
+
+  /** 여러 레이어를 한 칸 위로 — 하나의 apply 배치. 위에서부터 처리해 상대 순서 유지,
+   *  맨 위에 붙은 선택 블록은 그대로 둔다(천장). 액션 순서대로 시뮬레이션해 인덱스 산출. */
+  raiseMany(ids) {
+    if (!ids?.length) return;
+    const order = this.orderBottomToTop();
+    const set = new Set(ids);
+    const acts = [];
+    let ceiling = order.length; // 이 인덱스 이상으로는 못 올라감.
+    for (let i = order.length - 1; i >= 0; i--) {
+      if (!set.has(order[i])) continue;
+      if (i + 1 >= ceiling) { ceiling = i; continue; }
+      const id = order[i];
+      order.splice(i, 1);
+      order.splice(i + 1, 0, id);
+      acts.push(B.moveLayer(id, i + 1));
+    }
+    if (acts.length) this.apply(acts);
+  }
+
+  /** 여러 레이어를 한 칸 아래로 — 하나의 apply 배치. 아래에서부터 처리(바닥 블록 유지). */
+  lowerMany(ids) {
+    if (!ids?.length) return;
+    const order = this.orderBottomToTop();
+    const set = new Set(ids);
+    const acts = [];
+    let floor = -1; // 이 인덱스 이하로는 못 내려감.
+    for (let i = 0; i < order.length; i++) {
+      if (!set.has(order[i])) continue;
+      if (i - 1 <= floor) { floor = i; continue; }
+      const id = order[i];
+      order.splice(i, 1);
+      order.splice(i - 1, 0, id);
+      acts.push(B.moveLayer(id, i - 1));
+    }
+    if (acts.length) this.apply(acts);
   }
 
   /** 라이브 모드 진입(쓰기 funnel을 데몬으로 전환). live.js가 호출. */
@@ -250,6 +360,11 @@ export class App extends EventTarget {
   docInfo() { return JSON.parse(this.editor.doc_info()); }
 
   _notify() {
+    // 삭제된 레이어 id가 선택에 남지 않도록 정리.
+    if (this.selectedIds.length) {
+      const alive = new Set(this.layers().map((l) => l.id));
+      this.selectedIds = this.selectedIds.filter((id) => alive.has(id));
+    }
     this.dispatchEvent(new CustomEvent("changed"));
   }
 }

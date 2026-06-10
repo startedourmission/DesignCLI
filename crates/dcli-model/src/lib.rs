@@ -27,13 +27,18 @@ pub use op::{Inverse, Op, OpError};
 
 /// 고정 블렌드 모드 enum (document-model: 고정 enum, PSD 4자키와 양방향 매핑).
 ///
-/// Phase 0~1에서는 separable 3종만. 나머지(Overlay/HardLight/non-separable 등)는
-/// 후속 Phase에서 같은 enum에 추가하며, 추가 시마다 골든이미지로 고정한다.
+/// Phase 0~1의 separable 3종 + Darken/Lighten/Overlay/Difference 4종.
+/// 나머지(HardLight/non-separable 등)는 후속 Phase에서 같은 enum에 추가하며,
+/// 추가 시마다 골든이미지로 고정한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BlendMode {
     Normal,
     Multiply,
     Screen,
+    Darken,
+    Lighten,
+    Overlay,
+    Difference,
 }
 
 /// 노드 핸들. 서버가 발급하며 에이전트가 발명하지 않는다(cli-agent-interface).

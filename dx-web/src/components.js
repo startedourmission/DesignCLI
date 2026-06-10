@@ -294,12 +294,31 @@ class DxCanvas extends LitElement {
   /** 텍스트 입력 오버레이 열기. 클릭 직후 캔버스의 포커스 스틸을 피해 지연 포커스. */
   _openText(state) {
     this._text = { born: performance.now(), ...state };
+    // 기존 텍스트 편집이면 원본 레이어를 화면에서만 제외(문서·undo·동기화 무오염)
+    // → 편집 박스 밑에 원본이 비치는 이중 표시 제거.
+    if (state.editId != null) {
+      this.app.renderer.excludeId = state.editId;
+      this.app.renderer.markDirty();
+    }
+    this._drawOverlay(); // 편집 중엔 셀렉션 크롬 숨김.
     this.updateComplete.then(() => {
       const ta = this.renderRoot.querySelector("textarea.txt");
       if (!ta) return;
       // pointerup/click 시퀀스가 끝난 뒤 포커스(즉시 blur 방지).
       setTimeout(() => { ta.focus(); ta.select?.(); }, 0);
     });
+  }
+
+  /** 텍스트 작업 종료 공통 처리 — 화면 제외 해제 + 도구 select 복귀. */
+  _finishText() {
+    this._textDone = performance.now();
+    if (this.app.renderer.excludeId != null) {
+      this.app.renderer.excludeId = null;
+      this.app.renderer.markDirty();
+    }
+    // Figma처럼 텍스트 작업이 끝나면 선택 도구로 복귀.
+    this.dispatchEvent(new CustomEvent("text-finished", { bubbles: true, composed: true }));
+    this._drawOverlay();
   }
 
   /** select 도구 더블클릭: 텍스트 레이어(meta.type==text)면 인라인 편집. */
@@ -382,18 +401,20 @@ class DxCanvas extends LitElement {
   }
 
   // ---- 핸들 (화면 좌표 계산) ----
-  _selGeom() {
-    const sel = this.app.getSelected?.();
-    if (!sel) return null;
+  /** 레이어 1개의 선택 지오메트리(드래그 중 임시값 미리보기 반영). */
+  _selGeomFor(sel) {
     const b = this.app.layerBounds(sel.id);
     if (!b) return null;
     const t = this.app.xformOf(sel);
     const d = this._drag;
     // 드래그 중 임시값 반영(미리보기). resize/rotate는 anchor 보정 offset도 함께.
     const prov = { ...sel };
-    if (d?.mode === "move") prov.offset = [d.baseOffset[0] + d.dx, d.baseOffset[1] + d.dy];
-    if (d?.mode === "resize") { prov.scale = d.provScale; if (d.provOffset) prov.offset = d.provOffset; }
-    if (d?.mode === "rotate") { prov.rotation = d.provRot; if (d.provOffset) prov.offset = d.provOffset; }
+    if (d?.mode === "move" && d.bases?.has(sel.id)) {
+      const base = d.bases.get(sel.id);
+      prov.offset = [base[0] + d.dx, base[1] + d.dy];
+    }
+    if (d?.mode === "resize" && d.id === sel.id) { prov.scale = d.provScale; if (d.provOffset) prov.offset = d.provOffset; }
+    if (d?.mode === "rotate" && d.id === sel.id) { prov.rotation = d.provRot; if (d.provOffset) prov.offset = d.provOffset; }
     const tp = this.app.xformOf(prov);
     const z = this._zoom;
     const c4 = [
@@ -413,6 +434,13 @@ class DxCanvas extends LitElement {
     const dir = Math.hypot(tmS.x - ctrS.x, tmS.y - ctrS.y) || 1;
     const rot = { x: tmS.x + ((tmS.x - ctrS.x) / dir) * 20, y: tmS.y + ((tmS.y - ctrS.y) / dir) * 20 };
     return { sel, b, t, tp, c4, handles, rot, ctrS, z };
+  }
+  /** 핸들용 지오메트리 — 정확히 1개 선택일 때만(다중 선택은 핸들 비활성). */
+  _selGeom() {
+    if ((this.app.selectedIds?.length ?? 0) !== 1) return null;
+    const sel = this.app.getSelected?.();
+    if (!sel) return null;
+    return this._selGeomFor(sel);
   }
   _hitHandle(e) {
     const g = this._selGeom();
@@ -446,6 +474,9 @@ class DxCanvas extends LitElement {
     if (tool === "text") {
       // 캔버스가 포커스를 뺏어 textarea가 즉시 blur→사라지는 것 방지.
       e.preventDefault();
+      // 방금 바깥 클릭으로 커밋이 일어났다면, 이 클릭은 '작업 종료'로 소비
+      // (같은 클릭이 새 입력 박스를 또 열어 "박스가 이동"하는 것처럼 보이는 문제).
+      if (performance.now() - (this._textDone ?? 0) < 350) return;
       this._openText({ x: p.x, y: p.y, value: "" });
       return;
     }
@@ -482,12 +513,26 @@ class DxCanvas extends LitElement {
       }
       // 더블클릭 추정(텍스트 편집)은 dblclick 핸들러에서 처리.
       const hit = this.app.hitTest(p.x, p.y);
-      this.app.select(hit);
-      if (hit != null) {
-        const layer = this.app.getSelected();
-        this._drag = { mode: "move", id: hit, start: p, baseOffset: layer?.offset ?? [0, 0], dx: 0, dy: 0 };
-        this.style.cursor = "grabbing";
+      // Shift+클릭 = 선택 토글(드래그 없이).
+      if (e.shiftKey) {
+        if (hit != null) this.app.toggleSelect(hit);
+        return;
       }
+      if (hit == null) {
+        // 빈 공간 드래그 = 마퀴 다중선택(클릭이면 해제 — _end에서 판정).
+        this._drag = { mode: "marquee", start: p, cur: p };
+        return;
+      }
+      // 이미 선택된 레이어를 잡으면 선택 유지(다중 함께 이동), 아니면 단일 교체.
+      if (!this.app.selectedIds.includes(hit)) this.app.select(hit);
+      const all = this.app.layers();
+      const bases = new Map();
+      for (const id of this.app.selectedIds) {
+        const l = all.find((v) => v.id === id);
+        if (l) bases.set(id, l.offset ?? [0, 0]);
+      }
+      this._drag = { mode: "move", ids: [...this.app.selectedIds], bases, start: p, dx: 0, dy: 0 };
+      this.style.cursor = "grabbing";
       return;
     }
     // 그리기 도구
@@ -505,6 +550,9 @@ class DxCanvas extends LitElement {
     if (d.mode === "move") {
       d.dx = Math.round(p.x - d.start.x);
       d.dy = Math.round(p.y - d.start.y);
+      this._drawOverlay();
+    } else if (d.mode === "marquee") {
+      d.cur = p;
       this._drawOverlay();
     } else if (d.mode === "rotate") {
       const a = Math.atan2(p.y - d.pv.y, p.x - d.pv.x);
@@ -549,8 +597,35 @@ class DxCanvas extends LitElement {
     this.style.cursor = this._space ? "grab" : "";
     if (d.mode === "pan") return;
     if (d.mode === "move") {
-      if (d.dx !== 0 || d.dy !== 0) this.app.apply([B.setOffset(d.id, [d.baseOffset[0] + d.dx, d.baseOffset[1] + d.dy])]);
-      else this._drawOverlay();
+      if (d.dx !== 0 || d.dy !== 0) {
+        // 선택된 모든 레이어를 하나의 apply 배치로 함께 이동.
+        const acts = d.ids
+          .map((id) => {
+            const base = d.bases.get(id);
+            return base ? B.setOffset(id, [base[0] + d.dx, base[1] + d.dy]) : null;
+          })
+          .filter(Boolean);
+        if (acts.length) this.app.apply(acts);
+        else this._drawOverlay();
+      } else this._drawOverlay();
+      return;
+    }
+    if (d.mode === "marquee") {
+      const x0 = Math.min(d.start.x, d.cur.x), y0 = Math.min(d.start.y, d.cur.y);
+      const mw = Math.abs(d.cur.x - d.start.x), mh = Math.abs(d.cur.y - d.start.y);
+      if (mw < 2 && mh < 2) {
+        // 드래그 없는 빈 공간 클릭 = 선택 해제(기존 동작 유지).
+        this.app.select(null);
+        return;
+      }
+      // displayAABB가 마퀴 사각형과 교차하는 모든 레이어 선택.
+      const ids = [];
+      for (const l of this.app.layers()) {
+        const box = this.app.displayAABB(l);
+        if (box && box.x < x0 + mw && box.x + box.w > x0 && box.y < y0 + mh && box.y + box.h > y0)
+          ids.push(l.id);
+      }
+      this.app.selectMany(ids);
       return;
     }
     if (d.mode === "rotate") {
@@ -591,12 +666,15 @@ class DxCanvas extends LitElement {
   // ---- 텍스트 입력 커밋 ----
   _commitText() {
     const t = this._text;
-    this._text = null;
     if (!t) return;
-    // 생성 직후 의도치 않은 blur(포커스 경합)는 무시 — 입력 기회 보존.
-    if (!t.value && performance.now() - (t.born ?? 0) < 250) return;
+    // 생성 직후 의도치 않은 blur(포커스 경합)는 무시 — 입력 기회 보존(박스 유지).
+    if (!t.value && performance.now() - (t.born ?? 0) < 250) {
+      this.updateComplete.then(() => this.renderRoot.querySelector("textarea.txt")?.focus());
+      return;
+    }
+    this._text = null;
     const v = t.value.replace(/\s+$/, "");
-    if (!v) return;
+    if (!v) { this._finishText(); return; }
     const s = this.toolState ?? {};
     const size = t.size ?? s.size ?? 32;
     const rgba = t.rgba ?? s.rgba ?? [13, 153, 255, 255];
@@ -617,6 +695,7 @@ class DxCanvas extends LitElement {
         B.setProps("t", { meta }),
       ]);
     }
+    this._finishText();
   }
 
   // ---- 오버레이 ----
@@ -645,29 +724,46 @@ class DxCanvas extends LitElement {
     if (!this.overlay) return;
     const o = this.overlay.getContext("2d");
     o.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    if (this._text) return; // 텍스트 편집 중엔 셀렉션 크롬 숨김(입력에 집중).
     if (this._drag?.mode === "draw") { this._drawGhost(); return; }
-    const g = this._selGeom();
-    if (!g) return;
     const acc = getComputedStyle(this).getPropertyValue("--accent").trim() || "#0d99ff";
-    // 셀렉션 쿼드(회전 반영).
-    o.beginPath();
-    o.moveTo(g.c4[0].x, g.c4[0].y);
-    for (let i = 1; i < 4; i++) o.lineTo(g.c4[i].x, g.c4[i].y);
-    o.closePath();
-    o.fillStyle = "rgba(13,153,255,0.08)";
-    o.fill();
-    o.strokeStyle = acc; o.lineWidth = 1.5;
-    o.stroke();
-    // 회전 핸들(상단 중앙 바깥 원).
-    const tm = { x: (g.c4[0].x + g.c4[1].x) / 2, y: (g.c4[0].y + g.c4[1].y) / 2 };
-    o.beginPath(); o.moveTo(tm.x, tm.y); o.lineTo(g.rot.x, g.rot.y); o.stroke();
-    o.beginPath(); o.arc(g.rot.x, g.rot.y, 4.5, 0, 7); o.fillStyle = "#fff"; o.fill(); o.stroke();
-    // 리사이즈 핸들 8개(흰 채움 + 액센트 보더).
-    for (const h of g.handles) {
-      o.fillStyle = "#fff";
-      o.fillRect(h.p.x - HANDLE / 2, h.p.y - HANDLE / 2, HANDLE, HANDLE);
+    // 마퀴(점선 사각형, --accent 색).
+    if (this._drag?.mode === "marquee") {
+      const d = this._drag, z = this._zoom;
+      const x = Math.min(d.start.x, d.cur.x) * z, y = Math.min(d.start.y, d.cur.y) * z;
+      const w = Math.abs(d.cur.x - d.start.x) * z, h = Math.abs(d.cur.y - d.start.y) * z;
+      o.setLineDash([4, 3]);
       o.strokeStyle = acc; o.lineWidth = 1;
-      o.strokeRect(h.p.x - HANDLE / 2 + 0.5, h.p.y - HANDLE / 2 + 0.5, HANDLE - 1, HANDLE - 1);
+      o.fillStyle = "rgba(13,153,255,0.06)";
+      o.fillRect(x, y, w, h);
+      o.strokeRect(x, y, w, h);
+      o.setLineDash([]);
+    }
+    // 선택된 각 레이어에 셀렉션 쿼드(회전 반영). 핸들은 단일 선택일 때만.
+    const single = (this.app.selectedIds?.length ?? 0) === 1;
+    for (const sel of this.app.selectedLayers?.() ?? []) {
+      const g = this._selGeomFor(sel);
+      if (!g) continue;
+      o.beginPath();
+      o.moveTo(g.c4[0].x, g.c4[0].y);
+      for (let i = 1; i < 4; i++) o.lineTo(g.c4[i].x, g.c4[i].y);
+      o.closePath();
+      o.fillStyle = "rgba(13,153,255,0.08)";
+      o.fill();
+      o.strokeStyle = acc; o.lineWidth = 1.5;
+      o.stroke();
+      if (!single) continue;
+      // 회전 핸들(상단 중앙 바깥 원).
+      const tm = { x: (g.c4[0].x + g.c4[1].x) / 2, y: (g.c4[0].y + g.c4[1].y) / 2 };
+      o.beginPath(); o.moveTo(tm.x, tm.y); o.lineTo(g.rot.x, g.rot.y); o.stroke();
+      o.beginPath(); o.arc(g.rot.x, g.rot.y, 4.5, 0, 7); o.fillStyle = "#fff"; o.fill(); o.stroke();
+      // 리사이즈 핸들 8개(흰 채움 + 액센트 보더).
+      for (const h of g.handles) {
+        o.fillStyle = "#fff";
+        o.fillRect(h.p.x - HANDLE / 2, h.p.y - HANDLE / 2, HANDLE, HANDLE);
+        o.strokeStyle = acc; o.lineWidth = 1;
+        o.strokeRect(h.p.x - HANDLE / 2 + 0.5, h.p.y - HANDLE / 2 + 0.5, HANDLE - 1, HANDLE - 1);
+      }
     }
   }
   render() {
@@ -682,7 +778,7 @@ class DxCanvas extends LitElement {
           .value=${t.value}
           @input=${(e) => { t.value = e.target.value; e.target.style.width = "auto"; e.target.style.width = e.target.scrollWidth + "px"; e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
           @keydown=${(e) => {
-            if (e.key === "Escape") { this._text = null; }
+            if (e.key === "Escape") { this._text = null; this._finishText(); }
             else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) this._commitText();
             e.stopPropagation();
           }}
@@ -767,7 +863,7 @@ class DxLayerPanel extends LitElement {
   }
   render() {
     const layers = this.app ? this.app.layers() : [];
-    const selId = this.app?.selectedId;
+    const selIds = this.app?.selectedIds ?? [];
     return html`
       <div class="head"><span>레이어</span>
         <button class="add" title="레이어 추가" @click=${(e) => { e.stopPropagation(); this._menu = !this._menu; }}>${icon("plus")}</button>
@@ -782,7 +878,8 @@ class DxLayerPanel extends LitElement {
           </div>` : nothing}
         ${layers.length === 0 ? html`<div class="empty">레이어가 없습니다.<br>도형을 그리거나 dx CLI로 추가하세요.</div>` : nothing}
         ${layers.map((l) => html`
-          <div class="row ${l.id === selId ? "sel" : ""}" @click=${() => this.app.select(l.id)}>
+          <div class="row ${selIds.includes(l.id) ? "sel" : ""}"
+            @click=${(e) => (e.shiftKey ? this.app.toggleSelect(l.id) : this.app.select(l.id))}>
             <span class="ord">
               <button title="위로" @click=${(e) => { e.stopPropagation(); this.app.raise(l.id); }}>${icon("chevUpS", 9)}</button>
               <button title="아래로" @click=${(e) => { e.stopPropagation(); this.app.lower(l.id); }}>${icon("chevDownS", 9)}</button>
@@ -844,6 +941,23 @@ class DxProps extends LitElement {
   disconnectedCallback() { this.app?.removeEventListener("changed", this._onChange); super.disconnectedCallback(); }
   _set(patch) { this.app.apply([B.setProps(this.app.selectedId, patch)]); }
   render() {
+    const ids = this.app?.selectedIds ?? [];
+    // 다중 선택: "N개 선택됨" + 공통 액션(정렬·삭제)만 표시.
+    if (ids.length > 1) {
+      return html`
+        <div class="head">Design<span class="nm">· ${ids.length}개 선택됨</span>
+          <button class="b" title="삭제 (Del)" @click=${() => this.app.deleteMany(ids)}>${icon("trash", 13)}</button>
+        </div>
+        <div class="sec">
+          <div class="sec-t">정렬</div>
+          <div class="alignr">
+            ${["left", "center-h", "right", "top", "center-v", "bottom"].map((m, i) => html`
+              <button title=${m} @click=${() => this.app.alignMany(ids, m)}>
+                ${icon(["alignL", "alignCH", "alignR", "alignT", "alignCV", "alignB"][i], 14)}</button>`)}
+          </div>
+        </div>
+        <div class="empty">${ids.length}개 레이어가 선택되었습니다.<br>개별 속성은 단일 선택에서 편집하세요.</div>`;
+    }
     const l = this.app?.getSelected?.();
     if (!l) return html`<div class="head">Design</div>
       <div class="empty">선택된 레이어가 없습니다.<br>V 도구로 캔버스에서 선택하세요.</div>`;
@@ -865,9 +979,16 @@ class DxProps extends LitElement {
       const off = this.app.computeAnchoredOffset(l, null, deg, ctrAnchor ?? { x: 0, y: 0 });
       this.app.apply([B.setProps(l.id, { rotation: deg, offset: off })]);
     };
+    // X/Y는 절대좌표: 문서 좌상단 = (0,0), 값 = 오브젝트(변환 후 AABB) 좌상단.
+    // 편집 시 목표 절대좌표와 현재 AABB 차이만큼 offset 이동.
+    const aabb = this.app.displayAABB(l);
+    const absX = aabb ? Math.round(aabb.x) : ox;
+    const absY = aabb ? Math.round(aabb.y) : oy;
     const commitXY = (which, v) => {
-      const nx = which === "x" ? (+v | 0) : ox, ny = which === "y" ? (+v | 0) : oy;
-      this.app.apply([B.setOffset(l.id, [nx, ny])]);
+      if (!aabb) return;
+      const dx = which === "x" ? Math.round(+v - aabb.x) : 0;
+      const dy = which === "y" ? Math.round(+v - aabb.y) : 0;
+      this.app.apply([B.setOffset(l.id, [ox + dx, oy + dy])]);
     };
     const num = (label, value, onChange) => html`
       <div class="cell"><span>${label}</span>
@@ -880,8 +1001,8 @@ class DxProps extends LitElement {
       <div class="sec">
         <div class="sec-t">위치 · 크기</div>
         <div class="grid2">
-          ${num("X", ox, (v) => commitXY("x", v))}
-          ${num("Y", oy, (v) => commitXY("y", v))}
+          ${num("X", absX, (v) => commitXY("x", v))}
+          ${num("Y", absY, (v) => commitXY("y", v))}
           ${num("W", wPx, (v) => setW(+v))}
           ${num("H", hPx, (v) => setH(+v))}
           ${num("R°", Math.round((l.rotation ?? 0) * 10) / 10, (v) => setRotAnchored(+v || 0))}
@@ -915,6 +1036,10 @@ class DxProps extends LitElement {
             <option value="normal">Normal</option>
             <option value="multiply">Multiply</option>
             <option value="screen">Screen</option>
+            <option value="darken">Darken</option>
+            <option value="lighten">Lighten</option>
+            <option value="overlay">Overlay</option>
+            <option value="difference">Difference</option>
           </select>
         </div>
         <div class="field">
@@ -957,26 +1082,26 @@ class AppShell extends LitElement {
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
     if (e.isComposing) return;
     const meta = e.metaKey || e.ctrlKey;
-    const sel = this.app?.selectedId;
+    const ids = this.app?.selectedIds ?? []; // 단축키는 선택 전체에 적용(하나의 apply 배치).
     const k = e.key.toLowerCase();
     if (meta && k === "z") { e.preventDefault(); e.shiftKey ? this.app.redo() : this.app.undo(); return; }
-    if (meta && k === "d") { e.preventDefault(); this.app.duplicate(sel); return; }
+    if (meta && k === "d") { e.preventDefault(); this.app.duplicateMany(ids); return; }
     if (meta && (e.key === "]" || e.key === "[")) {
       e.preventDefault();
-      if (sel != null) e.key === "]" ? this.app.raise(sel) : this.app.lower(sel);
+      if (ids.length) e.key === "]" ? this.app.raiseMany(ids) : this.app.lowerMany(ids);
       return;
     }
     if (!meta && (e.key === "Delete" || e.key === "Backspace")) {
-      if (sel != null) { e.preventDefault(); this.app.apply([B.deleteLayer(sel)]); this.app.select(null); }
+      if (ids.length) { e.preventDefault(); this.app.deleteMany(ids); this.app.select(null); }
       return;
     }
     if (!meta && e.key.startsWith("Arrow")) {
-      if (sel == null) return;
+      if (!ids.length) return;
       e.preventDefault();
       const d = e.shiftKey ? 10 : 1;
       const dx = e.key === "ArrowLeft" ? -d : e.key === "ArrowRight" ? d : 0;
       const dy = e.key === "ArrowUp" ? -d : e.key === "ArrowDown" ? d : 0;
-      this.app.nudge(sel, dx, dy);
+      this.app.nudgeMany(ids, dx, dy);
       return;
     }
     if (e.shiftKey && e.key === "0") { this._canvas?.zoomCmd("reset"); return; }
@@ -1004,7 +1129,8 @@ class AppShell extends LitElement {
       <dx-layer-panel .app=${this.app}></dx-layer-panel>
       <dx-canvas .app=${this.app} .toolState=${this._tool}
         @zoom-changed=${(e) => { this._zoom = e.detail; }}
-        @picked-color=${(e) => { this._topbar?.setColor(e.detail); this._topbar?.setTool("select"); }}></dx-canvas>
+        @picked-color=${(e) => { this._topbar?.setColor(e.detail); this._topbar?.setTool("select"); }}
+        @text-finished=${() => this._topbar?.setTool("select")}></dx-canvas>
       <dx-props .app=${this.app}></dx-props>
     `;
   }

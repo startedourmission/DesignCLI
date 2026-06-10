@@ -7,6 +7,8 @@
 use crate::dispatch::{Action, BatchResult};
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
+use std::io::Read;
+use std::path::Path;
 
 /// 데몬 접속 정보(서버 URL + 문서 id).
 pub struct Server {
@@ -58,6 +60,22 @@ impl Server {
     pub fn state(&self) -> Result<Value> {
         let resp = ureq::get(&self.url("/state")).call().map_err(map_ureq)?;
         resp.into_json().context("state JSON 파싱")
+    }
+
+    /// GET /doc/:id/export.png — 데몬이 합성한 PNG를 받아 `out`에 저장한다.
+    /// 성공 시 (width, height)를 반환(emit.exported 호환).
+    pub fn export_png(&self, out: &Path) -> Result<(u32, u32)> {
+        let resp = ureq::get(&self.url("/export.png")).call().map_err(map_ureq)?;
+        let mut bytes = Vec::new();
+        resp.into_reader().read_to_end(&mut bytes).context("PNG 응답 읽기")?;
+        // 응답 헤더만 디코드해 크기 확인(전체 픽셀 디코드 없음) — 출력 메시지용.
+        let info = png::Decoder::new(std::io::Cursor::new(&bytes))
+            .read_info()
+            .context("데몬 PNG 응답 파싱")?;
+        let (w, h) = (info.info().width, info.info().height);
+        std::fs::write(out, &bytes)
+            .with_context(|| format!("PNG 저장 실패: {}", out.display()))?;
+        Ok((w, h))
     }
 
     /// 문서를 생성한다(없으면). 이미 있으면 409를 무시하고 Ok.

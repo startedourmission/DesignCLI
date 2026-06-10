@@ -143,6 +143,25 @@ pub async fn snapshot(State(app): Shared, Path(id): Path<String>) -> impl IntoRe
     Json(json!({ "seq": ds.seq, "dxpkg_base64": b64 })).into_response()
 }
 
+/// GET /doc/:id/export.png — 합성 결과를 8bit RGBA PNG로 응답(디스크 export와 동일 인코딩).
+pub async fn export_png(State(app): Shared, Path(id): Path<String>) -> impl IntoResponse {
+    let docs = app.docs.lock().unwrap();
+    let Some(ds) = docs.get(&id) else {
+        return doc_not_found(&id);
+    };
+    let surface = dcli_raster::composite(&ds.hist.doc);
+    let pixels = surface.to_srgb8_rgba();
+    let mut buf = Vec::new();
+    let mut enc = png::Encoder::new(&mut buf, surface.width(), surface.height());
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    if let Err(e) = enc.write_header().and_then(|mut w| w.write_image_data(&pixels)) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("PNG 인코딩 실패: {e}"))
+            .into_response();
+    }
+    ([(axum::http::header::CONTENT_TYPE, "image/png")], buf).into_response()
+}
+
 /// GET /doc/:id/state — 레이어 목록 + 문서 메타 + seq(읽기/디버그).
 pub async fn state(State(app): Shared, Path(id): Path<String>) -> impl IntoResponse {
     let docs = app.docs.lock().unwrap();

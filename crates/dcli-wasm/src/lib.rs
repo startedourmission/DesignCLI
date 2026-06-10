@@ -178,6 +178,18 @@ impl Editor {
         js_sys::Uint8ClampedArray::from(self.rgba.as_slice())
     }
 
+    /// 특정 레이어를 **화면에서만 제외**하고 합성(읽기 전용 — 문서·undo·동기화 무오염).
+    /// 텍스트 인라인 편집 중 원본이 밑에 비치는 것을 막는 용도. 캐시 안 씀.
+    pub fn composite_rgba_excluding(&self, id: u32) -> js_sys::Uint8ClampedArray {
+        use dcli_model::NodeId;
+        let mut doc = self.hist.doc.clone();
+        if let Some(n) = doc.get_mut(NodeId(id as u64)) {
+            n.visible = false;
+        }
+        let rgba = dcli_raster::composite(&doc).to_srgb8_rgba();
+        js_sys::Uint8ClampedArray::from(rgba.as_slice())
+    }
+
     /// 합성 결과를 PNG 바이트로 반환(결정적 export).
     pub fn export_png(&mut self) -> Result<Vec<u8>, JsError> {
         self.ensure_composited();

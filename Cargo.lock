@@ -769,6 +769,7 @@ dependencies = [
  "dcli-model",
  "dcli-raster",
  "dcli-tile",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "tokio",

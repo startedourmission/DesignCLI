@@ -48,6 +48,10 @@ fn blend_code(b: BlendMode) -> u32 {
         BlendMode::Normal => 0,
         BlendMode::Multiply => 1,
         BlendMode::Screen => 2,
+        BlendMode::Darken => 3,
+        BlendMode::Lighten => 4,
+        BlendMode::Overlay => 5,
+        BlendMode::Difference => 6,
     }
 }
 

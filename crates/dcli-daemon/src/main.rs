@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/doc/:id/undo", post(routes::undo))
         .route("/doc/:id/redo", post(routes::redo))
         .route("/doc/:id/snapshot", get(routes::snapshot))
+        .route("/doc/:id/export.png", get(routes::export_png))
         .route("/doc/:id/state", get(routes::state))
         .route("/doc/:id/live", get(routes::live))
         .with_state(app_state);

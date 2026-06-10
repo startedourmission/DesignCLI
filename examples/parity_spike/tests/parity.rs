@@ -207,6 +207,42 @@ fn gpu_matches_cpu_with_transform() {
 }
 
 #[test]
+fn gpu_matches_cpu_new_blends() {
+    // 신규 블렌드 4종(Darken/Lighten/Overlay/Difference)이 CPU/GPU에서 1:1 동일
+    // 수학인지 — 블렌드 parity 게이트 (gpu_matches_cpu_with_transform 패턴).
+    let ctx = match dcli_gpu::GpuContext::new_headless() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("GPU 미가용, skip: {e}");
+            return;
+        }
+    };
+    use dcli_model::BlendMode;
+    for blend in [
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Overlay,
+        BlendMode::Difference,
+    ] {
+        for depth in [BitDepth::U8, BitDepth::F32] {
+            let mut doc = spike_scene(depth);
+            // 배경(맨 아래) 위의 모든 레이어 blend를 신규 모드로 교체.
+            let ids: Vec<_> = doc.order().to_vec();
+            for &id in ids.iter().skip(1) {
+                doc.get_mut(id).unwrap().blend = blend;
+            }
+            let cpu = dcli_raster::composite(&doc).to_srgb8_rgba();
+            let gpu = ctx.composite(&doc).expect("gpu composite").to_srgb8_rgba();
+            let m = max_abs(&cpu, &gpu);
+            let s = ssim_gray(&cpu, &gpu);
+            eprintln!("[blend {:?} {:?}] max-abs={} ssim={:.6}", blend, depth, m, s);
+            assert!(m <= 2, "[blend {:?} {:?}] GPU-CPU max-abs {} > 2", blend, depth, m);
+            assert!(s > 0.999, "[blend {:?} {:?}] GPU-CPU SSIM {} < 0.999", blend, depth, s);
+        }
+    }
+}
+
+#[test]
 fn gpu_matches_cpu_with_offset() {
     // 레이어 offset(평행이동)이 CPU/GPU에서 동일 픽셀 매핑인지 — offset parity 게이트.
     let ctx = match dcli_gpu::GpuContext::new_headless() {

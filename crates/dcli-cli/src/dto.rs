@@ -20,6 +20,10 @@ pub fn blend_str(blend: BlendMode) -> &'static str {
         BlendMode::Normal => "normal",
         BlendMode::Multiply => "multiply",
         BlendMode::Screen => "screen",
+        BlendMode::Darken => "darken",
+        BlendMode::Lighten => "lighten",
+        BlendMode::Overlay => "overlay",
+        BlendMode::Difference => "difference",
     }
 }
 

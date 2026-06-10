@@ -8,7 +8,7 @@
 const MAX_LAYERS: u32 = 8u;
 
 struct LayerMeta {
-    blend: u32,     // 0=Normal,1=Multiply,2=Screen
+    blend: u32,     // 0=Normal,1=Multiply,2=Screen,3=Darken,4=Lighten,5=Overlay,6=Difference
     opacity: f32,
     offset_x: i32,  // 캔버스 평행이동 (dx,dy) 정수 픽셀 (CPU composite_layer와 동일)
     offset_y: i32,
@@ -70,6 +70,14 @@ fn screen1(a: f32, b: f32) -> f32 {
     return 1.0 - (1.0 - a) * (1.0 - b);
 }
 
+// Overlay 성분 공식 (dcli-raster::overlay와 1:1): dst가 어두우면 2ds, 밝으면 1−2(1−d)(1−s).
+fn overlay1(d: f32, s: f32) -> f32 {
+    if (d <= 0.5) {
+        return 2.0 * d * s;
+    }
+    return 1.0 - 2.0 * (1.0 - d) * (1.0 - s);
+}
+
 // linear-premul straight 변환 (alpha==0 가드).
 fn to_straight_gamma(p: vec4<f32>) -> vec3<f32> {
     if (p.a <= 0.0) {
@@ -93,6 +101,15 @@ fn blend_in_gamma(dst: vec4<f32>, src: vec4<f32>, blend: u32) -> vec4<f32> {
     } else if (blend == 2u) { // Screen
         blended_gamma = vec3<f32>(
             screen1(dg.x, sg.x), screen1(dg.y, sg.y), screen1(dg.z, sg.z));
+    } else if (blend == 3u) { // Darken
+        blended_gamma = min(dg, sg);
+    } else if (blend == 4u) { // Lighten
+        blended_gamma = max(dg, sg);
+    } else if (blend == 5u) { // Overlay
+        blended_gamma = vec3<f32>(
+            overlay1(dg.x, sg.x), overlay1(dg.y, sg.y), overlay1(dg.z, sg.z));
+    } else if (blend == 6u) { // Difference
+        blended_gamma = abs(dg - sg);
     } else { // Normal
         blended_gamma = sg;
     }
@@ -115,6 +132,15 @@ fn blend_in_linear(dst: vec4<f32>, src: vec4<f32>, blend: u32) -> vec4<f32> {
     } else if (blend == 2u) { // Screen
         bs = vec3<f32>(
             screen1(dst.r, src.r), screen1(dst.g, src.g), screen1(dst.b, src.b));
+    } else if (blend == 3u) { // Darken (premul 성분 — CPU blend_rgb_premul과 동일 관행)
+        bs = min(dst.rgb, src.rgb);
+    } else if (blend == 4u) { // Lighten
+        bs = max(dst.rgb, src.rgb);
+    } else if (blend == 5u) { // Overlay
+        bs = vec3<f32>(
+            overlay1(dst.r, src.r), overlay1(dst.g, src.g), overlay1(dst.b, src.b));
+    } else if (blend == 6u) { // Difference
+        bs = abs(dst.rgb - src.rgb);
     } else { // Normal
         bs = src.rgb;
     }

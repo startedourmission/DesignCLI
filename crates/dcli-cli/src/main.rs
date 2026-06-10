@@ -235,7 +235,7 @@ enum LayerCmd {
 
 #[derive(Subcommand)]
 enum BlendCmd {
-    /// 레이어 블렌드 모드 변경: normal|multiply|screen.
+    /// 레이어 블렌드 모드 변경: normal|multiply|screen|darken|lighten|overlay|difference.
     Set { id: u64, mode: String },
 }
 
@@ -268,7 +268,13 @@ fn parse_blend(s: &str) -> Result<BlendModeDto> {
         "normal" => Ok(BlendModeDto::Normal),
         "multiply" => Ok(BlendModeDto::Multiply),
         "screen" => Ok(BlendModeDto::Screen),
-        other => anyhow::bail!("알 수 없는 블렌드 모드: {other} (normal|multiply|screen)"),
+        "darken" => Ok(BlendModeDto::Darken),
+        "lighten" => Ok(BlendModeDto::Lighten),
+        "overlay" => Ok(BlendModeDto::Overlay),
+        "difference" => Ok(BlendModeDto::Difference),
+        other => anyhow::bail!(
+            "알 수 없는 블렌드 모드: {other} (normal|multiply|screen|darken|lighten|overlay|difference)"
+        ),
     }
 }
 
@@ -434,10 +440,12 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             Ok(())
         }
         Command::Export(ExportCmd::Png { out }) => {
-            anyhow::ensure!(
-                cli.server.is_none(),
-                "export는 --server 모드 미지원(프로토타입) — 웹 UI의 🖼 PNG 버튼을 쓰세요"
-            );
+            // --server면 데몬이 합성·인코딩한 PNG를 받아 저장(디스크 모드와 동일 인코딩 경로).
+            if let Some(srv) = server_of(cli) {
+                let (w, h) = srv.export_png(out)?;
+                emit.exported(out, w, h, false);
+                return Ok(());
+            }
             let doc = path.load()?;
             let surface = dcli_raster::composite(&doc);
             if !cli.dry_run {
