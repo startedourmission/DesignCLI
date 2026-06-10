@@ -323,21 +323,28 @@ class DxCanvas extends LitElement {
 
   /** select 도구 더블클릭: 텍스트 레이어(meta.type==text)면 인라인 편집. */
   _dblclick(e) {
-    if ((this.toolState?.tool ?? "select") !== "select") return;
-    const p = this._coords(e);
-    const hit = this.app.hitTest(p.x, p.y);
-    if (hit == null) return;
-    const layer = this.app.layers().find((l) => l.id === hit);
-    let meta = null;
-    try { meta = layer?.meta ? JSON.parse(layer.meta) : null; } catch { /* meta 없음 */ }
-    if (meta?.type !== "text") return;
-    e.preventDefault();
-    this.app.select(hit);
-    this._openText({
-      x: meta.x, y: meta.y, value: meta.text,
-      size: meta.size, rgba: meta.rgba,
-      editId: hit,
-    });
+    try {
+      if ((this.toolState?.tool ?? "select") !== "select") return;
+      const p = this._coords(e);
+      const hit = this.app.hitTest(p.x, p.y);
+      if (hit == null) return;
+      const layer = this.app.layers().find((l) => l.id === hit);
+      let meta = null;
+      try { meta = layer?.meta ? JSON.parse(layer.meta) : null; } catch { /* meta 없음 */ }
+      if (meta?.type !== "text") {
+        console.info("[text] 더블클릭한 레이어에 텍스트 meta 없음(이 빌드 이전에 만든 텍스트는 편집 불가):", layer?.name);
+        return;
+      }
+      e.preventDefault();
+      this.app.select(hit);
+      this._openText({
+        x: meta.x, y: meta.y, value: meta.text,
+        size: meta.size, rgba: meta.rgba,
+        editId: hit,
+      });
+    } catch (err) {
+      console.error("[text] 편집 진입 실패:", err);
+    }
   }
   updated() { this._applyZoom(); this._drawOverlay(); }
 
@@ -428,8 +435,12 @@ class DxCanvas extends LitElement {
       { k: "br", p: c4[2], ax: "xy" }, { k: "bm", p: mid(c4[2], c4[3]), ax: "y" },
       { k: "bl", p: c4[3], ax: "xy" }, { k: "ml", p: mid(c4[3], c4[0]), ax: "x" },
     ];
-    const ctr = tp.center();
-    const ctrS = { x: ctr.x * z, y: ctr.y * z };
+    // 회전 핸들 스템은 **쿼드 자체 중심** 기준(상단 변에 수직). 변환 중심(문서 중심+offset)을
+    // 쓰면 off-center 도형에서 스템이 기울어 보인다(버그 수정).
+    const ctrS = {
+      x: (c4[0].x + c4[1].x + c4[2].x + c4[3].x) / 4,
+      y: (c4[0].y + c4[1].y + c4[2].y + c4[3].y) / 4,
+    };
     const tmS = mid(c4[0], c4[1]);
     const dir = Math.hypot(tmS.x - ctrS.x, tmS.y - ctrS.y) || 1;
     const rot = { x: tmS.x + ((tmS.x - ctrS.x) / dir) * 20, y: tmS.y + ((tmS.y - ctrS.y) / dir) * 20 };
@@ -497,17 +508,20 @@ class DxCanvas extends LitElement {
       }
       if (hh?.type === "resize") {
         const g = hh.g, sel = g.sel, b = g.b;
-        const c = g.t.c;
-        // 핸들의 src 기준점(코너/엣지 중점) — 축별로 중심에서의 거리로 스케일 계산.
+        // 핸들의 src 기준점(코너/엣지 중점).
         const hx = hh.h.k.includes("l") ? b[0] : hh.h.k.includes("r") ? b[0] + b[2] : b[0] + b[2] / 2;
         const hy = hh.h.k.startsWith("t") ? b[1] : hh.h.k.startsWith("b") ? b[1] + b[3] : b[1] + b[3] / 2;
         // anchor = 반대쪽 핸들(src) — Figma처럼 반대편이 고정된 채 늘어난다.
         const ax2 = hh.h.k.includes("l") ? b[0] + b[2] : hh.h.k.includes("r") ? b[0] : b[0] + b[2] / 2;
         const ay2 = hh.h.k.startsWith("t") ? b[1] + b[3] : hh.h.k.startsWith("b") ? b[1] : b[1] + b[3] / 2;
+        // ★스케일 유도(anchor 기준 — 분모가 bbox 크기라 0 폭발 없음)★
+        // off'가 anchor를 고정하므로 T'(h)−T'(a) = R(S'⊙(h−a)) = p − A
+        // → S' = R⁻¹(p − A) ⊘ (h − a),  A = 드래그 시작 시 anchor의 캔버스 위치.
         this._drag = {
           mode: "resize", id: sel.id, ax: hh.h.ax,
           scale0: sel.scale ?? [1, 1], provScale: sel.scale ?? [1, 1], provOffset: null,
-          hsrc: { x: hx, y: hy }, asrc: { x: ax2, y: ay2 }, c, sel,
+          hsrc: { x: hx, y: hy }, asrc: { x: ax2, y: ay2 },
+          A: g.t.fwd(ax2, ay2), sel,
         };
         return;
       }
@@ -564,15 +578,14 @@ class DxCanvas extends LitElement {
       this._drawOverlay();
     } else if (d.mode === "resize") {
       const sel = d.sel;
-      // 회전 프레임 제거한 로컬 좌표에서 축별 비율.
+      // anchor 기준 유도: S' = R⁻¹(p − A) ⊘ (h − a). 분모 = bbox 폭/높이(0 폭발 없음).
       const rad = ((sel.rotation ?? 0) * Math.PI) / 180;
       const cos = Math.cos(rad), sin = Math.sin(rad);
-      const ax0 = p.x - (sel.offset?.[0] ?? 0) - d.c.x;
-      const ay0 = p.y - (sel.offset?.[1] ?? 0) - d.c.y;
-      const lx = cos * ax0 + sin * ay0; // = sx' * (hsrc.x - c.x)
-      const ly = -sin * ax0 + cos * ay0;
+      const vx = p.x - d.A.x, vy = p.y - d.A.y;
+      const lx = cos * vx + sin * vy; // R⁻¹
+      const ly = -sin * vx + cos * vy;
       let [nsx, nsy] = d.scale0;
-      const bx = d.hsrc.x - d.c.x, by = d.hsrc.y - d.c.y;
+      const bx = d.hsrc.x - d.asrc.x, by = d.hsrc.y - d.asrc.y;
       if (d.ax.includes("x") && Math.abs(bx) > 1e-3) nsx = lx / bx;
       if (d.ax.includes("y") && Math.abs(by) > 1e-3) nsy = ly / by;
       if (e.shiftKey && d.ax === "xy") {

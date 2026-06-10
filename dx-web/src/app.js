@@ -34,7 +34,9 @@ export class Renderer {
     if (!this._dirty) return;
     this._dirty = false;
     // 매 프레임 새 복사본을 받는다(메모리 detach 무관 — wasm이 소유 복사본 반환).
-    const buf = this.excludeId != null
+    // composite_rgba_excluding은 신형 wasm에만 있음 — 구버전 캐시여도 렌더는 살리기(feature-detect).
+    const canExclude = typeof this.editor.composite_rgba_excluding === "function";
+    const buf = this.excludeId != null && canExclude
       ? this.editor.composite_rgba_excluding(this.excludeId)
       : this.editor.composite_rgba();
     const img = new ImageData(buf, this.editor.width(), this.editor.height());

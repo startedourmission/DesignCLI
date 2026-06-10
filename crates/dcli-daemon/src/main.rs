@@ -44,7 +44,9 @@ async fn main() -> anyhow::Result<()> {
     let app = api
         .fallback_service(ServeDir::new(&web_dir))
         // 로컬 단일 사용자 — 개발 편의로 CORS 허용(다른 origin 정적 서버에서 붙는 경우).
-        .layer(CorsLayer::permissive());
+        .layer(CorsLayer::permissive())
+        // 정적 JS/wasm 캐시 금지 — 구버전 모듈 캐시로 "기능이 안 먹는" 사고 재발 방지.
+        .layer(axum::middleware::map_response(no_store));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -66,6 +68,15 @@ fn web_dir() -> PathBuf {
     // crates/dcli-daemon → ../../dx-web
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest.join("..").join("..").join("dx-web")
+}
+
+/// 모든 응답에 Cache-Control: no-store — 로컬 에디터라 캐시 이득이 없고 stale 모듈 사고만 만든다.
+async fn no_store(mut res: axum::response::Response) -> axum::response::Response {
+    res.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    res
 }
 
 async fn shutdown_signal() {
