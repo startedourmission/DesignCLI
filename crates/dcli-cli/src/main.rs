@@ -517,9 +517,9 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
     })
 }
 
-/// --server 모드면 데몬 문서 id를 만든다. id = --doc 경로의 파일명 stem
-/// (예: "demo.dxdoc" → "demo", "demo" → "demo"). 디스크 모드면 None.
-fn server_of(cli: &Cli) -> Option<Server> {
+/// 명시적 --server 모드면 데몬 문서 id를 만든다. id = --doc 경로의 파일명 stem
+/// (예: "demo.dxdoc" → "demo", "demo" → "demo").
+fn explicit_server_of(cli: &Cli) -> Option<Server> {
     let base = cli.server.as_ref()?;
     let id = cli
         .doc
@@ -528,6 +528,25 @@ fn server_of(cli: &Cli) -> Option<Server> {
         .unwrap_or("doc")
         .to_string();
     Some(Server::new(base, &id))
+}
+
+/// 실제 작업 대상 서버.
+///
+/// 사용자가 --server를 명시하면 그 서버를 사용한다. 명시하지 않았더라도 로컬 데몬에서
+/// `projects/<id>.dxdoc`가 이미 열린 상태면 디스크 저장 대신 데몬에 적용해 웹 UI와
+/// 레이어 패널이 즉시 같은 상태를 보게 한다.
+fn server_of(cli: &Cli) -> Option<Server> {
+    explicit_server_of(cli).or_else(|| Server::auto_for_open_project(&cli.doc))
+}
+
+fn write_target(cli: &Cli) -> Option<&'static str> {
+    if cli.dry_run {
+        None
+    } else if server_of(cli).is_some() {
+        Some("live")
+    } else {
+        Some("disk")
+    }
 }
 
 /// 한 Action을 적용한다(CLI 쓰기 공통 경로). --server면 데몬에, 아니면 디스크에.
@@ -584,7 +603,7 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 // 데몬에 문서 등록(이미 있으면 멱등). 데몬이 진실원.
                 srv.ensure_doc(*w, *h, depth)?;
                 let doc = Document::new(*w, *h, depth_bd);
-                emit.doc_created(&cli.doc, &doc, false);
+                emit.doc_created_target(&cli.doc, &doc, false, Some("live"));
                 return Ok(());
             }
             anyhow::ensure!(
@@ -596,7 +615,7 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             if !cli.dry_run {
                 path.save(&doc)?;
             }
-            emit.doc_created(&cli.doc, &doc, cli.dry_run);
+            emit.doc_created_target(&cli.doc, &doc, cli.dry_run, write_target(cli));
             Ok(())
         }
         Command::Doc(DocCmd::Info) => {
@@ -617,7 +636,11 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             if changed > 0 && !cli.dry_run {
                 path.save(&doc)?;
             }
-            emit.ok(&format!("문서 압축: 텍스트 표면 {changed}개"), cli.dry_run);
+            emit.ok_target(
+                &format!("문서 압축: 텍스트 표면 {changed}개"),
+                cli.dry_run,
+                write_target(cli),
+            );
             Ok(())
         }
         Command::Layer(cmd) => run_layer(cli, emit, &path, cmd),
@@ -631,7 +654,11 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                     mode,
                 },
             )?;
-            emit.ok(&format!("블렌드 설정: n{id} = {mode:?}"), cli.dry_run);
+            emit.ok_target(
+                &format!("블렌드 설정: n{id} = {mode:?}"),
+                cli.dry_run,
+                write_target(cli),
+            );
             Ok(())
         }
         Command::Draw(cmd) => {
@@ -667,14 +694,18 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 });
             }
             apply_actions(cli, &path, actions)?;
-            emit.ok(&format!("도형 그림: \"{name}\""), cli.dry_run);
+            emit.ok_target(
+                &format!("도형 그림: \"{name}\""),
+                cli.dry_run,
+                write_target(cli),
+            );
             Ok(())
         }
         Command::Export(ExportCmd::Png { out, frame, region }) => {
             // --server면 데몬이 합성·인코딩한 PNG를 받아 저장(디스크 모드와 동일 인코딩 경로).
             if let Some(srv) = server_of(cli) {
                 let (w, h) = srv.export_png_with(out, frame.as_deref(), region.as_deref())?;
-                emit.exported(out, w, h, false);
+                emit.exported_target(out, w, h, false, Some("live"));
                 return Ok(());
             }
             let doc = path.load()?;
@@ -699,7 +730,13 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             if !cli.dry_run {
                 storage::export_png(out, &surface)?;
             }
-            emit.exported(out, surface.width(), surface.height(), cli.dry_run);
+            emit.exported_target(
+                out,
+                surface.width(),
+                surface.height(),
+                cli.dry_run,
+                write_target(cli),
+            );
             Ok(())
         }
         Command::Frame(cmd) => run_frame(cli, emit, &path, cmd),
@@ -711,7 +748,7 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             if !cli.dry_run {
                 path.save(&doc)?;
             }
-            emit.ok(
+            emit.ok_target(
                 &format!(
                     "PSD import: {} → {} (레이어 {}개)",
                     input.display(),
@@ -719,6 +756,7 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                     doc.node_count()
                 ),
                 cli.dry_run,
+                write_target(cli),
             );
             Ok(())
         }
@@ -729,9 +767,10 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             if !cli.dry_run {
                 std::fs::write(out, &bytes).context("PSD 쓰기")?;
             }
-            emit.ok(
+            emit.ok_target(
                 &format!("PSD export: {} ({} bytes)", out.display(), bytes.len()),
                 cli.dry_run,
+                write_target(cli),
             );
             Ok(())
         }
@@ -740,13 +779,14 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 anyhow::anyhow!("undo는 --server 모드 전용(디스크 모드는 세션 히스토리 없음)")
             })?;
             let changed = srv.undo()?;
-            emit.ok(
+            emit.ok_target(
                 if changed {
                     "되돌림"
                 } else {
                     "되돌릴 항목 없음"
                 },
                 false,
+                Some("live"),
             );
             Ok(())
         }
@@ -755,13 +795,14 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 anyhow::anyhow!("redo는 --server 모드 전용(디스크 모드는 세션 히스토리 없음)")
             })?;
             let changed = srv.redo()?;
-            emit.ok(
+            emit.ok_target(
                 if changed {
                     "다시 적용"
                 } else {
                     "다시 적용할 항목 없음"
                 },
                 false,
+                Some("live"),
             );
             Ok(())
         }
@@ -818,9 +859,10 @@ fn run_frame(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &FrameCmd) -> Resul
                 h: *h,
             });
             apply_one(cli, path, Action::SetFrames { frames })?;
-            emit.ok(
+            emit.ok_target(
                 &format!("frame 추가: \"{name}\" ({x},{y} {w}x{h})"),
                 cli.dry_run,
+                write_target(cli),
             );
             Ok(())
         }
@@ -846,7 +888,11 @@ fn run_frame(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &FrameCmd) -> Resul
             frames.retain(|f| &f.name != name && f.id.to_string() != *name);
             anyhow::ensure!(frames.len() < before, "frame 없음: {name}");
             apply_one(cli, path, Action::SetFrames { frames })?;
-            emit.ok(&format!("frame 제거: {name}"), cli.dry_run);
+            emit.ok_target(
+                &format!("frame 제거: {name}"),
+                cli.dry_run,
+                write_target(cli),
+            );
             Ok(())
         }
     }
@@ -879,14 +925,15 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             // 공통 경로(디스크/서버). 발급된 id는 BatchResult.bindings에서 읽는다.
             let res = apply_actions(cli, path, vec![action])?;
             if cli.dry_run {
-                emit.ok(&format!("레이어 추가(dry-run): \"{name}\""), true);
+                emit.ok_target(&format!("레이어 추가(dry-run): \"{name}\""), true, None);
             } else {
                 let b = &res.bindings["new"];
-                emit.layer_added(
+                emit.layer_added_target(
                     NodeId(b.node),
                     name,
                     dcli_tile::SurfaceId(b.surface.unwrap()),
                     false,
+                    write_target(cli),
                 );
             }
             Ok(())
@@ -919,7 +966,7 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             let node = doc
                 .get(NodeId(*id))
                 .ok_or_else(|| anyhow::anyhow!("레이어 없음: n{id}"))?;
-            emit.layer_get(node);
+            emit.layer_get(&doc, node);
             Ok(())
         }
         LayerCmd::Set {
@@ -954,7 +1001,11 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                     patch,
                 },
             )?;
-            emit.ok(&format!("레이어 속성 변경: n{id}"), cli.dry_run);
+            emit.ok_target(
+                &format!("레이어 속성 변경: n{id}"),
+                cli.dry_run,
+                write_target(cli),
+            );
             Ok(())
         }
         LayerCmd::Move { id, to } => {
@@ -966,7 +1017,11 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                     to: *to,
                 },
             )?;
-            emit.ok(&format!("레이어 이동: n{id} → idx {to}"), cli.dry_run);
+            emit.ok_target(
+                &format!("레이어 이동: n{id} → idx {to}"),
+                cli.dry_run,
+                write_target(cli),
+            );
             Ok(())
         }
         LayerCmd::Delete { id } => {
@@ -977,7 +1032,11 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                     id: NodeRef::Node(*id),
                 },
             )?;
-            emit.ok(&format!("레이어 삭제: n{id}"), cli.dry_run);
+            emit.ok_target(
+                &format!("레이어 삭제: n{id}"),
+                cli.dry_run,
+                write_target(cli),
+            );
             Ok(())
         }
         LayerCmd::Group { ids, name } => {
@@ -991,9 +1050,10 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                     bind: None,
                 },
             )?;
-            emit.ok(
+            emit.ok_target(
                 &format!("그룹 생성: \"{name}\" ({}개)", ids.len()),
                 cli.dry_run,
+                write_target(cli),
             );
             Ok(())
         }
@@ -1005,7 +1065,7 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                     id: NodeRef::Node(*id),
                 },
             )?;
-            emit.ok(&format!("그룹 해제: n{id}"), cli.dry_run);
+            emit.ok_target(&format!("그룹 해제: n{id}"), cli.dry_run, write_target(cli));
             Ok(())
         }
         LayerCmd::Duplicate { id } => {
@@ -1018,12 +1078,13 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                 },
             )?;
             let new_id = res.bindings.get("copy").map(|b| b.node);
-            emit.ok(
+            emit.ok_target(
                 &match new_id {
                     Some(n) => format!("레이어 복제: n{id} → n{n}"),
                     None => format!("레이어 복제: n{id}"),
                 },
                 cli.dry_run,
+                write_target(cli),
             );
             Ok(())
         }

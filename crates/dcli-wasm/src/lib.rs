@@ -229,14 +229,25 @@ impl Editor {
     }
 }
 
+fn transform_center(doc: &dcli_model::Document, node: &dcli_model::Node) -> (f32, f32) {
+    use dcli_model::NodeKind;
+    match &node.kind {
+        NodeKind::Paint { surface } => doc
+            .pixels()
+            .get(*surface)
+            .map(|surf| (surf.width() as f32 * 0.5, surf.height() as f32 * 0.5))
+            .unwrap_or((doc.width as f32 * 0.5, doc.height as f32 * 0.5)),
+        NodeKind::Group { .. } => (doc.width as f32 * 0.5, doc.height as f32 * 0.5),
+    }
+}
+
 /// 노드(트랜스폼 포함)가 월드 점 p를 덮는지 — 그룹은 자식 재귀(역변환 후).
 fn hit_node(doc: &dcli_model::Document, node: &dcli_model::Node, p: (f32, f32), depth: u32) -> bool {
     use dcli_model::NodeKind;
     if !node.visible || node.opacity <= 0.0 || depth > 32 {
         return false;
     }
-    // 노드 자신의 트랜스폼 역적용(엔진과 동일 수학 — 중심 = 문서 중심).
-    let (dw, dh) = (doc.width as f32, doc.height as f32);
+    // 노드 자신의 트랜스폼 역적용(엔진과 동일 수학 — 중심 = 표면 중심).
     let local = if node.is_identity_transform() {
         (p.0 - node.offset.0 as f32, p.1 - node.offset.1 as f32)
     } else {
@@ -245,7 +256,7 @@ fn hit_node(doc: &dcli_model::Document, node: &dcli_model::Node, p: (f32, f32), 
             return false;
         }
         let (sin, cos) = node.rotation.to_radians().sin_cos();
-        let (cx, cy) = (dw * 0.5, dh * 0.5);
+        let (cx, cy) = transform_center(doc, node);
         let qx = p.0 - node.offset.0 as f32 - cx;
         let qy = p.1 - node.offset.1 as f32 - cy;
         (
@@ -300,8 +311,6 @@ fn node_src_bounds(
             (minx <= maxx).then_some((minx, miny, maxx + 1, maxy + 1))
         }
         NodeKind::Group { children } => {
-            let (dw, dh) = (doc.width as f32, doc.height as f32);
-            let (cx, cy) = (dw * 0.5, dh * 0.5);
             let mut acc: Option<(f32, f32, f32, f32)> = None;
             for child in children.iter().filter_map(|cid| doc.get(*cid)) {
                 let Some((x0, y0, x1, y1)) = node_src_bounds(doc, child, depth + 1) else {
@@ -311,6 +320,7 @@ fn node_src_bounds(
                 let (sin, cos) = child.rotation.to_radians().sin_cos();
                 let (scx, scy) = child.scale;
                 let (ox, oy) = (child.offset.0 as f32, child.offset.1 as f32);
+                let (cx, cy) = transform_center(doc, child);
                 let fwd = |px: f32, py: f32| -> (f32, f32) {
                     let vx = (px - cx) * scx;
                     let vy = (py - cy) * scy;

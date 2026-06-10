@@ -250,7 +250,7 @@ impl DesignServer {
             return tool_err(format!("열린 문서 없음: {}", req.doc));
         };
         match s.history.doc.get(NodeId(req.id)) {
-            Some(node) => tool_ok(dto::node_json(node)),
+            Some(node) => tool_ok(dto::node_json(&s.history.doc, node)),
             None => tool_err(format!("레이어 없음: n{}", req.id)),
         }
     }

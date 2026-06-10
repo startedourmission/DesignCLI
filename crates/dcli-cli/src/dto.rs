@@ -28,7 +28,11 @@ pub fn blend_str(blend: BlendMode) -> &'static str {
 }
 
 /// 단일 노드 JSON.
-pub fn node_json(node: &Node) -> Value {
+pub fn node_json(doc: &Document, node: &Node) -> Value {
+    let surface_size = node
+        .surface_id()
+        .and_then(|sid| doc.pixels().get(sid))
+        .map(|s| json!([s.width(), s.height()]));
     json!({
         "id": node.id.0,
         "name": node.name,
@@ -41,6 +45,7 @@ pub fn node_json(node: &Node) -> Value {
         "rotation": node.rotation,
         "meta": node.meta,
         "surface": node.surface_id().map(|s| s.0),
+        "surface_size": surface_size,
         // 그룹이면 자식 id 목록(bottom-to-top), 아니면 null.
         "children": match &node.kind {
             NodeKind::Group { children } => Some(children.iter().map(|c| c.0).collect::<Vec<_>>()),
@@ -50,7 +55,7 @@ pub fn node_json(node: &Node) -> Value {
 }
 
 fn node_json_tree(doc: &Document, node: &Node) -> Value {
-    let mut v = node_json(node);
+    let mut v = node_json(doc, node);
     if let NodeKind::Group { children } = &node.kind {
         v["children"] = json!(
             children

@@ -48,30 +48,49 @@ impl Emitter {
         }
     }
 
-    pub fn ok(&self, msg: &str, dry_run: bool) {
+    pub fn ok_target(&self, msg: &str, dry_run: bool, target: Option<&str>) {
+        let mut value = json!({ "ok": true, "applied": !dry_run, "message": msg });
+        if let Some(target) = target {
+            value["target"] = json!(target);
+        }
         self.put(
-            json!({ "ok": true, "applied": !dry_run, "message": msg }),
-            &format!("{}{msg}", if dry_run { "[dry-run] " } else { "" }),
+            value,
+            &format!(
+                "{}{msg}{}",
+                if dry_run { "[dry-run] " } else { "" },
+                target_suffix(target)
+            ),
         );
     }
 
-    pub fn doc_created(&self, path: &Path, doc: &Document, dry_run: bool) {
+    pub fn doc_created_target(
+        &self,
+        path: &Path,
+        doc: &Document,
+        dry_run: bool,
+        target: Option<&str>,
+    ) {
+        let mut value = json!({
+            "doc": path.display().to_string(),
+            "w": doc.width, "h": doc.height,
+            "depth": format!("{:?}", doc.bit_depth),
+            "blend_space": format!("{:?}", doc.blend_space),
+            "applied": !dry_run,
+        });
+        if let Some(target) = target {
+            value["target"] = json!(target);
+        }
         self.put(
-            json!({
-                "doc": path.display().to_string(),
-                "w": doc.width, "h": doc.height,
-                "depth": format!("{:?}", doc.bit_depth),
-                "blend_space": format!("{:?}", doc.blend_space),
-                "applied": !dry_run,
-            }),
+            value,
             &format!(
-                "{}문서 생성: {} ({}x{}, {:?}, {:?} 합성)",
+                "{}문서 생성: {} ({}x{}, {:?}, {:?} 합성){}",
                 if dry_run { "[dry-run] " } else { "" },
                 path.display(),
                 doc.width,
                 doc.height,
                 doc.bit_depth,
-                doc.blend_space
+                doc.blend_space,
+                target_suffix(target)
             ),
         );
     }
@@ -90,17 +109,29 @@ impl Emitter {
         );
     }
 
-    pub fn layer_added(&self, id: dcli_model::NodeId, name: &str, sid: SurfaceId, dry_run: bool) {
+    pub fn layer_added_target(
+        &self,
+        id: dcli_model::NodeId,
+        name: &str,
+        sid: SurfaceId,
+        dry_run: bool,
+        target: Option<&str>,
+    ) {
+        let mut value = json!({
+            "layer": id.0, "name": name, "surface": sid.0, "applied": !dry_run,
+        });
+        if let Some(target) = target {
+            value["target"] = json!(target);
+        }
         self.put(
-            json!({
-                "layer": id.0, "name": name, "surface": sid.0, "applied": !dry_run,
-            }),
+            value,
             &format!(
-                "{}레이어 추가: n{} \"{}\" (표면 {})",
+                "{}레이어 추가: n{} \"{}\" (표면 {}){}",
                 if dry_run { "[dry-run] " } else { "" },
                 id.0,
                 name,
-                sid
+                sid,
+                target_suffix(target)
             ),
         );
     }
@@ -116,20 +147,35 @@ impl Emitter {
         }
     }
 
-    pub fn layer_get(&self, node: &Node) {
-        self.put(dto::node_json(node), &dto::node_human(node));
+    pub fn layer_get(&self, doc: &Document, node: &Node) {
+        self.put(dto::node_json(doc, node), &dto::node_human(node));
     }
 
-    pub fn exported(&self, out: &Path, w: u32, h: u32, dry_run: bool) {
+    pub fn exported_target(&self, out: &Path, w: u32, h: u32, dry_run: bool, target: Option<&str>) {
+        let mut value =
+            json!({ "export": out.display().to_string(), "w": w, "h": h, "applied": !dry_run });
+        if let Some(target) = target {
+            value["target"] = json!(target);
+        }
         self.put(
-            json!({ "export": out.display().to_string(), "w": w, "h": h, "applied": !dry_run }),
+            value,
             &format!(
-                "{}export: {} ({}x{})",
+                "{}export: {} ({}x{}){}",
                 if dry_run { "[dry-run] " } else { "" },
                 out.display(),
                 w,
-                h
+                h,
+                target_suffix(target)
             ),
         );
+    }
+}
+
+fn target_suffix(target: Option<&str>) -> String {
+    match target {
+        Some("live") => " (라이브 적용)".into(),
+        Some("disk") => " (디스크 저장)".into(),
+        Some(other) => format!(" ({other})"),
+        None => String::new(),
     }
 }

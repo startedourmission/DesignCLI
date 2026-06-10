@@ -879,6 +879,7 @@ fn try_one(
                 materialize(source, w, hh).map_err(|m| ("bad_surface_source".to_string(), m))?;
             let sid = h.doc.add_surface(surface);
             owned.push(sid); // 롤백 시 회수 대상으로 추적.
+            let before: std::collections::BTreeSet<_> = h.doc.order().iter().copied().collect();
             h.stage(Op::AddPaintLayer {
                 name: name.clone(),
                 surface: sid,
@@ -886,7 +887,13 @@ fn try_one(
                 forced_id: None,
             })
             .map_err(op_err)?;
-            let node = *h.doc.order().last().expect("방금 추가됨");
+            let node = h
+                .doc
+                .order()
+                .iter()
+                .copied()
+                .find(|id| !before.contains(id))
+                .expect("방금 추가됨");
             if offset != (0, 0) {
                 let props = {
                     let n = h.doc.get(node).expect("방금 추가됨");
@@ -1301,6 +1308,73 @@ mod tests {
             "텍스트 offset y 비정상: {}",
             node.offset.1
         );
+    }
+
+    #[test]
+    fn indexed_add_binds_the_inserted_node() {
+        let mut h = History::new(Document::new(64, 64, BitDepth::U8));
+        let actions = vec![
+            Action::AddPaintLayer {
+                name: "bottom".into(),
+                source: PixelSource::Shapes {
+                    items: vec![Shape::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 8.0,
+                        h: 8.0,
+                        rgba: [255, 0, 0, 255],
+                    }],
+                },
+                index: None,
+                bind: Some("bottom".into()),
+            },
+            Action::AddPaintLayer {
+                name: "top".into(),
+                source: PixelSource::Shapes {
+                    items: vec![Shape::Rect {
+                        x: 16.0,
+                        y: 16.0,
+                        w: 8.0,
+                        h: 8.0,
+                        rgba: [0, 0, 255, 255],
+                    }],
+                },
+                index: None,
+                bind: Some("top".into()),
+            },
+            Action::AddPaintLayer {
+                name: "edited text".into(),
+                source: PixelSource::Shapes {
+                    items: vec![Shape::Text {
+                        x: 4.0,
+                        y: 4.0,
+                        text: "T".into(),
+                        size: 16.0,
+                        rgba: [0, 0, 0, 255],
+                    }],
+                },
+                index: Some(1),
+                bind: Some("text".into()),
+            },
+            Action::SetProps {
+                id: NodeRef::Bind("text".into()),
+                patch: PropPatch {
+                    meta: Some(serde_json::json!({ "type": "text", "text": "T" }).to_string()),
+                    ..Default::default()
+                },
+            },
+        ];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        let text_id = dcli_model::NodeId(res.bindings["text"].node);
+        assert_eq!(h.doc.order()[1], text_id);
+        assert_eq!(h.doc.get(text_id).unwrap().name, "edited text");
+        assert!(
+            h.doc.get(text_id).unwrap().meta.as_deref().unwrap().contains("\"type\":\"text\""),
+            "text meta must be applied to the inserted node"
+        );
+        assert_eq!(h.doc.get(h.doc.order()[2]).unwrap().name, "top");
+        assert!(h.doc.get(h.doc.order()[2]).unwrap().meta.is_none());
     }
 
     #[test]

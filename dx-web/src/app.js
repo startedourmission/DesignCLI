@@ -348,7 +348,9 @@ export class App extends EventTarget {
 
   /** 레이어의 표시 트랜스폼(엔진과 동일 수학: 표면 중심 기준 scale→rotate→offset). */
   xformOf(l) {
-    const W = this.editor.width(), H = this.editor.height();
+    const [W, H] = Array.isArray(l.surface_size)
+      ? l.surface_size
+      : [this.editor.width(), this.editor.height()];
     const c = { x: W / 2, y: H / 2 };
     const rad = ((l.rotation ?? 0) * Math.PI) / 180;
     const cos = Math.cos(rad), sin = Math.sin(rad);
@@ -563,7 +565,7 @@ export class App extends EventTarget {
   afterRemoteApply() {
     this._invalidateCache();
     this.renderer.markDirty();
-    this._notify();
+    this._notify({ layoutChanged: true });
     this._scheduleGeometryWarmup();
   }
 
@@ -590,7 +592,7 @@ export class App extends EventTarget {
       this._scheduleGeometryWarmup();
     } else {
       this.renderer.markDirty();
-      this._notify();
+      this._notify({ layoutChanged: true });
       this._scheduleGeometryWarmup();
     }
     if (this.live) {
@@ -608,7 +610,7 @@ export class App extends EventTarget {
     if (this.editor.undo()) {
       this._invalidateCache();
       this.renderer.markDirty();
-      this._notify();
+      this._notify({ layoutChanged: true });
       this._scheduleGeometryWarmup();
     }
   }
@@ -620,7 +622,7 @@ export class App extends EventTarget {
     if (this.editor.redo()) {
       this._invalidateCache();
       this.renderer.markDirty();
-      this._notify();
+      this._notify({ layoutChanged: true });
       this._scheduleGeometryWarmup();
     }
   }

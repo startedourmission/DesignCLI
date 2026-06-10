@@ -19,7 +19,37 @@ pub struct Server {
 impl Server {
     /// `base`는 "http://host:port"(끝 슬래시 무관), `doc_id`는 문서 식별자.
     pub fn new(base: &str, doc_id: &str) -> Self {
-        Server { base: base.trim_end_matches('/').to_string(), doc_id: doc_id.to_string() }
+        Server {
+            base: base.trim_end_matches('/').to_string(),
+            doc_id: doc_id.to_string(),
+        }
+    }
+
+    /// 기본 로컬 데몬에서 이미 열린 `projects/<id>.dxdoc`를 찾으면 서버 모드로 전환한다.
+    ///
+    /// CLI가 디스크 문서를 직접 저장하면 이미 웹에서 열려 있는 메모리 문서와 갈라질 수 있다.
+    /// 이 자동 감지는 그 경우에만 조용히 라이브 데몬을 진실원으로 사용한다. 데몬이 없거나,
+    /// 프로젝트가 열려 있지 않거나, `projects/` 아래 문서가 아니면 기존 디스크 경로를 유지한다.
+    pub fn auto_for_open_project(doc_path: &Path) -> Option<Self> {
+        let parent = doc_path.parent()?;
+        if parent.file_name().and_then(|s| s.to_str()) != Some("projects") {
+            return None;
+        }
+
+        let id = doc_path.file_stem()?.to_str()?;
+        let base = default_base();
+        let url = format!("{base}/projects");
+        let resp = ureq::get(&url).call().ok()?;
+        let projects: Value = resp.into_json().ok()?;
+        let is_open = projects.as_array()?.iter().any(|p| {
+            p.get("name").and_then(|v| v.as_str()) == Some(id)
+                && p.get("open").and_then(|v| v.as_bool()) == Some(true)
+        });
+        if is_open {
+            Some(Server::new(&base, id))
+        } else {
+            None
+        }
     }
 
     fn url(&self, suffix: &str) -> String {
@@ -34,9 +64,11 @@ impl Server {
             .map_err(map_ureq)?;
         let v: Value = resp.into_json().context("응답 JSON 파싱")?;
         // 데몬 응답: { seq, result: BatchResult }
-        let result = v.get("result").ok_or_else(|| anyhow!("응답에 result 없음"))?;
-        let br: BatchResult = serde_json::from_value(result.clone())
-            .context("BatchResult 역직렬화")?;
+        let result = v
+            .get("result")
+            .ok_or_else(|| anyhow!("응답에 result 없음"))?;
+        let br: BatchResult =
+            serde_json::from_value(result.clone()).context("BatchResult 역직렬화")?;
         Ok(br)
     }
 
@@ -83,14 +115,15 @@ impl Server {
         }
         let resp = ureq::get(&url).call().map_err(map_ureq)?;
         let mut bytes = Vec::new();
-        resp.into_reader().read_to_end(&mut bytes).context("PNG 응답 읽기")?;
+        resp.into_reader()
+            .read_to_end(&mut bytes)
+            .context("PNG 응답 읽기")?;
         // 응답 헤더만 디코드해 크기 확인(전체 픽셀 디코드 없음) — 출력 메시지용.
         let info = png::Decoder::new(std::io::Cursor::new(&bytes))
             .read_info()
             .context("데몬 PNG 응답 파싱")?;
         let (w, h) = (info.info().width, info.info().height);
-        std::fs::write(out, &bytes)
-            .with_context(|| format!("PNG 저장 실패: {}", out.display()))?;
+        std::fs::write(out, &bytes).with_context(|| format!("PNG 저장 실패: {}", out.display()))?;
         Ok((w, h))
     }
 
@@ -104,6 +137,14 @@ impl Server {
             Err(e) => Err(map_ureq(e)),
         }
     }
+}
+
+fn default_base() -> String {
+    if let Ok(base) = std::env::var("DX_SERVER") {
+        return base.trim_end_matches('/').to_string();
+    }
+    let port = std::env::var("DX_PORT").unwrap_or_else(|_| "8137".into());
+    format!("http://localhost:{port}")
 }
 
 /// ureq 에러를 사람이 읽을 anyhow로(상태코드 + 본문 메시지 포함).

@@ -342,6 +342,7 @@ class DxCanvas extends LitElement {
   constructor() {
     super();
     this._drag = null; this._hoverId = null; this._ctx = null; this._v = 0; this._zoom = 1; this._origin = { x: 0, y: 0 };
+    this._hoverFrameId = null;
     this._space = false; this._text = null;
     this._bgMode = localStorage.getItem("dx.canvas.bg") || "dot";
   }
@@ -357,6 +358,11 @@ class DxCanvas extends LitElement {
         }, 140);
       } else {
         this._pendingMove = null;
+      }
+      if (e?.detail?.layoutChanged) {
+        clearTimeout(this._viewportTimer);
+        this._viewportTimer = 0;
+        this._applyZoom(true);
       }
       this._drawOverlay();
     };
@@ -395,12 +401,13 @@ class DxCanvas extends LitElement {
     this.overlay = this.renderRoot.querySelector("#overlay");
     this.app.renderer.canvas = this.base;
     this._applyZoom(true);
-    this.base.addEventListener("pointerdown", (e) => this._down(e));
+    this.addEventListener("pointerdown", (e) => this._down(e));
     this.base.addEventListener("dblclick", (e) => this._dblclick(e));
     this.addEventListener("contextmenu", (e) => this._context(e));
     this.addEventListener("pointerleave", () => {
-      if (this._hoverId != null) {
+      if (this._hoverId != null || this._hoverFrameId != null) {
         this._hoverId = null;
+        this._hoverFrameId = null;
         this._drawOverlay();
       }
     });
@@ -472,11 +479,12 @@ class DxCanvas extends LitElement {
         offset: layer.offset ?? [0, 0],
         scale: layer.scale ?? [1, 1],
         rotation: layer.rotation ?? 0,
+        surface_size: layer.surface_size,
       };
       this._openText({
         x: meta.x, y: meta.y, value: meta.text,
         size: meta.size, rgba: meta.rgba,
-        editId: hit, xf,
+        editId: hit, xf, box: this.app.textBoxBounds(layer, meta),
       });
     } catch (err) {
       console.error("[text] 편집 진입 실패:", err);
@@ -684,8 +692,40 @@ class DxCanvas extends LitElement {
       if (this._frameLabelHit(f, e)) return f;
       const inside = p.x >= f.x - tol && p.x <= f.x + f.w + tol && p.y >= f.y - tol && p.y <= f.y + f.h + tol;
       if (!inside) continue;
-      const edge = Math.min(Math.abs(p.x - f.x), Math.abs(p.x - (f.x + f.w)), Math.abs(p.y - f.y), Math.abs(p.y - (f.y + f.h)));
-      if (edge <= tol) return f;
+      return f;
+    }
+    return null;
+  }
+
+  _frameGeom(f) {
+    if (!f) return null;
+    const c4 = [
+      this._screen({ x: f.x, y: f.y }),
+      this._screen({ x: f.x + f.w, y: f.y }),
+      this._screen({ x: f.x + f.w, y: f.y + f.h }),
+      this._screen({ x: f.x, y: f.y + f.h }),
+    ];
+    const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    return {
+      frame: f,
+      c4,
+      handles: [
+        { k: "tl", p: c4[0] }, { k: "tm", p: mid(c4[0], c4[1]) },
+        { k: "tr", p: c4[1] }, { k: "mr", p: mid(c4[1], c4[2]) },
+        { k: "br", p: c4[2] }, { k: "bm", p: mid(c4[2], c4[3]) },
+        { k: "bl", p: c4[3] }, { k: "ml", p: mid(c4[3], c4[0]) },
+      ],
+    };
+  }
+
+  _hitFrameHandle(e) {
+    const f = this.app.getSelectedFrame?.();
+    if (!f) return null;
+    const g = this._frameGeom(f);
+    const r = this.getBoundingClientRect();
+    const sx = e.clientX - r.left, sy = e.clientY - r.top;
+    for (const h of g.handles) {
+      if (Math.hypot(h.p.x - sx, h.p.y - sy) <= HANDLE) return { h, g };
     }
     return null;
   }
@@ -723,6 +763,7 @@ class DxCanvas extends LitElement {
       const meta = sel.meta ? JSON.parse(sel.meta) : null;
       const tb = meta?.type === "text" ? this.app.textBoxBounds(sel, meta) : null;
       if (tb) b = [tb.x, tb.y, tb.w, tb.h];
+      sel.__isText = meta?.type === "text";
     } catch { /* non-text layer */ }
     const t = this.app.xformOf(sel);
     const d = this._drag;
@@ -756,7 +797,7 @@ class DxCanvas extends LitElement {
     const tmS = mid(c4[0], c4[1]);
     const dir = Math.hypot(tmS.x - ctrS.x, tmS.y - ctrS.y) || 1;
     const rot = { x: tmS.x + ((tmS.x - ctrS.x) / dir) * 20, y: tmS.y + ((tmS.y - ctrS.y) / dir) * 20 };
-    return { sel, b, t, tp, c4, handles, rot, ctrS, z };
+    return { sel, b, t, tp, c4, handles, rot, ctrS, z, isText: !!sel.__isText };
   }
   /** 핸들용 지오메트리 — 정확히 1개 선택일 때만(다중 선택은 핸들 비활성). */
   _selGeom() {
@@ -779,6 +820,7 @@ class DxCanvas extends LitElement {
     const tm = { x: (g.c4[0].x + g.c4[1].x) / 2 + dx, y: (g.c4[0].y + g.c4[1].y) / 2 + dy };
     o.beginPath(); o.moveTo(tm.x, tm.y); o.lineTo(g.rot.x + dx, g.rot.y + dy); o.stroke();
     o.beginPath(); o.arc(g.rot.x + dx, g.rot.y + dy, 4.5, 0, 7); o.fillStyle = "#fff"; o.fill(); o.stroke();
+    if (g.isText) return;
     for (const h of g.handles) {
       const hx = Math.round(h.p.x + dx), hy = Math.round(h.p.y + dy);
       o.fillStyle = "#fff";
@@ -788,6 +830,32 @@ class DxCanvas extends LitElement {
     }
   }
 
+  _drawFrameHandles(o, g, acc) {
+    for (const h of g.handles) {
+      const hx = Math.round(h.p.x), hy = Math.round(h.p.y);
+      o.fillStyle = "#fff";
+      o.fillRect(hx - HANDLE / 2, hy - HANDLE / 2, HANDLE, HANDLE);
+      o.strokeStyle = acc; o.lineWidth = 1;
+      o.strokeRect(hx - HANDLE / 2 + 0.5, hy - HANDLE / 2 + 0.5, HANDLE - 1, HANDLE - 1);
+    }
+  }
+
+  _previewFrame() {
+    const d = this._drag;
+    if (d?.mode !== "frame-resize") return null;
+    const b = d.base;
+    const dx = Math.round((d.cur?.x ?? d.start.x) - d.start.x);
+    const dy = Math.round((d.cur?.y ?? d.start.y) - d.start.y);
+    let x = b.x, y = b.y, w = b.w, h = b.h;
+    if (d.h.includes("l")) { x = b.x + dx; w = b.w - dx; }
+    if (d.h.includes("r")) w = b.w + dx;
+    if (d.h.startsWith("t")) { y = b.y + dy; h = b.h - dy; }
+    if (d.h.startsWith("b")) h = b.h + dy;
+    if (w < 1) { x = x + w - 1; w = 1; }
+    if (h < 1) { y = y + h - 1; h = 1; }
+    return { ...b, x, y, w, h };
+  }
+
   _hitHandle(e) {
     const g = this._selGeom();
     if (!g) return null;
@@ -795,6 +863,7 @@ class DxCanvas extends LitElement {
     const sx = e.clientX - r.left, sy = e.clientY - r.top;
     const near = (p, rad) => Math.hypot(p.x - sx, p.y - sy) <= rad;
     if (near(g.rot, HANDLE)) return { type: "rotate", g };
+    if (g.isText) return null;
     for (const h of g.handles) if (near(h.p, HANDLE)) return { type: "resize", h, g };
     return null;
   }
@@ -828,6 +897,8 @@ class DxCanvas extends LitElement {
 
   // ---- 포인터 ----
   _down(e) {
+    if (e.button != null && e.button !== 0) return;
+    if (e.composedPath?.().some((el) => el?.classList?.contains?.("ctx") || el?.classList?.contains?.("menu"))) return;
     if (this._ctx) this._ctx = null;
     if (this._space) {
       this._drag = { mode: "pan", sx: e.clientX, sy: e.clientY, ox: this._origin.x, oy: this._origin.y };
@@ -864,6 +935,12 @@ class DxCanvas extends LitElement {
     }
     if (tool === "select") {
       // 핸들 우선(선택 유지한 채 리사이즈/회전).
+      const fh = this._hitFrameHandle(e);
+      if (fh) {
+        const f = fh.g.frame;
+        this._drag = { mode: "frame-resize", id: f.id, h: fh.h.k, start: p, cur: p, base: { ...f } };
+        return;
+      }
       const hh = this._hitHandle(e);
       if (hh?.type === "rotate") {
         const sel = hh.g.sel, b = hh.g.b;
@@ -907,8 +984,11 @@ class DxCanvas extends LitElement {
         const frame = this._frameAt(p, e);
         if (frame) {
           this.app.selectFrame(frame.id);
+          this._drawOverlay();
           return;
         }
+        this.app.select(null);
+        this.app.selectFrame(null);
         // 빈 공간 드래그 = 마퀴 다중선택(클릭이면 해제 — _end에서 판정).
         this._drag = { mode: "marquee", start: p, cur: p };
         return;
@@ -1021,6 +1101,9 @@ class DxCanvas extends LitElement {
     } else if (d.mode === "frame") {
       d.cur = p;
       this._scheduleOverlay();
+    } else if (d.mode === "frame-resize") {
+      d.cur = p;
+      this._scheduleOverlay();
     } else if (d.mode === "draw") {
       d.cur = p;
       this._drawGhost();
@@ -1029,16 +1112,28 @@ class DxCanvas extends LitElement {
 
   _hover(e) {
     if ((this.toolState?.tool ?? "select") !== "select" || this._space || this._text) {
-      if (this._hoverId != null) { this._hoverId = null; this._drawOverlay(); }
+      if (this._hoverId != null || this._hoverFrameId != null) {
+        this._hoverId = null;
+        this._hoverFrameId = null;
+        this._drawOverlay();
+      }
       return;
     }
     const p = this._coords(e);
     const hit = this.app.hitTest(p.x, p.y);
     const next = hit == null || this.app.selectedIds?.includes(hit) ? null : hit;
+    const frame = hit == null ? this._frameAt(p, e) : null;
+    const nextFrame = frame?.id === this.app.selectedFrameId ? null : frame?.id ?? null;
+    let dirty = false;
     if (next !== this._hoverId) {
       this._hoverId = next;
-      this._drawOverlay();
+      dirty = true;
     }
+    if (nextFrame !== this._hoverFrameId) {
+      this._hoverFrameId = nextFrame;
+      dirty = true;
+    }
+    if (dirty) this._drawOverlay();
   }
   _end() {
     const d = this._drag;
@@ -1075,6 +1170,21 @@ class DxCanvas extends LitElement {
       this._drawOverlay();
       return;
     }
+    if (d.mode === "frame-resize") {
+      this._drag = null;
+      const b = d.base;
+      const dx = Math.round((d.cur?.x ?? d.start.x) - d.start.x);
+      const dy = Math.round((d.cur?.y ?? d.start.y) - d.start.y);
+      let x = b.x, y = b.y, w = b.w, h = b.h;
+      if (d.h.includes("l")) { x = b.x + dx; w = b.w - dx; }
+      if (d.h.includes("r")) w = b.w + dx;
+      if (d.h.startsWith("t")) { y = b.y + dy; h = b.h - dy; }
+      if (d.h.startsWith("b")) h = b.h + dy;
+      if (w < 1) { x = x + w - 1; w = 1; }
+      if (h < 1) { y = y + h - 1; h = 1; }
+      this.app.updateFrame(d.id, { x, y, w, h });
+      return;
+    }
     if (d.mode === "move") {
       if (d.dx !== 0 || d.dy !== 0) {
         // 선택된 모든 레이어를 하나의 apply 배치로 함께 이동.
@@ -1104,6 +1214,7 @@ class DxCanvas extends LitElement {
       if (mw < 2 && mh < 2) {
         // 드래그 없는 빈 공간 클릭 = 선택 해제(기존 동작 유지).
         this.app.select(null);
+        this.app.selectFrame(null);
         return;
       }
       // displayAABB가 마퀴 사각형과 교차하는 모든 레이어 선택.
@@ -1240,29 +1351,39 @@ class DxCanvas extends LitElement {
 
   /** Frame 외곽선 + 이름 라벨(항상 표시 — Figma의 캔버스). */
   _drawFrames(o, z) {
-    const frames = this.app.frames?.() ?? [];
+    const preview = this._previewFrame();
+    const frames = (this.app.frames?.() ?? []).map((f) => preview && f.id === preview.id ? preview : f);
     const fg = getComputedStyle(this).getPropertyValue("--fg-2").trim() || "#555";
+    const acc = getComputedStyle(this).getPropertyValue("--accent").trim() || "#87b9cf";
+    const accStrong = getComputedStyle(this).getPropertyValue("--accent-strong").trim() || acc;
     o.save();
     o.font = "600 11px Inter, sans-serif";
     o.textBaseline = "alphabetic";
     for (const f of frames) {
       let frameColor = fg;
       o.strokeStyle = frameColor; o.lineWidth = 1; o.setLineDash([]);
+      const active = this.app.selectedFrameId === f.id;
+      const hover = this._hoverFrameId === f.id;
       const p = this._screen({ x: f.x, y: f.y });
       const x = Math.round(p.x) + 0.5;
       const y = Math.round(p.y) + 0.5;
       const w = Math.round(f.w * z);
       const h = Math.round(f.h * z);
-      if (this.app.selectedFrameId === f.id) {
+      if (active) {
         o.fillStyle = "rgba(135,185,207,0.08)";
         o.fillRect(x, y, w, h);
-        frameColor = getComputedStyle(this).getPropertyValue("--accent").trim() || "#87b9cf";
+        frameColor = accStrong;
+        o.strokeStyle = frameColor;
+        o.lineWidth = 1.5;
+      } else if (hover) {
+        frameColor = acc;
         o.strokeStyle = frameColor;
         o.lineWidth = 1.5;
       }
       o.strokeRect(x, y, w, h);
       o.fillStyle = frameColor;
       o.fillText(f.name, Math.round(p.x), Math.round(p.y - 5));
+      if (active) this._drawFrameHandles(o, this._frameGeom(f), accStrong);
     }
     // 프레임 드래그 중 미리보기.
     const d = this._drag;
@@ -1375,14 +1496,14 @@ class DxCanvas extends LitElement {
         ${t ? (() => {
           // 편집 박스는 레이어의 **변환된 표시 위치**에(원시 meta 좌표 아님 — 위치 버그 수정).
           const xf = t.xf;
+          const source = t.box ? { x: t.box.x, y: t.box.y } : { x: t.x, y: t.y };
           const pos = xf
-            ? this.app.xformOf({ offset: xf.offset, scale: xf.scale, rotation: xf.rotation }).fwd(t.x, t.y)
-            : { x: t.x, y: t.y };
+            ? this.app.xformOf({ offset: xf.offset, scale: [1, 1], rotation: xf.rotation, surface_size: xf.surface_size }).fwd(source.x, source.y)
+            : source;
           const sp = this._screen(pos);
-          const [sxx, syy] = xf?.scale ?? [1, 1];
           const rotDeg = xf?.rotation ?? 0;
           return html`<textarea class="txt" spellcheck="false"
-          style="left:${sp.x}px; top:${sp.y}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}; transform: rotate(${rotDeg}deg) scale(${sxx}, ${syy}); transform-origin: 0 0;"
+          style="left:${sp.x}px; top:${sp.y}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}; transform: rotate(${rotDeg}deg); transform-origin: 0 0;"
           .value=${t.value}
           @input=${(e) => { t.value = e.target.value; e.target.style.width = "auto"; e.target.style.width = e.target.scrollWidth + "px"; e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
           @keydown=${(e) => {
@@ -1821,6 +1942,9 @@ class DxProps extends LitElement {
     }
     const l = this.app?.getSelected?.();
     if (!l) return html``;
+    let meta = null;
+    try { meta = l.meta ? JSON.parse(l.meta) : null; } catch { /* ignore */ }
+    const isText = meta?.type === "text";
     const [ox, oy] = l.offset ?? [0, 0];
     const [sx, sy] = l.scale ?? [1, 1];
     const b = this.app.layerBounds(l.id);
@@ -1833,8 +1957,8 @@ class DxProps extends LitElement {
       const off = this.app.computeAnchoredOffset(l, ns, null, anchor);
       this.app.apply([B.setProps(l.id, { scale: ns, offset: off })]);
     };
-    const setW = (v) => { if (b && b[2] > 0 && v > 0) setScaleAnchored([(v / b[2]) * Math.sign(sx || 1), sy], tlAnchor); };
-    const setH = (v) => { if (b && b[3] > 0 && v > 0) setScaleAnchored([sx, (v / b[3]) * Math.sign(sy || 1)], tlAnchor); };
+    const setW = (v) => { if (!isText && b && b[2] > 0 && v > 0) setScaleAnchored([(v / b[2]) * Math.sign(sx || 1), sy], tlAnchor); };
+    const setH = (v) => { if (!isText && b && b[3] > 0 && v > 0) setScaleAnchored([sx, (v / b[3]) * Math.sign(sy || 1)], tlAnchor); };
     const setRotAnchored = (deg) => {
       const off = this.app.computeAnchoredOffset(l, null, deg, ctrAnchor ?? { x: 0, y: 0 });
       this.app.apply([B.setProps(l.id, { rotation: deg, offset: off })]);
@@ -1850,9 +1974,10 @@ class DxProps extends LitElement {
       const dy = which === "y" ? Math.round(+v - aabb.y) : 0;
       this.app.apply([B.setOffset(l.id, [ox + dx, oy + dy])]);
     };
-    const num = (label, value, onChange) => html`
+    const fmt3 = (n) => Number.isFinite(n) ? String(Math.round(n * 1000) / 1000) : "0";
+    const num = (label, value, onChange, disabled = false) => html`
       <div class="cell"><span>${label}</span>
-        <input type="number" .value=${String(value)} @change=${(e) => onChange(e.target.value)} /></div>`;
+        <input type="number" .value=${String(value)} ?disabled=${disabled} @change=${(e) => onChange(e.target.value)} /></div>`;
     return html`
       <div class="head">Design<span class="nm">· ${l.name}</span>
         <button class="b" title="복제 (Cmd+D)" @click=${() => this.app.duplicate(l.id)}>${icon("dup", 13)}</button>
@@ -1863,11 +1988,12 @@ class DxProps extends LitElement {
         <div class="grid2">
           ${num("X", absX, (v) => commitXY("x", v))}
           ${num("Y", absY, (v) => commitXY("y", v))}
-          ${num("W", wPx, (v) => setW(+v))}
-          ${num("H", hPx, (v) => setH(+v))}
+          ${num("W", wPx, (v) => setW(+v), isText)}
+          ${num("H", hPx, (v) => setH(+v), isText)}
           ${num("R°", Math.round((l.rotation ?? 0) * 10) / 10, (v) => setRotAnchored(+v || 0))}
           <div class="cell"><span>S</span>
-            <input type="text" .value=${`${sx} , ${sy}`} title="scale (x , y)"
+            <input type="text" .value=${`${fmt3(sx)} , ${fmt3(sy)}`} title=${isText ? "텍스트는 폰트 변형 방지를 위해 scale 편집이 비활성화됨" : "scale (x , y)"}
+              ?disabled=${isText}
               @change=${(e) => {
                 const m = e.target.value.split(",").map((s2) => parseFloat(s2));
                 if (m.length === 2 && m.every((n) => Number.isFinite(n) && n !== 0))
