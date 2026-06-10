@@ -117,6 +117,12 @@ impl History {
             {
                 *forced_id = Some(*id);
             }
+            // GroupLayers도 동일 규율 — redo 시 같은 그룹 id로 재생성해야 후속 op이 안 깨진다.
+            if let (Op::GroupLayers { forced_id, .. }, Inverse::UngroupRestore { group_id, .. }) =
+                (&mut op, &entry.inverse)
+            {
+                *forced_id = Some(*group_id);
+            }
             entry.inverse.apply(&mut self.doc)?;
             self.undone.push(RedoEntry { op, group: entry.group });
             // 단발이면 1개로 종료. batch면 다음 entry가 같은 group일 때만 계속.

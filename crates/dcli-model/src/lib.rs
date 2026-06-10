@@ -58,8 +58,24 @@ impl std::fmt::Display for NodeId {
 pub enum NodeKind {
     /// 픽셀 레이어. 픽셀은 SurfaceId로만 참조(인라인 금지).
     Paint { surface: SurfaceId },
-    /// 그룹. 자식 노드들을 묶는다(자식 순서는 Document.order로 관리).
-    Group,
+    /// 그룹. 자식 노드 id를 bottom-to-top 순서로 직접 보유한다(자식은 루트 order에서
+    /// 제거되고 그룹 노드 하나만 남는다). 그룹 props/transform은 자식 합성 결과 표면에
+    /// 레이어처럼 적용된다(isolated group).
+    Group {
+        #[serde(default)]
+        children: Vec<NodeId>,
+    },
+}
+
+/// 명명된 export 영역(Figma의 Frame). 작업영역은 무한 — Frame이 export 단위다.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Frame {
+    pub id: u64,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
 }
 
 /// 균일 노드. 모든 노드가 같은 공통 필드 + kind를 갖는다.
@@ -117,7 +133,7 @@ impl Node {
     pub fn surface_id(&self) -> Option<SurfaceId> {
         match self.kind {
             NodeKind::Paint { surface } => Some(surface),
-            NodeKind::Group => None,
+            NodeKind::Group { .. } => None,
         }
     }
 }
@@ -175,6 +191,9 @@ pub struct Document {
     order: Vec<NodeId>,
     /// 다음 발급할 NodeId.
     next_node: u64,
+    /// 명명된 export 영역(Figma Frame). 작업영역은 무한 — 문서 w/h는 기본 뷰/export 크기일 뿐.
+    #[serde(default)]
+    pub frames: Vec<Frame>,
     /// 픽셀 스토어(직렬화 제외 — 바이너리 사이드카로 분리).
     #[serde(skip)]
     pixels: PixelStore,
@@ -190,8 +209,21 @@ impl Document {
             nodes: std::collections::BTreeMap::new(),
             order: Vec::new(),
             next_node: 0,
+            frames: Vec::new(),
             pixels: PixelStore::new(),
         }
+    }
+
+    /// 다음 frame id 발급(최대+1 — 삭제 후 재사용 없음).
+    pub fn alloc_frame_id(&self) -> u64 {
+        self.frames.iter().map(|f| f.id).max().map_or(0, |m| m + 1)
+    }
+
+    /// 이름 또는 id 문자열로 frame 조회.
+    pub fn find_frame(&self, key: &str) -> Option<&Frame> {
+        self.frames
+            .iter()
+            .find(|f| f.name == key || key.parse::<u64>().is_ok_and(|id| id == f.id))
     }
 
     // ---- 픽셀 스토어 접근 ----
@@ -286,6 +318,30 @@ impl Document {
         let to = to.min(self.order.len());
         self.order.insert(to, id);
         Some(from)
+    }
+
+    /// 노드 엔트리를 맵에서만 제거(루트 order는 건드리지 않음 — 그룹 자식용).
+    pub(crate) fn take_node_entry(&mut self, id: NodeId) -> Option<Node> {
+        self.nodes.remove(&id)
+    }
+
+    /// 노드 엔트리를 맵에만 넣는다(order 미변경 — 그룹 자식 복원용).
+    pub(crate) fn put_node_entry(&mut self, node: Node) {
+        self.next_node = self.next_node.max(node.id.0 + 1);
+        self.nodes.insert(node.id, node);
+    }
+
+    /// 루트 order에서 id 제거(맵 유지 — 그룹 묶기용). 반환: 있던 인덱스.
+    pub(crate) fn remove_from_order(&mut self, id: NodeId) -> Option<usize> {
+        let idx = self.order.iter().position(|&n| n == id)?;
+        self.order.remove(idx);
+        Some(idx)
+    }
+
+    /// 루트 order의 인덱스에 id 삽입(맵 미변경).
+    pub(crate) fn insert_order_at(&mut self, id: NodeId, index: usize) {
+        let index = index.min(self.order.len());
+        self.order.insert(index, id);
     }
 
     /// JSON으로 직렬화(픽셀 제외).

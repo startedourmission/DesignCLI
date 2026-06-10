@@ -22,50 +22,100 @@ use dcli_color::{srgb_eotf, srgb_oetf, BlendSpace, LinearPremul};
 use dcli_model::{BlendMode, Document};
 use dcli_tile::Surface;
 
-/// 문서를 한 장의 표면으로 합성한다 (CPU 정본).
-///
-/// 노드를 bottom-to-top으로 순회하며 누적한다. 페인트 노드의 표면은 PixelStore에서
-/// SurfaceId로 조회한다(픽셀 인라인 금지 규칙). 결과는 linear-premul 표면.
+/// 문서를 한 장의 표면으로 합성한다 (CPU 정본). = composite_region(0,0,w,h).
 pub fn composite(doc: &Document) -> Surface {
-    let mut acc = Surface::new(doc.width, doc.height);
+    composite_region(doc, 0, 0, doc.width, doc.height)
+}
+
+/// 문서의 **임의 영역**을 합성한다 — 무한 작업영역/Frame export의 토대.
+/// (rx, ry)가 출력 (0,0)에 오는 rw×rh 표면을 만든다. 영역 밖 내용은 잘린다.
+pub fn composite_region(doc: &Document, rx: i32, ry: i32, rw: u32, rh: u32) -> Surface {
+    let mut acc = Surface::new(rw, rh);
     for node in doc.iter_bottom_to_top() {
-        if !node.visible || node.opacity <= 0.0 {
-            continue;
-        }
-        let Some(sid) = node.surface_id() else {
-            // 그룹 등 픽셀 없는 노드는 Phase 1에서 합성 기여 없음(후속 Phase에서 확장).
-            continue;
-        };
-        let Some(surface) = doc.pixels().get(sid) else {
-            // 표면이 스토어에 없으면(예: JSON만 로드) 건너뛴다.
-            continue;
-        };
-        if node.is_identity_transform() {
-            // 스케일 1·회전 0 → 기존 정수 시프트 경로(비트동일·최속).
-            composite_layer(
-                &mut acc,
-                surface.pixels(),
-                (surface.width(), surface.height()),
-                node.offset,
-                node.blend,
-                node.opacity,
-                doc.blend_space,
-            );
-        } else {
-            composite_layer_transformed(
-                &mut acc,
-                surface.pixels(),
-                (surface.width(), surface.height()),
-                node.offset,
-                node.scale,
-                node.rotation,
-                node.blend,
-                node.opacity,
-                doc.blend_space,
-            );
-        }
+        composite_node(&mut acc, doc, node, (rx, ry), 0);
     }
     acc
+}
+
+/// 노드 하나(페인트 또는 그룹)를 acc 위에 합성한다. region = 출력 원점의 월드 좌표.
+fn composite_node(
+    acc: &mut Surface,
+    doc: &Document,
+    node: &dcli_model::Node,
+    region: (i32, i32),
+    depth: u32,
+) {
+    if !node.visible || node.opacity <= 0.0 || depth > 32 {
+        return;
+    }
+    use dcli_model::NodeKind;
+    match &node.kind {
+        NodeKind::Paint { surface } => {
+            let Some(surface) = doc.pixels().get(*surface) else {
+                return; // 표면 없음(예: JSON만 로드) — 건너뜀.
+            };
+            if node.is_identity_transform() {
+                // 정수 시프트 경로: 영역 원점만큼 offset을 당기면 끝(비트동일 유지).
+                composite_layer(
+                    acc,
+                    surface.pixels(),
+                    (surface.width(), surface.height()),
+                    (node.offset.0 - region.0, node.offset.1 - region.1),
+                    node.blend,
+                    node.opacity,
+                    doc.blend_space,
+                );
+            } else {
+                composite_layer_transformed(
+                    acc,
+                    surface.pixels(),
+                    (surface.width(), surface.height()),
+                    node.offset,
+                    node.scale,
+                    node.rotation,
+                    node.blend,
+                    node.opacity,
+                    doc.blend_space,
+                    region,
+                );
+            }
+        }
+        NodeKind::Group { children } => {
+            // isolated group: 자식들을 영역과 동일 원점/크기의 임시 표면에 먼저 합성한 뒤,
+            // 그 결과를 그룹 props/transform을 가진 레이어처럼 acc에 얹는다.
+            let mut tmp = Surface::new(acc.width(), acc.height());
+            for cid in children {
+                if let Some(child) = doc.get(*cid) {
+                    composite_node(&mut tmp, doc, child, region, depth + 1);
+                }
+            }
+            // tmp는 이미 영역-로컬 좌표 → 그룹 트랜스폼은 영역 기준 (0,0)으로 적용.
+            if node.is_identity_transform() {
+                composite_layer(
+                    acc,
+                    tmp.pixels(),
+                    (tmp.width(), tmp.height()),
+                    node.offset,
+                    node.blend,
+                    node.opacity,
+                    doc.blend_space,
+                );
+            } else {
+                composite_layer_transformed(
+                    acc,
+                    tmp.pixels(),
+                    (tmp.width(), tmp.height()),
+                    node.offset,
+                    node.scale,
+                    node.rotation,
+                    node.blend,
+                    node.opacity,
+                    doc.blend_space,
+                    (0, 0),
+                );
+            }
+        }
+    }
 }
 
 /// 한 레이어를 누적 표면 위에 블렌드한다. `offset`(dx,dy)만큼 시프트해 그린다.
@@ -128,6 +178,8 @@ fn composite_layer_transformed(
     blend: BlendMode,
     opacity: f32,
     space: BlendSpace,
+    // region: 출력 (0,0)의 월드 좌표 — 영역 합성(composite_region) 지원. 전체 문서면 (0,0).
+    region: (i32, i32),
 ) {
     let (dw, dh) = (acc.width() as i32, acc.height() as i32);
     let (sw, sh) = (src_dim.0 as f32, src_dim.1 as f32);
@@ -139,12 +191,13 @@ fn composite_layer_transformed(
     let (sin, cos) = rotation_deg.to_radians().sin_cos();
     let (cx, cy) = (sw * 0.5, sh * 0.5);
     let (ox, oy) = (offset.0 as f32, offset.1 as f32);
+    let (rgx, rgy) = (region.0 as f32, region.1 as f32);
 
-    // dst 바운딩 박스 = src 4코너의 forward 변환 AABB(+1px AA 마진).
+    // dst 바운딩 박스 = src 4코너의 forward 변환(월드) − 영역 원점, AABB(+1px AA 마진).
     let fwd = |px: f32, py: f32| -> (f32, f32) {
         let vx = (px - cx) * sx;
         let vy = (py - cy) * sy;
-        (cos * vx - sin * vy + cx + ox, sin * vx + cos * vy + cy + oy)
+        (cos * vx - sin * vy + cx + ox - rgx, sin * vx + cos * vy + cy + oy - rgy)
     };
     let corners = [fwd(0.0, 0.0), fwd(sw, 0.0), fwd(0.0, sh), fwd(sw, sh)];
     let minx = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
@@ -174,9 +227,9 @@ fn composite_layer_transformed(
     let dst = acc.pixels_mut();
     for y in y0..y1 {
         for x in x0..x1 {
-            // 역변환: q = p_dst − off − c; r = R(−θ)q; p_src = r/S + c.
-            let qx = x as f32 + 0.5 - ox - cx;
-            let qy = y as f32 + 0.5 - oy - cy;
+            // 역변환: q = p_dst(월드 = 영역픽셀 + 영역원점) − off − c; r = R(−θ)q; p_src = r/S + c.
+            let qx = x as f32 + rgx + 0.5 - ox - cx;
+            let qy = y as f32 + rgy + 0.5 - oy - cy;
             let rx = cos * qx + sin * qy;
             let ry = -sin * qx + cos * qy;
             let psx = rx / sx + cx;
@@ -617,5 +670,89 @@ mod tests {
         add(&mut doc, "clear", solid(1, 1, 200, 200, 200, 0), BlendMode::Normal);
         let out = composite(&doc).to_srgb8_rgba();
         assert_eq!(&out[0..4], &[10, 20, 30, 255]);
+    }
+}
+
+#[cfg(test)]
+mod region_group_tests {
+    use super::*;
+    use dcli_color::BitDepth;
+    use dcli_model::{Document, NodeKind, Op};
+    use dcli_tile::Surface;
+
+    fn red_dot_doc() -> Document {
+        // (10,10)에 빨강 1픽셀.
+        let mut doc = Document::new(32, 32, BitDepth::U8);
+        let mut s = Surface::new(32, 32);
+        s.pixels_mut()[10 * 32 + 10] = LinearPremul::from_srgb8_straight(255, 0, 0, 255);
+        let sid = doc.add_surface(s);
+        Op::AddPaintLayer { name: "dot".into(), surface: sid, index: None, forced_id: None }
+            .apply(&mut doc)
+            .unwrap();
+        doc
+    }
+
+    #[test]
+    fn region_window_shifts_content() {
+        // 영역 (8,8,8,8)로 자르면 빨강은 출력 (2,2)에 와야 한다.
+        let doc = red_dot_doc();
+        let out = composite_region(&doc, 8, 8, 8, 8).to_srgb8_rgba();
+        let a = |x: usize, y: usize| out[(y * 8 + x) * 4 + 3];
+        assert_eq!(a(2, 2), 255, "영역-로컬 (2,2)에 빨강");
+        assert_eq!(a(0, 0), 0);
+        // 음수 원점 영역(무한 작업영역): (-10,-10) 원점이면 빨강은 (20,20).
+        let out2 = composite_region(&doc, -10, -10, 32, 32).to_srgb8_rgba();
+        let a2 = |x: usize, y: usize| out2[(y * 32 + x) * 4 + 3];
+        assert_eq!(a2(20, 20), 255, "음수 원점 보정");
+    }
+
+    #[test]
+    fn region_full_doc_equals_composite() {
+        let doc = red_dot_doc();
+        assert_eq!(
+            composite(&doc).to_srgb8_rgba(),
+            composite_region(&doc, 0, 0, 32, 32).to_srgb8_rgba(),
+            "전체 영역 = composite 비트동일"
+        );
+    }
+
+    #[test]
+    fn group_opacity_applies_to_composited_children() {
+        // 두 불투명 레이어를 그룹으로 묶고 그룹 opacity 0.5 → 결과는 한 번만 반투명
+        // (isolated group: 자식 먼저 합성 후 그룹 속성 적용).
+        let mut doc = Document::new(4, 4, BitDepth::U8);
+        for _ in 0..2 {
+            let s = Surface::filled(4, 4, LinearPremul::from_srgb8_straight(255, 0, 0, 255));
+            let sid = doc.add_surface(s);
+            Op::AddPaintLayer { name: "r".into(), surface: sid, index: None, forced_id: None }
+                .apply(&mut doc)
+                .unwrap();
+        }
+        let (a, b) = (doc.order()[0], doc.order()[1]);
+        Op::GroupLayers { ids: vec![a, b], name: "g".into(), forced_id: None }
+            .apply(&mut doc)
+            .unwrap();
+        let gid = doc.order()[0];
+        doc.get_mut(gid).unwrap().opacity = 0.5;
+
+        let out = composite(&doc).to_srgb8_rgba();
+        // 흰 배경 없음(투명 위) → premul 알파 절반.
+        assert!((out[3] as i32 - 128).abs() <= 2, "그룹 opacity 1회 적용: a={}", out[3]);
+        assert!(out[0] > 245, "straight 빨강 유지: r={}", out[0]);
+    }
+
+    #[test]
+    fn group_offset_moves_children_together() {
+        let mut doc = red_dot_doc();
+        let id = doc.order()[0];
+        Op::GroupLayers { ids: vec![id], name: "g".into(), forced_id: None }
+            .apply(&mut doc)
+            .unwrap();
+        let gid = doc.order()[0];
+        doc.get_mut(gid).unwrap().offset = (5, 3);
+        let out = composite(&doc).to_srgb8_rgba();
+        let a = |x: usize, y: usize| out[(y * 32 + x) * 4 + 3];
+        assert_eq!(a(15, 13), 255, "그룹 offset로 자식 함께 이동");
+        assert_eq!(a(10, 10), 0);
     }
 }

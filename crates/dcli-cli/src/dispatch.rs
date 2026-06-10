@@ -29,6 +29,14 @@ pub enum NodeRef {
     Bind(String),
 }
 
+/// 그라디언트 색 정지점 — 위치 at(0~1 권장)과 색(straight sRGB8 RGBA).
+/// stops는 at 오름차순으로 보내야 하며, t 범위 밖은 끝 색으로 clamp된다.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GradientStop {
+    pub at: f32,
+    pub rgba: [u8; 4],
+}
+
 /// 새 페인트 레이어의 픽셀 출처.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "from", rename_all = "snake_case")]
@@ -37,6 +45,10 @@ pub enum PixelSource {
     Transparent,
     /// 단색 채우기 (straight sRGB8 RGBA).
     Fill { rgba: [u8; 4] },
+    /// 선형 그라디언트 — (x0,y0)→(x1,y1) 축 투영이 t. 표면 전체를 채운다.
+    LinearGradient { x0: f32, y0: f32, x1: f32, y1: f32, stops: Vec<GradientStop> },
+    /// 원형(방사형) 그라디언트 — 중심 (cx,cy) 거리/radius가 t. 표면 전체를 채운다.
+    RadialGradient { cx: f32, cy: f32, radius: f32, stops: Vec<GradientStop> },
     /// base64 인코딩된 PNG(8bit RGBA).
     PngBase64 { data: String },
     /// 디스크의 PNG 경로. (fs-sources 전용 — wasm 빌드에는 없음)
@@ -64,6 +76,8 @@ pub enum Shape {
     RoundedRect { x: f32, y: f32, w: f32, h: f32, radius: f32, rgba: [u8; 4] },
     /// 텍스트(번들 폰트 Pretendard — 한글/라틴). (x,y)=첫 줄 좌상단, size=px, '\n' 줄바꿈.
     Text { x: f32, y: f32, text: String, size: f32, rgba: [u8; 4] },
+    /// 자유곡선(브러시) — 점들을 둥근 끝(capsule) 선분으로 연결. points = [x0,y0,x1,y1,...].
+    Path { points: Vec<f32>, width: f32, rgba: [u8; 4] },
 }
 
 /// 노드 속성 부분 패치(지정한 필드만 변경).
@@ -138,6 +152,39 @@ pub enum Action {
     SetProps { id: NodeRef, patch: PropPatch },
     /// 블렌드 모드 변경.
     SetBlend { id: NodeRef, mode: BlendModeDto },
+    /// 최상위 레이어들을 그룹으로 묶는다(bottom-to-top 상대 순서 유지). bind로 그룹 참조.
+    GroupLayers {
+        ids: Vec<NodeRef>,
+        #[serde(default = "default_group_name")]
+        name: String,
+        #[serde(default)]
+        bind: Option<String>,
+    },
+    /// 그룹 해제 — 자식들을 그룹 위치에 펼친다.
+    Ungroup { id: NodeRef },
+    /// Frame(명명된 export 영역) 목록 전체 교체. 무한 작업영역의 export 단위.
+    SetFrames { frames: Vec<FrameDto> },
+}
+
+fn default_group_name() -> String {
+    "group".to_string()
+}
+
+/// Frame DTO — model::Frame과 1:1 (JsonSchema 노출용).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct FrameDto {
+    pub id: u64,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl From<FrameDto> for dcli_model::Frame {
+    fn from(f: FrameDto) -> Self {
+        dcli_model::Frame { id: f.id, name: f.name, x: f.x, y: f.y, w: f.w, h: f.h }
+    }
 }
 
 fn default_layer_name() -> String {
@@ -226,6 +273,24 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<Surface, String> 
             h,
             LinearPremul::from_srgb8_straight(rgba[0], rgba[1], rgba[2], rgba[3]),
         )),
+        PixelSource::LinearGradient { x0, y0, x1, y1, stops } => {
+            if stops.is_empty() {
+                return Err("그라디언트 stops가 비어 있음".to_string());
+            }
+            let mut s = Surface::new(w, h);
+            let pairs: Vec<(f32, [u8; 4])> = stops.iter().map(|g| (g.at, g.rgba)).collect();
+            dcli_raster::shapes::fill_linear_gradient(&mut s, *x0, *y0, *x1, *y1, &pairs);
+            Ok(s)
+        }
+        PixelSource::RadialGradient { cx, cy, radius, stops } => {
+            if stops.is_empty() {
+                return Err("그라디언트 stops가 비어 있음".to_string());
+            }
+            let mut s = Surface::new(w, h);
+            let pairs: Vec<(f32, [u8; 4])> = stops.iter().map(|g| (g.at, g.rgba)).collect();
+            dcli_raster::shapes::fill_radial_gradient(&mut s, *cx, *cy, *radius, &pairs);
+            Ok(s)
+        }
         PixelSource::PngBase64 { data } => {
             use base64::Engine;
             let bytes = base64::engine::general_purpose::STANDARD
@@ -269,6 +334,16 @@ fn draw_shape(s: &mut Surface, shape: &Shape) {
         Shape::Text { x, y, text, size, rgba } => {
             dcli_raster::text::draw_text(s, *x, *y, text, *size, *rgba);
         }
+        Shape::Path { points, width, rgba } => {
+            // 둥근 끝 선분 연쇄 — capsule 거리 AA라 관절이 자연스럽게 이어진다.
+            for seg in points.windows(4).step_by(2) {
+                shapes::stroke_line(s, seg[0], seg[1], seg[2], seg[3], *width, *rgba);
+            }
+            // 점 1개(클릭)는 도트.
+            if points.len() == 2 {
+                shapes::stroke_line(s, points[0], points[1], points[0], points[1], *width, *rgba);
+            }
+        }
     }
 }
 
@@ -291,6 +366,9 @@ fn action_kind(a: &Action) -> &'static str {
         Action::MoveLayer { .. } => "move_layer",
         Action::SetProps { .. } => "set_props",
         Action::SetBlend { .. } => "set_blend",
+        Action::GroupLayers { .. } => "group_layers",
+        Action::Ungroup { .. } => "ungroup",
+        Action::SetFrames { .. } => "set_frames",
     }
 }
 
@@ -475,6 +553,40 @@ fn try_one(
             let props = NodeProps { blend: (*mode).into(), ..NodeProps::of(node) };
             h.stage(Op::SetProps { id: nid, props }).map_err(op_err)
         }
+        Action::GroupLayers { ids, name, bind } => {
+            let nids: Vec<NodeId> = ids
+                .iter()
+                .map(|r| resolve_ref(r, binder))
+                .collect::<Result<_, _>>()?;
+            h.stage(Op::GroupLayers { ids: nids, name: name.clone(), forced_id: None })
+                .map_err(op_err)?;
+            // 그룹 노드는 order에 새로 들어간 노드 — 멤버 최상단 위치라 last가 아닐 수 있음.
+            // GroupLayers op은 새 id를 발급하므로 next 직전 id를 찾는다: order에서 kind=Group이며
+            // 방금 생성된(가장 큰 id) 노드.
+            let gid = h
+                .doc
+                .order()
+                .iter()
+                .copied()
+                .max_by_key(|id| id.0)
+                .expect("그룹 생성됨");
+            if let Some(b) = bind {
+                if binder.contains_key(b) {
+                    return Err(("duplicate_bind".to_string(), format!("bind 이름 '{b}' 중복")));
+                }
+                binder.insert(b.clone(), Binding { node: gid, surface: None });
+            }
+            Ok(())
+        }
+        Action::Ungroup { id } => {
+            let nid = resolve_ref(id, binder)?;
+            h.stage(Op::Ungroup { id: nid }).map_err(op_err)
+        }
+        Action::SetFrames { frames } => {
+            let frames: Vec<dcli_model::Frame> =
+                frames.iter().cloned().map(Into::into).collect();
+            h.stage(Op::SetFrames { frames }).map_err(op_err)
+        }
     }
 }
 
@@ -583,6 +695,37 @@ mod tests {
         assert_eq!(&out[idx..idx + 4], &[255, 0, 0, 255], "사각형 내부 빨강");
         // 바깥(0,0)은 투명.
         assert_eq!(&out[0..4], &[0, 0, 0, 0], "바깥 투명");
+    }
+
+    #[test]
+    fn gradient_layer_applies_ok() {
+        // 그라디언트 출처 레이어가 apply되고 양 끝 색이 합성 결과에 나타나는지.
+        let mut h = History::new(Document::new(16, 16, BitDepth::U8));
+        let actions = vec![Action::AddPaintLayer {
+            name: "grad".into(),
+            // 축을 픽셀 중심(0.5 → 15.5)에 맞춰 양 끝 픽셀이 정확히 t=0/t=1.
+            source: PixelSource::LinearGradient {
+                x0: 0.5,
+                y0: 0.0,
+                x1: 15.5,
+                y1: 0.0,
+                stops: vec![
+                    GradientStop { at: 0.0, rgba: [0, 0, 0, 255] },
+                    GradientStop { at: 1.0, rgba: [255, 255, 255, 255] },
+                ],
+            },
+            index: None,
+            bind: None,
+        }];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        assert_eq!(res.applied, 1);
+        let out = dcli_raster::composite(&h.doc).to_srgb8_rgba();
+        // 왼쪽 끝(0,0)은 거의 검정, 오른쪽 끝(15,0)은 거의 흰색.
+        assert!(out[0] < 30, "왼쪽 끝 거의 검정: {}", out[0]);
+        let right = ((15) * 4) as usize;
+        assert!(out[right] > 225, "오른쪽 끝 거의 흰색: {}", out[right]);
+        assert_eq!(out[3], 255, "불투명");
     }
 
     #[test]

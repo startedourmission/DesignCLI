@@ -64,10 +64,42 @@ enum Command {
     /// 합성 결과를 파일로 export.
     #[command(subcommand)]
     Export(ExportCmd),
+    /// Frame(명명된 export 영역 — Figma의 캔버스) 관리.
+    #[command(subcommand)]
+    Frame(FrameCmd),
+    /// PSD 호환 — import(PSD→문서)/export(문서→PSD).
+    #[command(subcommand)]
+    Psd(PsdCmd),
     /// 마지막 편집을 되돌린다(--server 모드 전용 — 디스크 모드는 세션 히스토리 없음).
     Undo,
     /// 되돌린 편집을 다시 적용한다(--server 모드 전용).
     Redo,
+}
+
+#[derive(Subcommand)]
+enum FrameCmd {
+    /// Frame 추가: 이름 + 영역(x y w h, 음수 좌표 허용 — 무한 작업영역).
+    Add {
+        name: String,
+        #[arg(allow_negative_numbers = true)]
+        x: i32,
+        #[arg(allow_negative_numbers = true)]
+        y: i32,
+        w: u32,
+        h: u32,
+    },
+    /// Frame 목록.
+    List,
+    /// Frame 제거(이름 또는 id).
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum PsdCmd {
+    /// PSD 파일을 읽어 현재 --doc 경로에 새 문서로 변환 저장.
+    Import { input: PathBuf },
+    /// 현재 문서를 PSD로 저장(레이어별 트랜스폼 베이크 + 합성 이미지 포함).
+    Export { out: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -159,6 +191,17 @@ enum DrawCmd {
         #[arg(long, default_value = "rounded-rect")]
         name: String,
     },
+    /// 자유곡선(브러시): 점 목록 "x,y x,y x,y ..." 를 둥근 끝 선분으로 연결.
+    Path {
+        /// 공백 구분 점 목록. 예: "10,10 50,30 90,20"
+        points: String,
+        #[arg(long, default_value_t = 4.0)]
+        width: f32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "path")]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -231,6 +274,14 @@ enum LayerCmd {
     Delete { id: u64 },
     /// 레이어 복제(표면+속성 복사, offset +12px).
     Duplicate { id: u64 },
+    /// 레이어들을 그룹으로 묶는다(bottom-to-top 상대 순서 유지).
+    Group {
+        ids: Vec<u64>,
+        #[arg(long, default_value = "group")]
+        name: String,
+    },
+    /// 그룹 해제 — 자식들을 그룹 위치에 펼친다.
+    Ungroup { id: u64 },
 }
 
 #[derive(Subcommand)]
@@ -241,8 +292,16 @@ enum BlendCmd {
 
 #[derive(Subcommand)]
 enum ExportCmd {
-    /// 합성 결과를 PNG로 저장.
-    Png { out: PathBuf },
+    /// 합성 결과를 PNG로 저장. --frame 또는 --region으로 영역 지정(무한 작업영역).
+    Png {
+        out: PathBuf,
+        /// Frame 이름 또는 id 단위 export.
+        #[arg(long)]
+        frame: Option<String>,
+        /// 임의 영역 "x,y,w,h" (음수 좌표 허용).
+        #[arg(long, allow_hyphen_values = true)]
+        region: Option<String>,
+    },
 }
 
 fn main() {
@@ -321,6 +380,19 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
             // 기본 이름이면 텍스트 내용을 레이어 이름으로(패널 가독성).
             if name == "text" { text.chars().take(20).collect() } else { name.clone() },
         ),
+        DrawCmd::Path { points, width, color, name } => {
+            // "x,y x,y ..." → 평탄 좌표 배열.
+            let mut flat = Vec::new();
+            for pair in points.split_whitespace() {
+                let (x, y) = pair
+                    .split_once(',')
+                    .ok_or_else(|| anyhow::anyhow!("점은 'x,y' 형식: {pair}"))?;
+                flat.push(x.trim().parse::<f32>().context("x 좌표")?);
+                flat.push(y.trim().parse::<f32>().context("y 좌표")?);
+            }
+            anyhow::ensure!(flat.len() >= 2, "점이 최소 1개 필요");
+            (Shape::Path { points: flat, width: *width, rgba: parse_rgba(color)? }, name.clone())
+        }
     })
 }
 
@@ -439,19 +511,55 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             emit.ok(&format!("도형 그림: \"{name}\""), cli.dry_run);
             Ok(())
         }
-        Command::Export(ExportCmd::Png { out }) => {
+        Command::Export(ExportCmd::Png { out, frame, region }) => {
             // --server면 데몬이 합성·인코딩한 PNG를 받아 저장(디스크 모드와 동일 인코딩 경로).
             if let Some(srv) = server_of(cli) {
-                let (w, h) = srv.export_png(out)?;
+                let (w, h) = srv.export_png_with(out, frame.as_deref(), region.as_deref())?;
                 emit.exported(out, w, h, false);
                 return Ok(());
             }
             let doc = path.load()?;
-            let surface = dcli_raster::composite(&doc);
+            let surface = if let Some(key) = frame {
+                let f = doc
+                    .find_frame(key)
+                    .ok_or_else(|| anyhow::anyhow!("frame 없음: {key}"))?;
+                dcli_raster::composite_region(&doc, f.x, f.y, f.w, f.h)
+            } else if let Some(r) = region {
+                let v: Vec<i64> = r.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                anyhow::ensure!(v.len() == 4 && v[2] > 0 && v[3] > 0, "region은 x,y,w,h");
+                dcli_raster::composite_region(&doc, v[0] as i32, v[1] as i32, v[2] as u32, v[3] as u32)
+            } else {
+                dcli_raster::composite(&doc)
+            };
             if !cli.dry_run {
                 storage::export_png(out, &surface)?;
             }
             emit.exported(out, surface.width(), surface.height(), cli.dry_run);
+            Ok(())
+        }
+        Command::Frame(cmd) => run_frame(cli, emit, &path, cmd),
+        Command::Psd(PsdCmd::Import { input }) => {
+            anyhow::ensure!(cli.server.is_none(), "psd import는 디스크 모드 전용");
+            anyhow::ensure!(!path.exists(), "이미 문서가 존재: {}", cli.doc.display());
+            let bytes = std::fs::read(input).context("PSD 읽기")?;
+            let doc = dcli_psd::import_psd(&bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if !cli.dry_run {
+                path.save(&doc)?;
+            }
+            emit.ok(
+                &format!("PSD import: {} → {} (레이어 {}개)", input.display(), cli.doc.display(), doc.node_count()),
+                cli.dry_run,
+            );
+            Ok(())
+        }
+        Command::Psd(PsdCmd::Export { out }) => {
+            anyhow::ensure!(cli.server.is_none(), "psd export는 디스크 모드 전용");
+            let doc = path.load()?;
+            let bytes = dcli_psd::export_psd(&doc);
+            if !cli.dry_run {
+                std::fs::write(out, &bytes).context("PSD 쓰기")?;
+            }
+            emit.ok(&format!("PSD export: {} ({} bytes)", out.display(), bytes.len()), cli.dry_run);
             Ok(())
         }
         Command::Undo => {
@@ -468,6 +576,67 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             })?;
             let changed = srv.redo()?;
             emit.ok(if changed { "다시 적용" } else { "다시 적용할 항목 없음" }, false);
+            Ok(())
+        }
+    }
+}
+
+/// 현재 frame 목록(디스크: doc.frames, 서버: state.frames)을 FrameDto로.
+fn current_frames(cli: &Cli, path: &DocPath) -> Result<Vec<dispatch::FrameDto>> {
+    if let Some(srv) = server_of(cli) {
+        let st = srv.state()?;
+        let arr = st["frames"].as_array().cloned().unwrap_or_default();
+        return Ok(arr
+            .iter()
+            .map(|f| dispatch::FrameDto {
+                id: f["id"].as_u64().unwrap_or(0),
+                name: f["name"].as_str().unwrap_or("").to_string(),
+                x: f["x"].as_i64().unwrap_or(0) as i32,
+                y: f["y"].as_i64().unwrap_or(0) as i32,
+                w: f["w"].as_u64().unwrap_or(0) as u32,
+                h: f["h"].as_u64().unwrap_or(0) as u32,
+            })
+            .collect());
+    }
+    let doc = path.load()?;
+    Ok(doc
+        .frames
+        .iter()
+        .map(|f| dispatch::FrameDto { id: f.id, name: f.name.clone(), x: f.x, y: f.y, w: f.w, h: f.h })
+        .collect())
+}
+
+fn run_frame(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &FrameCmd) -> Result<()> {
+    match cmd {
+        FrameCmd::Add { name, x, y, w, h } => {
+            let mut frames = current_frames(cli, path)?;
+            anyhow::ensure!(!frames.iter().any(|f| &f.name == name), "frame 이름 중복: {name}");
+            let id = frames.iter().map(|f| f.id).max().map_or(0, |m| m + 1);
+            frames.push(dispatch::FrameDto { id, name: name.clone(), x: *x, y: *y, w: *w, h: *h });
+            apply_one(cli, path, Action::SetFrames { frames })?;
+            emit.ok(&format!("frame 추가: \"{name}\" ({x},{y} {w}x{h})"), cli.dry_run);
+            Ok(())
+        }
+        FrameCmd::List => {
+            let frames = current_frames(cli, path)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&frames)?);
+            } else if frames.is_empty() {
+                println!("frame 없음 — dx frame add <이름> <x> <y> <w> <h>");
+            } else {
+                for f in &frames {
+                    println!("  [{}] \"{}\" ({},{}) {}x{}", f.id, f.name, f.x, f.y, f.w, f.h);
+                }
+            }
+            Ok(())
+        }
+        FrameCmd::Remove { name } => {
+            let mut frames = current_frames(cli, path)?;
+            let before = frames.len();
+            frames.retain(|f| &f.name != name && f.id.to_string() != *name);
+            anyhow::ensure!(frames.len() < before, "frame 없음: {name}");
+            apply_one(cli, path, Action::SetFrames { frames })?;
+            emit.ok(&format!("frame 제거: {name}"), cli.dry_run);
             Ok(())
         }
     }
@@ -554,6 +723,17 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
         LayerCmd::Delete { id } => {
             apply_one(cli, path, Action::DeleteLayer { id: NodeRef::Node(*id) })?;
             emit.ok(&format!("레이어 삭제: n{id}"), cli.dry_run);
+            Ok(())
+        }
+        LayerCmd::Group { ids, name } => {
+            let refs: Vec<NodeRef> = ids.iter().map(|i| NodeRef::Node(*i)).collect();
+            apply_one(cli, path, Action::GroupLayers { ids: refs, name: name.clone(), bind: None })?;
+            emit.ok(&format!("그룹 생성: \"{name}\" ({}개)", ids.len()), cli.dry_run);
+            Ok(())
+        }
+        LayerCmd::Ungroup { id } => {
+            apply_one(cli, path, Action::Ungroup { id: NodeRef::Node(*id) })?;
+            emit.ok(&format!("그룹 해제: n{id}"), cli.dry_run);
             Ok(())
         }
         LayerCmd::Duplicate { id } => {

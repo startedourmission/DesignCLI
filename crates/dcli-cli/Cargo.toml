@@ -18,9 +18,9 @@ required-features = ["cli"]
 default = ["cli", "fs-sources", "server"]
 # clap을 cli feature에 가둔다. cli는 파일 IO도 필요하므로 fs-sources 포함.
 cli = ["dep:clap", "fs-sources"]
-# 파일시스템 의존(storage 모듈, PixelSource::PngPath). wasm은 이걸 끄면 std::fs가
-# 컴파일에서 진짜로 제거된다(브라우저 빌드 안전). MCP/CLI는 켜고, dcli-wasm은 끈다.
-fs-sources = []
+# 파일시스템 의존(storage 모듈, PixelSource::PngPath, PSD 변환). wasm은 이걸 끄면
+# std::fs·psd가 컴파일에서 진짜로 제거된다(브라우저 빌드 안전). MCP/CLI는 켜고, dcli-wasm은 끈다.
+fs-sources = ["dep:dcli-psd"]
 # --server 모드(데몬에 HTTP로 편집 전송). ureq(blocking) 의존. wasm은 끈다.
 server = ["dep:ureq"]
 
@@ -29,6 +29,7 @@ dcli-color.workspace = true
 dcli-tile.workspace = true
 dcli-model.workspace = true
 dcli-raster.workspace = true
+dcli-psd = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

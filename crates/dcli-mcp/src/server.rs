@@ -234,7 +234,7 @@ impl DesignServer {
 
     // ----- 레이어 (인지) -----
 
-    #[tool(description = "레이어 목록(bottom-to-top). 인지 루프 2단계.")]
+    #[tool(description = "레이어 목록(bottom-to-top). 각 노드는 id/name/kind/visible/opacity/blend/offset/scale/rotation/meta/surface 포함. 인지 루프 2단계.")]
     async fn layer_list(&self, Parameters(req): Parameters<DocRef>) -> CallToolResult {
         let ws = self.ws.lock().await;
         match ws.get(&DocId(req.doc.clone())) {
@@ -257,7 +257,15 @@ impl DesignServer {
 
     // ----- 쓰기 (batch가 주 경로) -----
 
-    #[tool(description = "Action 배열을 트랜잭션으로 적용(주 쓰기 경로). 전부 성공 또는 전체 롤백. named binding(bind/ref)로 신규 노드 참조.")]
+    #[tool(description = "Action 배열을 트랜잭션으로 적용(주 쓰기 경로). 전부 성공 또는 전체 롤백. \
+        named binding(bind/ref)로 신규 노드 참조. 지원 op: \
+        add_paint_layer(source.from: transparent|fill|png_base64|png_path|shapes — shapes.items에 \
+        rect/ellipse/line/stroke_rect/stroke_ellipse/rounded_rect/text, text는 번들 폰트 Pretendard로 \
+        한글/라틴 렌더링, '\\n' 줄바꿈), delete_layer, \
+        duplicate_layer(픽셀+속성 전체 복사 후 offset +12,+12 — bind로 새 노드 참조), move_layer, \
+        set_props(patch: name/visible/opacity/offset[캔버스 이동 dx,dy]/scale[비파괴 sx,sy]/\
+        rotation[도, 시계방향]/meta[임의 JSON 문자열, 빈 문자열=제거]), \
+        set_blend(normal|multiply|screen|darken|lighten|overlay|difference).")]
     async fn batch_apply(&self, Parameters(req): Parameters<BatchReq>) -> CallToolResult {
         let mut ws = self.ws.lock().await;
         let id = DocId(req.doc.clone());
@@ -306,6 +314,29 @@ impl DesignServer {
         }
     }
 
+    #[tool(description = "합성 결과(dcli_raster::composite)를 원본 해상도 PNG로 인코딩해 base64 문자열로 반환. \
+        이미지 콘텐츠도 병기되어 에이전트가 결과를 눈으로 확인한다. 토큰 절약이 필요하면 doc_snapshot(max_dim)을 쓸 것.")]
+    async fn composite_png(&self, Parameters(req): Parameters<DocRef>) -> CallToolResult {
+        let ws = self.ws.lock().await;
+        let Some(s) = ws.get(&DocId(req.doc.clone())) else {
+            return tool_err(format!("열린 문서 없음: {}", req.doc));
+        };
+        // snapshot_png(max_dim=None) = composite 원본 비트 그대로 PNG 인코딩(다운스케일 없음).
+        match snapshot_png(&s.history.doc, None) {
+            Ok((png, w, h, _)) => {
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+                let mut r = CallToolResult::success(vec![
+                    Content::image(b64.clone(), "image/png"),
+                    Content::text(format!("{w}x{h}")),
+                ]);
+                r.structured_content = Some(json!({ "png_base64": b64, "w": w, "h": h }));
+                r
+            }
+            Err(e) => tool_err(e.to_string()),
+        }
+    }
+
     // ----- 히스토리 -----
 
     #[tool(description = "마지막 편집(단발 op 또는 batch 전체)을 되돌린다.")]
@@ -339,13 +370,126 @@ impl DesignServer {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 충돌 없는 임시 .dxdoc 경로(존재하면 doc_create가 거부하므로 nanos로 유일화).
+    fn temp_doc_path(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("dxmcp-{tag}-{}-{nanos}.dxdoc", std::process::id()))
+    }
+
+    async fn create_doc(server: &DesignServer, path: &std::path::Path) -> String {
+        let r = server
+            .doc_create(Parameters(DocCreateReq {
+                path: path.display().to_string(),
+                w: 16,
+                h: 16,
+                depth: "u8".into(),
+            }))
+            .await;
+        assert_ne!(r.is_error, Some(true), "doc_create 실패: {:?}", r.structured_content);
+        r.structured_content.unwrap()["doc"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn composite_png_returns_decodable_base64() {
+        // composite_png가 base64 PNG(원본 크기)를 structured로 반환하는지 e2e 확인.
+        let server = DesignServer::new();
+        let path = temp_doc_path("composite");
+        let doc = create_doc(&server, &path).await;
+
+        // 텍스트 + duplicate + set_props(offset/rotation/meta) — 신규 표면 경로 전부 통과.
+        let actions: Vec<Action> = serde_json::from_value(json!([
+            { "op": "add_paint_layer", "name": "t", "bind": "t",
+              "source": { "from": "shapes", "items": [
+                  { "shape": "text", "x": 1.0, "y": 1.0, "text": "가A", "size": 8.0, "rgba": [255, 0, 0, 255] }
+              ] } },
+            { "op": "duplicate_layer", "id": { "bind": "t" }, "bind": "t2" },
+            { "op": "set_props", "id": { "bind": "t2" },
+              "patch": { "offset": [3, -2], "rotation": 45.0, "meta": "{\"kind\":\"text\"}" } }
+        ]))
+        .unwrap();
+        let r = server
+            .batch_apply(Parameters(BatchReq {
+                doc: doc.clone(),
+                actions,
+                dry_run: false,
+            }))
+            .await;
+        assert_ne!(r.is_error, Some(true), "batch 실패: {:?}", r.structured_content);
+
+        // layer_list가 dto 최신 필드(offset/scale/rotation/meta)를 반환하는지.
+        let r = server.layer_list(Parameters(DocRef { doc: doc.clone() })).await;
+        let layers = r.structured_content.unwrap()["layers"].as_array().unwrap().clone();
+        assert_eq!(layers.len(), 2);
+        let dup = &layers[1]; // 복제본(top).
+        assert_eq!(dup["offset"], json!([3, -2]));
+        assert_eq!(dup["rotation"], json!(45.0));
+        assert_eq!(dup["meta"], json!("{\"kind\":\"text\"}"));
+        assert!(dup["scale"].is_array(), "scale 필드 누락");
+
+        // composite_png: base64 → PNG 헤더 디코드 + 원본 크기.
+        let r = server.composite_png(Parameters(DocRef { doc: doc.clone() })).await;
+        assert_ne!(r.is_error, Some(true));
+        let sc = r.structured_content.unwrap();
+        assert_eq!((sc["w"].as_u64(), sc["h"].as_u64()), (Some(16), Some(16)));
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(sc["png_base64"].as_str().unwrap())
+            .expect("base64 디코드");
+        let info = png::Decoder::new(png.as_slice()).read_info().expect("PNG 파싱").info().clone();
+        assert_eq!((info.width, info.height), (16, 16));
+
+        // 정리(락 해제 + 임시 폴더 삭제).
+        server.doc_close(Parameters(DocRef { doc })).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn undo_redo_roundtrip_over_tools() {
+        // history_undo/redo tool이 batch 1단위를 되돌리고 재적용하는지.
+        let server = DesignServer::new();
+        let path = temp_doc_path("undo");
+        let doc = create_doc(&server, &path).await;
+
+        let actions: Vec<Action> = serde_json::from_value(json!([
+            { "op": "add_paint_layer", "name": "bg",
+              "source": { "from": "fill", "rgba": [0, 128, 255, 255] } }
+        ]))
+        .unwrap();
+        let r = server
+            .batch_apply(Parameters(BatchReq {
+                doc: doc.clone(),
+                actions,
+                dry_run: false,
+            }))
+            .await;
+        assert_ne!(r.is_error, Some(true));
+
+        let r = server.history_undo(Parameters(DocRef { doc: doc.clone() })).await;
+        assert_eq!(r.structured_content.unwrap()["layers"], json!(0), "undo 후 레이어 0");
+        let r = server.history_redo(Parameters(DocRef { doc: doc.clone() })).await;
+        assert_eq!(r.structured_content.unwrap()["layers"], json!(1), "redo 후 레이어 1");
+
+        server.doc_close(Parameters(DocRef { doc })).await;
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for DesignServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "DesignCLI MCP 서버. 작업 흐름: doc_open/doc_create로 문서를 열어 doc 핸들을 \
-             받고, batch_apply로 편집(주 쓰기 경로), doc_snapshot으로 결과를 본다. \
-             신규 노드는 batch 안에서 bind 이름으로 참조한다(ID를 발명하지 말 것).",
+             받고, batch_apply로 편집(주 쓰기 경로 — 도형/텍스트 레이어, duplicate_layer, \
+             set_props의 offset/scale/rotation/meta, set_blend), doc_snapshot 또는 \
+             composite_png로 결과를 눈으로 확인하고, 실수는 history_undo/history_redo로 \
+             되돌린다. 신규 노드는 batch 안에서 bind 이름으로 참조한다(ID를 발명하지 말 것).",
         )
     }
 }

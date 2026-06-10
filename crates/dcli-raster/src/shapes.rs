@@ -214,6 +214,107 @@ pub fn stroke_line(s: &mut Surface, x0: f32, y0: f32, x1: f32, y1: f32, width: f
     }
 }
 
+/// stops(straight sRGB8, at 오름차순)를 linear-premul로 변환한다.
+///
+/// ★색 contract★: 그라디언트 색 보간은 반드시 linear-premul 공간에서 한다 —
+/// 감마 공간 보간은 중간 톤이 어두워지는 고전적 함정(gamma-vs-linear-landmine).
+fn stops_to_linear(stops: &[(f32, [u8; 4])]) -> Vec<(f32, LinearPremul)> {
+    stops.iter().map(|(at, rgba)| (*at, to_linear(*rgba))).collect()
+}
+
+/// t(0~1 권장, 범위 밖 clamp)에 해당하는 보간 색. stops는 at 오름차순 가정.
+///
+/// 첫 stop 이전/마지막 stop 이후는 끝 색으로 clamp. stop 사이는 성분별 선형 보간
+/// (linear-premul이므로 premul 성분을 그대로 lerp하면 합성과 일관된 결과).
+fn gradient_color_at(stops: &[(f32, LinearPremul)], t: f32) -> LinearPremul {
+    let first = &stops[0];
+    if t <= first.0 {
+        return first.1;
+    }
+    let last = &stops[stops.len() - 1];
+    if t >= last.0 {
+        return last.1;
+    }
+    // 인접 stop 쌍을 찾아 구간 내 비율로 lerp.
+    for pair in stops.windows(2) {
+        let (a0, c0) = pair[0];
+        let (a1, c1) = pair[1];
+        if t <= a1 {
+            let span = a1 - a0;
+            let f = if span <= f32::EPSILON { 0.0 } else { (t - a0) / span };
+            return LinearPremul {
+                r: c0.r + (c1.r - c0.r) * f,
+                g: c0.g + (c1.g - c0.g) * f,
+                b: c0.b + (c1.b - c0.b) * f,
+                a: c0.a + (c1.a - c0.a) * f,
+            };
+        }
+    }
+    last.1
+}
+
+/// 선형 그라디언트로 표면 전체를 채운다 — (x0,y0)→(x1,y1) 축 위 투영이 t.
+///
+/// 픽셀 중심을 축에 투영해 t∈[0,1]로 clamp. 클리핑은 합성에 맡긴다(전면 채움).
+/// 축 길이가 0이면 첫 stop 색으로 단색 채움.
+pub fn fill_linear_gradient(
+    s: &mut Surface,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    stops: &[(f32, [u8; 4])],
+) {
+    if stops.is_empty() {
+        return;
+    }
+    let lin = stops_to_linear(stops);
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len2 = dx * dx + dy * dy;
+    for py in 0..s.height() {
+        for px in 0..s.width() {
+            let t = if len2 <= f32::EPSILON {
+                0.0
+            } else {
+                // 픽셀 중심을 축에 투영한 비율.
+                (((px as f32 + 0.5 - x0) * dx + (py as f32 + 0.5 - y0) * dy) / len2)
+                    .clamp(0.0, 1.0)
+            };
+            blend_px(s, px, py, gradient_color_at(&lin, t), 1.0);
+        }
+    }
+}
+
+/// 원형(방사형) 그라디언트로 표면 전체를 채운다 — 중심 거리/radius가 t.
+///
+/// radius 밖은 t=1로 clamp(마지막 stop 색). radius가 0 이하이면 전부 t=1.
+pub fn fill_radial_gradient(
+    s: &mut Surface,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    stops: &[(f32, [u8; 4])],
+) {
+    if stops.is_empty() {
+        return;
+    }
+    let lin = stops_to_linear(stops);
+    for py in 0..s.height() {
+        for px in 0..s.width() {
+            let ex = px as f32 + 0.5 - cx;
+            let ey = py as f32 + 0.5 - cy;
+            let dist = (ex * ex + ey * ey).sqrt();
+            let t = if radius <= f32::EPSILON {
+                1.0
+            } else {
+                (dist / radius).clamp(0.0, 1.0)
+            };
+            blend_px(s, px, py, gradient_color_at(&lin, t), 1.0);
+        }
+    }
+}
+
 /// 점 (px,py)에서 선분 (ax,ay)-(bx,by)까지의 최단 거리.
 #[inline]
 fn dist_point_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
@@ -309,6 +410,46 @@ mod tests {
         assert_eq!(s.get(10, 10).to_srgb8_straight()[3], 255, "중심 불투명");
         assert!(s.get(10, 2).to_srgb8_straight()[3] > 200, "변 중앙 불투명");
         assert_eq!(s.get(2, 2).to_srgb8_straight()[3], 0, "코너 잘림(투명)");
+    }
+
+    #[test]
+    fn linear_gradient_black_to_white_midpoint() {
+        // 17px 폭, 축 0.5→16.5: 픽셀 0 중심 t=0, 픽셀 8 중심 t=0.5, 픽셀 16 중심 t=1.
+        let mut s = Surface::new(17, 1);
+        let stops = [(0.0_f32, [0u8, 0, 0, 255]), (1.0, [255, 255, 255, 255])];
+        fill_linear_gradient(&mut s, 0.5, 0.0, 16.5, 0.0, &stops);
+        assert_eq!(s.get(0, 0).to_srgb8_straight(), [0, 0, 0, 255], "t=0 검정");
+        assert_eq!(s.get(16, 0).to_srgb8_straight(), [255, 255, 255, 255], "t=1 흰색");
+        // t=0.5 — ★linear 공간 보간★: linear 0.5 → sRGB8 ≈ 188 (감마 보간이면 128).
+        let mid = s.get(8, 0).to_srgb8_straight();
+        assert!(
+            (mid[0] as i32 - 188).abs() <= 2,
+            "중간값은 linear 보간(≈188): {mid:?}"
+        );
+        assert_eq!(mid[0], mid[1], "회색(채널 동일)");
+        assert_eq!(mid[3], 255, "불투명");
+    }
+
+    #[test]
+    fn radial_gradient_center_and_edge() {
+        // 중심 (8.5, 8.5) = 픽셀 (8,8) 중심, radius 8 → 픽셀 (16,8) 중심이 정확히 t=1.
+        let mut s = Surface::new(17, 17);
+        let stops = [(0.0_f32, [0u8, 0, 0, 255]), (1.0, [255, 255, 255, 255])];
+        fill_radial_gradient(&mut s, 8.5, 8.5, 8.0, &stops);
+        assert_eq!(s.get(8, 8).to_srgb8_straight(), [0, 0, 0, 255], "중심 t=0 검정");
+        assert_eq!(s.get(16, 8).to_srgb8_straight(), [255, 255, 255, 255], "가장자리 t=1 흰색");
+        // radius 밖(모서리)은 t=1로 clamp → 흰색.
+        assert_eq!(s.get(0, 0).to_srgb8_straight(), [255, 255, 255, 255], "범위 밖 clamp");
+    }
+
+    #[test]
+    fn gradient_stops_clamped_outside_range() {
+        // stop 범위가 [0.25, 0.75]이면 그 밖의 t는 끝 색으로 clamp.
+        let mut s = Surface::new(17, 1);
+        let stops = [(0.25_f32, [255u8, 0, 0, 255]), (0.75, [0, 0, 255, 255])];
+        fill_linear_gradient(&mut s, 0.5, 0.0, 16.5, 0.0, &stops);
+        assert_eq!(s.get(0, 0).to_srgb8_straight(), [255, 0, 0, 255], "t=0 → 첫 stop");
+        assert_eq!(s.get(16, 0).to_srgb8_straight(), [0, 0, 255, 255], "t=1 → 마지막 stop");
     }
 
     #[test]

@@ -111,12 +111,10 @@ impl DocPath {
         let mut doc = Document::from_json(&json).context("문서 JSON 파싱 실패")?;
 
         // 노드가 참조하는 모든 SurfaceId의 픽셀을 사이드카에서 로드.
+        // ★그룹 자식 포함★ — 루트 order만 돌면 그룹 자식 표면이 누락되어 다음
+        // save에서 사이드카가 유실된다(데이터 손실). referenced_surfaces는 전 노드 순회.
         let mut store = PixelStore::new();
-        let ids: Vec<SurfaceId> = doc
-            .order()
-            .iter()
-            .filter_map(|nid| doc.get(*nid).and_then(|n| n.surface_id()))
-            .collect();
+        let ids: Vec<SurfaceId> = doc.referenced_surfaces().into_iter().collect();
         for id in ids {
             let path = self.surface_path(id);
             let bytes = std::fs::read(&path)

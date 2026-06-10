@@ -51,6 +51,69 @@ export class App extends EventTarget {
     this.renderer = renderer;
     this.live = null; // 라이브 모드면 LiveLink. 설정 시 쓰기가 데몬을 경유.
     this.selectedIds = []; // 선택툴이 고른 레이어 node id 배열(빈 배열=선택 없음). [0]이 primary.
+    this.clipboardIds = []; // 앱 내부 클립보드 — Cmd+C로 기억한 레이어 id들(문서 내 복제용).
+  }
+
+  /** Frame 목록(무한 작업영역의 export 단위). 구버전 wasm이면 빈 배열. */
+  frames() {
+    if (typeof this.editor.frames !== "function") return [];
+    try { return JSON.parse(this.editor.frames()).frames ?? []; } catch { return []; }
+  }
+
+  /** Frame 추가(자동 id). */
+  addFrame(name, x, y, w, h) {
+    const frames = this.frames();
+    const id = frames.reduce((m, f) => Math.max(m, f.id + 1), 0);
+    this.apply([B.setFrames([...frames, { id, name, x: x | 0, y: y | 0, w: w | 0, h: h | 0 }])]);
+  }
+
+  /** Frame 제거. */
+  removeFrame(id) {
+    this.apply([B.setFrames(this.frames().filter((f) => f.id !== id))]);
+  }
+
+  /** Frame 단위 PNG export — 라이브면 데몬 URL, 로컬이면 wasm으로 즉석 인코딩. */
+  exportFrame(f) {
+    if (this.live) {
+      const a = document.createElement("a");
+      a.href = `/doc/${this.live.docId}/export.png?frame=${encodeURIComponent(f.name)}`;
+      a.download = `${f.name}.png`;
+      a.click();
+      return;
+    }
+    const png = this.editor.export_region_png(f.x, f.y, f.w, f.h);
+    const url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = `${f.name}.png`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  /** 선택 레이어들을 그룹으로(Cmd+G). 2개 미만이면 무시. */
+  groupSelected() {
+    if (this.selectedIds.length < 1) return;
+    this.apply([B.groupLayers([...this.selectedIds])]);
+    this.select(null);
+  }
+
+  /** 선택이 그룹이면 해제(Cmd+Shift+G). */
+  ungroupSelected() {
+    const l = this.getSelected();
+    if (!l || l.kind !== "group") return;
+    this.apply([B.ungroup(l.id)]);
+    this.select(null);
+  }
+
+  /** Cmd+C — 선택 id들을 내부 클립보드에 기억(즉시 복제 아님). */
+  copy(ids) {
+    if (!ids?.length) return;
+    this.clipboardIds = [...ids];
+  }
+
+  /** Cmd+V — 기억한 레이어 중 아직 살아있는 것만 복제(없어진 id는 무시). */
+  paste() {
+    if (!this.clipboardIds.length) return;
+    const alive = new Set(this.layers().map((l) => l.id));
+    this.duplicateMany(this.clipboardIds.filter((id) => alive.has(id)));
   }
 
   /** 단일 선택(교체). null이면 해제. changed로 캔버스·패널 동기. */
@@ -184,6 +247,26 @@ export class App extends EventTarget {
     const p0 = rot(r0, s0x * ax, s0y * ay);
     const p1 = rot(r1, s1x * ax, s1y * ay);
     return [Math.round(ox + p0.x - p1.x), Math.round(oy + p0.y - p1.y)];
+  }
+
+  /** 선택 레이어 좌우/상하 뒤집기 — scale 부호 반전, 도형(bbox) 중심 고정. axis: "x"|"y".
+   *  하나의 apply 배치로 처리(undo 한 번에 묶임). */
+  flipMany(ids, axis) {
+    if (!ids?.length) return;
+    const layers = this.layers();
+    const acts = [];
+    for (const id of ids) {
+      const l = layers.find((v) => v.id === id);
+      if (!l) continue;
+      const b = this.layerBounds(id);
+      if (!b) continue;
+      const [sx, sy] = l.scale ?? [1, 1];
+      const ns = axis === "x" ? [-sx, sy] : [sx, -sy];
+      // anchor = 도형(불투명 bbox) 중심 — 뒤집어도 제자리에 머문다.
+      const anchor = { x: b[0] + b[2] / 2, y: b[1] + b[3] / 2 };
+      acts.push(B.setProps(id, { scale: ns, offset: this.computeAnchoredOffset(l, ns, null, anchor) }));
+    }
+    if (acts.length) this.apply(acts);
   }
 
   /** 레이어의 변환 후 AABB(캔버스 좌표) {x,y,w,h} 또는 null. 정렬·표시용. */

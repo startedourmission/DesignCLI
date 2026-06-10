@@ -144,12 +144,38 @@ pub async fn snapshot(State(app): Shared, Path(id): Path<String>) -> impl IntoRe
 }
 
 /// GET /doc/:id/export.png — 합성 결과를 8bit RGBA PNG로 응답(디스크 export와 동일 인코딩).
-pub async fn export_png(State(app): Shared, Path(id): Path<String>) -> impl IntoResponse {
+/// export 영역 선택: ?frame=<이름|id> 또는 ?region=x,y,w,h (없으면 문서 전체).
+#[derive(Deserialize, Default)]
+pub struct ExportParams {
+    pub frame: Option<String>,
+    pub region: Option<String>,
+}
+
+pub async fn export_png(
+    State(app): Shared,
+    Path(id): Path<String>,
+    Query(p): Query<ExportParams>,
+) -> impl IntoResponse {
     let docs = app.docs.lock().unwrap();
     let Some(ds) = docs.get(&id) else {
         return doc_not_found(&id);
     };
-    let surface = dcli_raster::composite(&ds.hist.doc);
+    let doc = &ds.hist.doc;
+    let surface = if let Some(key) = &p.frame {
+        // Frame 단위 export — 무한 작업영역의 캔버스.
+        let Some(f) = doc.find_frame(key) else {
+            return (StatusCode::NOT_FOUND, format!("frame '{key}' 없음")).into_response();
+        };
+        dcli_raster::composite_region(doc, f.x, f.y, f.w, f.h)
+    } else if let Some(r) = &p.region {
+        let v: Vec<i64> = r.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if v.len() != 4 || v[2] <= 0 || v[3] <= 0 {
+            return (StatusCode::BAD_REQUEST, "region은 x,y,w,h".to_string()).into_response();
+        }
+        dcli_raster::composite_region(doc, v[0] as i32, v[1] as i32, v[2] as u32, v[3] as u32)
+    } else {
+        dcli_raster::composite(doc)
+    };
     let pixels = surface.to_srgb8_rgba();
     let mut buf = Vec::new();
     let mut enc = png::Encoder::new(&mut buf, surface.width(), surface.height());
@@ -172,6 +198,7 @@ pub async fn state(State(app): Shared, Path(id): Path<String>) -> impl IntoRespo
         "seq": ds.seq,
         "doc": dto::doc_info_json(&ds.hist.doc),
         "layers": dto::layer_list_json(&ds.hist.doc)["layers"],
+        "frames": dto::frames_json(&ds.hist.doc)["frames"],
         "can_undo": ds.hist.can_undo(),
         "can_redo": ds.hist.can_redo(),
     }))

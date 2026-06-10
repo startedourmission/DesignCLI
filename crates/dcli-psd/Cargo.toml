@@ -1,0 +1,14 @@
+[package]
+name = "dcli-psd"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dcli-color.workspace = true
+dcli-tile.workspace = true
+dcli-model.workspace = true
+dcli-raster.workspace = true
+# import 전용(read). export는 본 crate가 손수 인코딩한다.
+psd.workspace = true

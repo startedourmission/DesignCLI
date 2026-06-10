@@ -65,7 +65,23 @@ impl Server {
     /// GET /doc/:id/export.png — 데몬이 합성한 PNG를 받아 `out`에 저장한다.
     /// 성공 시 (width, height)를 반환(emit.exported 호환).
     pub fn export_png(&self, out: &Path) -> Result<(u32, u32)> {
-        let resp = ureq::get(&self.url("/export.png")).call().map_err(map_ureq)?;
+        self.export_png_with(out, None, None)
+    }
+
+    /// frame(이름|id) 또는 region("x,y,w,h") 단위 export — 무한 작업영역의 캔버스 단위.
+    pub fn export_png_with(
+        &self,
+        out: &Path,
+        frame: Option<&str>,
+        region: Option<&str>,
+    ) -> Result<(u32, u32)> {
+        let mut url = self.url("/export.png");
+        if let Some(f) = frame {
+            url = format!("{url}?frame={f}");
+        } else if let Some(r) = region {
+            url = format!("{url}?region={r}");
+        }
+        let resp = ureq::get(&url).call().map_err(map_ureq)?;
         let mut bytes = Vec::new();
         resp.into_reader().read_to_end(&mut bytes).context("PNG 응답 읽기")?;
         // 응답 헤더만 디코드해 크기 확인(전체 픽셀 디코드 없음) — 출력 메시지용.

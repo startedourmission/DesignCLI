@@ -11,6 +11,7 @@ members = [
     "crates/dcli-mcp",
     "crates/dcli-wasm",
     "crates/dcli-daemon",
+    "crates/dcli-psd",
     "examples/parity_spike",
 ]
 # dcli-wasm은 cdylib(wasm32 전용) → 기본 빌드/테스트에서 제외.
@@ -26,6 +27,7 @@ default-members = [
     "crates/dcli-shell-native",
     "crates/dcli-mcp",
     "crates/dcli-daemon",
+    "crates/dcli-psd",
     "examples/parity_spike",
 ]
 
@@ -42,6 +44,7 @@ dcli-tile = { path = "crates/dcli-tile" }
 dcli-model = { path = "crates/dcli-model" }
 dcli-raster = { path = "crates/dcli-raster" }
 dcli-gpu = { path = "crates/dcli-gpu" }
+dcli-psd = { path = "crates/dcli-psd" }
 # default-features=false → 소비자가 필요 feature 명시(wasm은 fs-sources/cli 둘 다 끔).
 dcli-cli = { path = "crates/dcli-cli", default-features = false }
 
@@ -65,6 +68,8 @@ tower-http = { version = "0.6", features = ["fs", "cors"] }
 # CLI --server 모드용 동기 HTTP 클라(작고 blocking — 단발 CLI에 적합). rustls로 vendored openssl 회피.
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 tracing = "0.1"
+# PSD import 전용(read). export는 dcli-psd가 손수 인코딩(쓰기 크레이트 없음).
+psd = "0.3"
 # 텍스트 래스터라이저(dcli-raster) — 순수 Rust, wasm 호환. 폰트는 Pretendard(OFL) 번들.
 ab_glyph = "0.2"
 wasm-bindgen = "0.2"

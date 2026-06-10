@@ -45,6 +45,10 @@ const P = {
   alignT: svg`<path d="M2 2.5h12"/><rect x="4" y="4.5" width="3" height="8" rx=".5"/><rect x="9" y="4.5" width="3" height="5" rx=".5"/>`,
   alignCV: svg`<path d="M2 8h12"/><rect x="4" y="3" width="3" height="10" rx=".5"/><rect x="9" y="5" width="3" height="6" rx=".5"/>`,
   alignB: svg`<path d="M2 13.5h12"/><rect x="4" y="3.5" width="3" height="8" rx=".5"/><rect x="9" y="6.5" width="3" height="5" rx=".5"/>`,
+  brush: svg`<path d="M3.5 12.5c1.8-.4 2.4-.9 2.8-2.7l6-6a1.5 1.5 0 10-2.1-2.1l-6 6c-1.8.4-2.3 1-2.7 2.8z"/>`,
+  frame: svg`<path d="M4.5 1.5v13M11.5 1.5v13M1.5 4.5h13M1.5 11.5h13"/>`,
+  folder: svg`<path d="M1.5 4.5a1 1 0 011-1h3.2l1.4 1.8h6.4a1 1 0 011 1v5.7a1 1 0 01-1 1h-11a1 1 0 01-1-1z"/>`,
+  download: svg`<path d="M8 2.5V10M5 7.5l3 3 3-3M3 13h10"/>`,
 };
 const icon = (name, size = 15) => svg`
   <svg viewBox="0 0 16 16" width=${size} height=${size} fill="none"
@@ -59,7 +63,7 @@ const SHAPES = [
   { id: "rounded-rect", ic: "rounded", label: "둥근 사각형" },
 ];
 const isShapeTool = (t) => SHAPES.some((s) => s.id === t);
-const needsWidth = (t) => t === "line" || t === "stroke-rect" || t === "stroke-ellipse";
+const needsWidth = (t) => t === "line" || t === "stroke-rect" || t === "stroke-ellipse" || t === "brush";
 
 // 공용 컨트롤 스타일(Figma풍: 28px 컨트롤, 보더리스 input, 블루 포커스).
 const controls = css`
@@ -176,7 +180,7 @@ class DxTopbar extends LitElement {
   }
   render() {
     const cur = SHAPES.find((s) => s.id === this._shape) ?? SHAPES[0];
-    const isDraw = this.tool !== "select" && this.tool !== "eyedrop";
+    const isDraw = this.tool !== "select" && this.tool !== "eyedrop" && this.tool !== "frame";
     const docId = new URLSearchParams(location.search).get("doc");
     const t = (id, ic, title) => html`<button class=${this.tool === id ? "active" : ""}
       title=${title} @click=${() => this._pick(id)}>${icon(ic)}</button>`;
@@ -187,6 +191,8 @@ class DxTopbar extends LitElement {
         <button class="dd ${isShapeTool(this.tool) ? "active" : ""}" title="도형 (${cur.label})"
           @click=${() => { this._menu = !this._menu; }}>${icon(cur.ic)}${icon("chevDown", 9)}</button>
         ${t("line", "line", "선 (L)")}
+        ${t("brush", "brush", "브러시 (B)")}
+        ${t("frame", "frame", "프레임 (F)")}
         ${t("text", "text", "텍스트 (T)")}
         <button title="이미지(PNG) 레이어" @click=${() => this.renderRoot.querySelector("#png").click()}>${icon("image")}</button>
         ${t("eyedrop", "dropper", "스포이드 (I)")}
@@ -471,6 +477,33 @@ class DxCanvas extends LitElement {
     return null;
   }
 
+  // ---- 스냅 가이드 ----
+  /** 이동 스냅 타깃(doc px) — 비선택·표시 레이어의 AABB left/centerX/right(+세로 동등) + 문서 가장자리·중심.
+   *  드래그 시작 시 한 번 수집(드래그 중 레이어 변형 없음). */
+  _snapTargets(excludeIds) {
+    const W = this.app.editor.width(), H = this.app.editor.height();
+    const xs = [0, W / 2, W], ys = [0, H / 2, H];
+    const skip = new Set(excludeIds ?? []);
+    for (const l of this.app.layers()) {
+      if (skip.has(l.id) || !l.visible) continue;
+      const b = this.app.displayAABB(l);
+      if (!b) continue;
+      xs.push(b.x, b.x + b.w / 2, b.x + b.w);
+      ys.push(b.y, b.y + b.h / 2, b.y + b.h);
+    }
+    return { xs, ys };
+  }
+  /** 한 축 스냅 — 이동 중 박스 모서리·중심(edges)과 타깃들 중 가장 가까운 쌍(임계 이내). */
+  _snapAxis(edges, targets, thr) {
+    let best = null;
+    for (const ed of edges)
+      for (const t of targets) {
+        const diff = t - ed;
+        if (Math.abs(diff) <= thr && (!best || Math.abs(diff) < Math.abs(best.diff))) best = { diff, t };
+      }
+    return best;
+  }
+
   // ---- 포인터 ----
   _down(e) {
     if (this._space) {
@@ -487,6 +520,14 @@ class DxCanvas extends LitElement {
       const i = (Math.floor(p.y) * W + Math.floor(p.x)) * 4;
       const rgba = [buf[i], buf[i + 1], buf[i + 2], 255];
       this.dispatchEvent(new CustomEvent("picked-color", { detail: rgba, bubbles: true, composed: true }));
+      return;
+    }
+    if (tool === "brush") {
+      this._drag = { mode: "brush", pts: [p.x, p.y], last: p };
+      return;
+    }
+    if (tool === "frame") {
+      this._drag = { mode: "frame", start: p, cur: p };
       return;
     }
     if (tool === "text") {
@@ -548,11 +589,24 @@ class DxCanvas extends LitElement {
       if (!this.app.selectedIds.includes(hit)) this.app.select(hit);
       const all = this.app.layers();
       const bases = new Map();
+      let box = null; // 선택 레이어들의 합쳐진 AABB(스냅 기준 — 이동 중엔 dx/dy만 더하면 됨).
       for (const id of this.app.selectedIds) {
         const l = all.find((v) => v.id === id);
-        if (l) bases.set(id, l.offset ?? [0, 0]);
+        if (!l) continue;
+        bases.set(id, l.offset ?? [0, 0]);
+        const bb = this.app.displayAABB(l);
+        if (!bb) continue;
+        if (!box) box = { ...bb };
+        else {
+          const x2 = Math.max(box.x + box.w, bb.x + bb.w), y2 = Math.max(box.y + box.h, bb.y + bb.h);
+          box.x = Math.min(box.x, bb.x); box.y = Math.min(box.y, bb.y);
+          box.w = x2 - box.x; box.h = y2 - box.y;
+        }
       }
-      this._drag = { mode: "move", ids: [...this.app.selectedIds], bases, start: p, dx: 0, dy: 0 };
+      this._drag = {
+        mode: "move", ids: [...this.app.selectedIds], bases, start: p, dx: 0, dy: 0,
+        box, snap: this._snapTargets(this.app.selectedIds), guides: null,
+      };
       this.style.cursor = "grabbing";
       return;
     }
@@ -571,6 +625,18 @@ class DxCanvas extends LitElement {
     if (d.mode === "move") {
       d.dx = Math.round(p.x - d.start.x);
       d.dy = Math.round(p.y - d.start.y);
+      // ★스냅★ 합쳐진 AABB의 left/centerX/right(+세로)를 타깃과 비교, 화면 6px 이내면 보정.
+      d.guides = null;
+      if (d.box && d.snap) {
+        const thr = 6 / (this._zoom || 1);
+        const bx = this._snapAxis(
+          [d.box.x + d.dx, d.box.x + d.box.w / 2 + d.dx, d.box.x + d.box.w + d.dx], d.snap.xs, thr);
+        const by = this._snapAxis(
+          [d.box.y + d.dy, d.box.y + d.box.h / 2 + d.dy, d.box.y + d.box.h + d.dy], d.snap.ys, thr);
+        if (bx) d.dx = Math.round(d.dx + bx.diff);
+        if (by) d.dy = Math.round(d.dy + by.diff);
+        if (bx || by) d.guides = { x: bx ? [bx.t] : [], y: by ? [by.t] : [] };
+      }
       this._drawOverlay();
     } else if (d.mode === "marquee") {
       d.cur = p;
@@ -605,6 +671,17 @@ class DxCanvas extends LitElement {
       // 반대쪽 핸들(anchor)이 제자리에 머물도록 offset 보정.
       d.provOffset = this.app.computeAnchoredOffset(d.sel, d.provScale, null, d.asrc);
       this._drawOverlay();
+    } else if (d.mode === "brush") {
+      // 점 간 최소 간격(줌 보정)으로 thinning — 과밀 점 방지.
+      const minD = 1.5 / (this._zoom || 1);
+      if (Math.hypot(p.x - d.last.x, p.y - d.last.y) >= minD) {
+        d.pts.push(p.x, p.y);
+        d.last = p;
+        this._drawBrushGhost();
+      }
+    } else if (d.mode === "frame") {
+      d.cur = p;
+      this._drawOverlay();
     } else if (d.mode === "draw") {
       d.cur = p;
       this._drawGhost();
@@ -616,6 +693,24 @@ class DxCanvas extends LitElement {
     this._drag = null;
     this.style.cursor = this._space ? "grab" : "";
     if (d.mode === "pan") return;
+    if (d.mode === "brush") {
+      const s = this.toolState;
+      if (d.pts.length >= 2) {
+        this.app.apply([B.addPaintLayer("brush", B.shapes([B.path(d.pts, s.width, s.rgba)]))]);
+      }
+      this._drawOverlay();
+      return;
+    }
+    if (d.mode === "frame") {
+      const x = Math.min(d.start.x, d.cur.x), y = Math.min(d.start.y, d.cur.y);
+      const w = Math.abs(d.cur.x - d.start.x), h = Math.abs(d.cur.y - d.start.y);
+      if (w >= 8 && h >= 8) {
+        const n = this.app.frames().length + 1;
+        this.app.addFrame(`Frame ${n}`, x, y, w, h);
+      }
+      this._drawOverlay();
+      return;
+    }
     if (d.mode === "move") {
       if (d.dx !== 0 || d.dy !== 0) {
         // 선택된 모든 레이어를 하나의 apply 배치로 함께 이동.
@@ -725,6 +820,7 @@ class DxCanvas extends LitElement {
     const o = this.overlay.getContext("2d");
     const z = this._zoom;
     o.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    this._drawFrames(o, z);
     const s = this.toolState; const [r, g, b, a] = s.rgba;
     o.strokeStyle = `rgba(${r},${g},${b},${a / 255})`;
     o.fillStyle = `rgba(${r},${g},${b},${(a / 255) * 0.45})`;
@@ -742,12 +838,56 @@ class DxCanvas extends LitElement {
     }
     o.setLineDash([]);
   }
+  /** 브러시 진행 중 폴리라인 ghost. */
+  _drawBrushGhost() {
+    const o = this.overlay.getContext("2d");
+    const z = this._zoom;
+    o.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    this._drawFrames(o, z);
+    const d = this._drag, s = this.toolState;
+    if (!d || d.pts.length < 2) return;
+    const [r, g, b, a] = s.rgba;
+    o.strokeStyle = `rgba(${r},${g},${b},${a / 255})`;
+    o.lineWidth = s.width * z; o.lineCap = "round"; o.lineJoin = "round";
+    o.beginPath();
+    o.moveTo(d.pts[0] * z, d.pts[1] * z);
+    for (let i = 2; i < d.pts.length; i += 2) o.lineTo(d.pts[i] * z, d.pts[i + 1] * z);
+    o.stroke();
+  }
+
+  /** Frame 외곽선 + 이름 라벨(항상 표시 — Figma의 캔버스). */
+  _drawFrames(o, z) {
+    const frames = this.app.frames?.() ?? [];
+    const fg = getComputedStyle(this).getPropertyValue("--fg-3").trim() || "#7f7f7f";
+    o.save();
+    o.font = "11px Inter, sans-serif";
+    for (const f of frames) {
+      o.strokeStyle = fg; o.lineWidth = 1; o.setLineDash([]);
+      o.strokeRect(f.x * z + 0.5, f.y * z + 0.5, f.w * z, f.h * z);
+      o.fillStyle = fg;
+      o.fillText(f.name, f.x * z, f.y * z - 5);
+    }
+    // 프레임 드래그 중 미리보기.
+    const d = this._drag;
+    if (d?.mode === "frame") {
+      const x = Math.min(d.start.x, d.cur.x) * z, y = Math.min(d.start.y, d.cur.y) * z;
+      const w = Math.abs(d.cur.x - d.start.x) * z, h = Math.abs(d.cur.y - d.start.y) * z;
+      o.setLineDash([5, 4]);
+      o.strokeStyle = fg;
+      o.strokeRect(x, y, w, h);
+      o.setLineDash([]);
+    }
+    o.restore();
+  }
+
   _drawOverlay() {
     if (!this.overlay) return;
     const o = this.overlay.getContext("2d");
     o.clearRect(0, 0, this.overlay.width, this.overlay.height);
+    this._drawFrames(o, this._zoom);
     if (this._text) return; // 텍스트 편집 중엔 셀렉션 크롬 숨김(입력에 집중).
     if (this._drag?.mode === "draw") { this._drawGhost(); return; }
+    if (this._drag?.mode === "brush") { this._drawBrushGhost(); return; }
     const acc = getComputedStyle(this).getPropertyValue("--accent").trim() || "#0d99ff";
     // 마퀴(점선 사각형, --accent 색).
     if (this._drag?.mode === "marquee") {
@@ -785,6 +925,20 @@ class DxCanvas extends LitElement {
         o.fillRect(h.p.x - HANDLE / 2, h.p.y - HANDLE / 2, HANDLE, HANDLE);
         o.strokeStyle = acc; o.lineWidth = 1;
         o.strokeRect(h.p.x - HANDLE / 2 + 0.5, h.p.y - HANDLE / 2 + 0.5, HANDLE - 1, HANDLE - 1);
+      }
+    }
+    // 스냅 가이드(move 드래그가 스냅 중일 때만) — 1px 빨간 라인, 캔버스 전체 길이.
+    const gd = this._drag?.mode === "move" ? this._drag.guides : null;
+    if (gd) {
+      const z = this._zoom;
+      o.strokeStyle = "#f24822"; o.lineWidth = 1;
+      for (const gx of gd.x) {
+        const px = Math.round(gx * z) + 0.5;
+        o.beginPath(); o.moveTo(px, 0); o.lineTo(px, this.overlay.height); o.stroke();
+      }
+      for (const gy of gd.y) {
+        const py = Math.round(gy * z) + 0.5;
+        o.beginPath(); o.moveTo(0, py); o.lineTo(this.overlay.width, py); o.stroke();
       }
     }
   }
@@ -915,14 +1069,14 @@ class DxLayerPanel extends LitElement {
               <button title="위로" @click=${(e) => { e.stopPropagation(); this.app.raise(l.id); }}>${icon("chevUpS", 9)}</button>
               <button title="아래로" @click=${(e) => { e.stopPropagation(); this.app.lower(l.id); }}>${icon("chevDownS", 9)}</button>
             </span>
-            <span class="tic">${icon("square", 11)}</span>
+            <span class="tic">${icon(l.kind === "group" ? "folder" : "square", 11)}</span>
             <span class="name" @dblclick=${(e) => { e.stopPropagation(); this._editing = l.id; }}>
               ${this._editing === l.id
                 ? html`<input .value=${l.name} autofocus
                     @click=${(e) => e.stopPropagation()}
                     @keydown=${(e) => { if (e.key === "Enter") this._rename(l.id, e.target.value); if (e.key === "Escape") this._editing = null; e.stopPropagation(); }}
                     @blur=${(e) => this._rename(l.id, e.target.value)} />`
-                : l.name}
+                : html`${l.name}${l.kind === "group" ? html` <span style="color:var(--fg-3)">(${l.children?.length ?? 0})</span>` : nothing}`}
             </span>
             <button class="b" title="표시/숨김"
               @click=${(e) => { e.stopPropagation(); this.app.apply([B.setProps(l.id, { visible: !l.visible })]); }}>
@@ -931,6 +1085,19 @@ class DxLayerPanel extends LitElement {
               @click=${(e) => { e.stopPropagation(); this.app.apply([B.deleteLayer(l.id)]); }}>${icon("trash", 13)}</button>
           </div>`)}
       </div>
+      ${(this.app?.frames?.() ?? []).length ? html`
+        <div class="head" style="border-top:1px solid var(--line)"><span>프레임</span></div>
+        <div class="list" style="flex:none; max-height:160px">
+          ${this.app.frames().map((f) => html`
+            <div class="row">
+              <span class="tic">${icon("frame", 11)}</span>
+              <span class="name" title="(${f.x},${f.y}) ${f.w}x${f.h}">${f.name}</span>
+              <button class="b" title="PNG export"
+                @click=${(e) => { e.stopPropagation(); this.app.exportFrame(f); }}>${icon("download", 13)}</button>
+              <button class="b danger" title="프레임 제거"
+                @click=${(e) => { e.stopPropagation(); this.app.removeFrame(f.id); }}>${icon("trash", 13)}</button>
+            </div>`)}
+        </div>` : nothing}
     `;
   }
 }
@@ -1116,7 +1283,23 @@ class AppShell extends LitElement {
     const ids = this.app?.selectedIds ?? []; // 단축키는 선택 전체에 적용(하나의 apply 배치).
     const k = e.key.toLowerCase();
     if (meta && k === "z") { e.preventDefault(); e.shiftKey ? this.app.redo() : this.app.undo(); return; }
+    if (meta && k === "g") { e.preventDefault(); e.shiftKey ? this.app.ungroupSelected() : this.app.groupSelected(); return; }
     if (meta && k === "d") { e.preventDefault(); this.app.duplicateMany(ids); return; }
+    // 내부 클립보드: Cmd+C = 선택 id 기억, Cmd+V = 살아있는 것만 복제.
+    if (meta && k === "c") {
+      if (ids.length) { e.preventDefault(); this.app.copy(ids); }
+      return;
+    }
+    if (meta && k === "v") {
+      if (this.app.clipboardIds?.length) { e.preventDefault(); this.app.paste(); }
+      return;
+    }
+    // Shift+H/V = 선택 레이어 좌우/상하 뒤집기(선택 없으면 도구 단축키로 폴스루).
+    if (!meta && e.shiftKey && ids.length && (k === "h" || k === "v")) {
+      e.preventDefault();
+      this.app.flipMany(ids, k === "h" ? "x" : "y");
+      return;
+    }
     if (meta && (e.key === "]" || e.key === "[")) {
       e.preventDefault();
       if (ids.length) e.key === "]" ? this.app.raiseMany(ids) : this.app.lowerMany(ids);
@@ -1138,7 +1321,7 @@ class AppShell extends LitElement {
     if (e.shiftKey && e.key === "0") { this._canvas?.zoomCmd("reset"); return; }
     if (e.shiftKey && e.key === "1") { this._canvas?.zoomCmd("fit"); return; }
     if (!meta) {
-      const map = { v: "select", r: "rect", e: "ellipse", l: "line", t: "text", i: "eyedrop" };
+      const map = { v: "select", r: "rect", e: "ellipse", l: "line", t: "text", i: "eyedrop", b: "brush", f: "frame" };
       if (map[k]) { this._topbar?.setTool(map[k]); return; }
       if (e.key === "Escape") this.app.select(null);
     }

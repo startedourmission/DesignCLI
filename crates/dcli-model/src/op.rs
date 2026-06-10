@@ -56,12 +56,26 @@ pub enum Op {
         #[serde(skip)]
         forced_id: Option<NodeId>,
     },
-    /// 노드 삭제(역패치가 노드 전체 + 순서 위치를 복원).
+    /// 노드 삭제(역패치가 노드 전체 + 순서 위치를 복원). 그룹이면 자식까지 재귀 삭제·복원.
     DeleteLayer { id: NodeId },
     /// 노드를 새 순서 인덱스로 이동.
     MoveLayer { id: NodeId, to: usize },
     /// 노드 속성 일괄 변경(name/visible/opacity/blend).
     SetProps { id: NodeId, props: NodeProps },
+    /// 최상위 노드들을 그룹으로 묶는다. ids는 루트 order에 있어야 하며 bottom-to-top
+    /// 상대 순서를 유지한 채 그룹의 children이 된다. 그룹 노드는 멤버 중 가장 위
+    /// 인덱스 위치에 들어간다.
+    GroupLayers {
+        ids: Vec<NodeId>,
+        name: String,
+        /// redo 시 같은 id 재사용(AddPaintLayer와 동일 규율). 직렬화 제외.
+        #[serde(skip)]
+        forced_id: Option<NodeId>,
+    },
+    /// 그룹 해제 — 자식들을 그룹이 있던 위치에 순서대로 펼친다.
+    Ungroup { id: NodeId },
+    /// Frame 목록 전체 교체(단순·원자적 — undo는 이전 목록 복원).
+    SetFrames { frames: Vec<crate::Frame> },
 }
 
 /// 역패치. undo 시 적용된다. op과 1:1 대응하지 않을 수 있다(예: 삭제의 역은 삽입).
@@ -84,6 +98,23 @@ pub enum Inverse {
     MoveBack { id: NodeId, to: usize },
     /// 속성 변경의 역 = 이전 속성 복원.
     RestoreProps { id: NodeId, props: NodeProps },
+    /// 그룹 삭제의 역 = 그룹 + 자식 노드 전체 + 표면들 복원(그룹 노드는 index 위치로).
+    ReinsertDeletedGroup {
+        group: Node,
+        index: usize,
+        children: Vec<Node>,
+        surfaces: Vec<(SurfaceId, Surface)>,
+    },
+    /// 그룹 묶기의 역 = 그룹 제거 + 자식들을 원래 루트 인덱스로 복원.
+    UngroupRestore {
+        group_id: NodeId,
+        /// (자식 id, 원래 루트 order 인덱스) — 인덱스 오름차순.
+        restore: Vec<(NodeId, usize)>,
+    },
+    /// 그룹 해제의 역 = 그룹 노드 재구성(자식들을 다시 그룹 안으로).
+    RegroupRestore { group: Node, index: usize },
+    /// Frame 목록 복원.
+    RestoreFrames { frames: Vec<crate::Frame> },
 }
 
 impl Op {
@@ -103,13 +134,42 @@ impl Op {
                 Ok(Inverse::RemoveAdded { id })
             }
             Op::DeleteLayer { id } => {
+                // ★검증 우선 규율★: 존재 확인 후에만 변형(부분 변형 금지).
+                let is_group = matches!(
+                    doc.get(*id).ok_or(OpError::NodeNotFound(*id))?.kind,
+                    NodeKind::Group { .. }
+                );
+                if is_group {
+                    // 그룹: 자식 노드 + 표면까지 재귀 회수(중첩 그룹 포함).
+                    let (group, index) = doc.remove_node(*id).expect("존재 확인됨");
+                    let mut children = Vec::new();
+                    let mut surfaces = Vec::new();
+                    let mut stack: Vec<NodeId> = match &group.kind {
+                        NodeKind::Group { children } => children.clone(),
+                        _ => unreachable!(),
+                    };
+                    while let Some(cid) = stack.pop() {
+                        if let Some(child) = doc.take_node_entry(cid) {
+                            if let NodeKind::Paint { surface } = child.kind {
+                                if let Some(s) = doc.pixels_mut().remove(surface) {
+                                    surfaces.push((surface, s));
+                                }
+                            }
+                            if let NodeKind::Group { children } = &child.kind {
+                                stack.extend(children.iter().copied());
+                            }
+                            children.push(child);
+                        }
+                    }
+                    return Ok(Inverse::ReinsertDeletedGroup { group, index, children, surfaces });
+                }
                 let (node, index) = doc.remove_node(*id).ok_or(OpError::NodeNotFound(*id))?;
                 // 페인트 노드면 표면도 함께 회수(undo 시 복원).
                 let surface = match node.kind {
                     NodeKind::Paint { surface } => {
                         doc.pixels_mut().remove(surface).map(|s| (surface, s))
                     }
-                    NodeKind::Group => None,
+                    NodeKind::Group { .. } => None,
                 };
                 Ok(Inverse::ReinsertDeleted { node, index, surface })
             }
@@ -129,6 +189,49 @@ impl Op {
                 node.rotation = props.rotation;
                 node.meta = props.meta.clone();
                 Ok(Inverse::RestoreProps { id: *id, props: prev })
+            }
+            Op::GroupLayers { ids, name, forced_id } => {
+                // ★검증 우선★: 전 멤버가 루트 order에 있고 중복이 없어야 변형 시작.
+                if ids.is_empty() {
+                    return Err(OpError::NodeNotFound(NodeId(u64::MAX)));
+                }
+                let mut indices = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let idx = doc.order_index(*id).ok_or(OpError::NodeNotFound(*id))?;
+                    indices.push((*id, idx));
+                }
+                // bottom-to-top 상대 순서 유지: 인덱스 오름차순 정렬.
+                indices.sort_by_key(|&(_, i)| i);
+                let top_index = indices.last().expect("비어있지 않음").1;
+                // 자식들을 루트 order에서 제거(맵 유지). 위에서부터 제거해 인덱스 안정.
+                for &(cid, _) in indices.iter().rev() {
+                    doc.remove_from_order(cid);
+                }
+                // 그룹 노드 생성 — 멤버 중 최상단 위치(제거된 만큼 보정)에 삽입.
+                let gid = forced_id.unwrap_or_else(|| doc.alloc_node_id());
+                let children: Vec<NodeId> = indices.iter().map(|&(c, _)| c).collect();
+                let mut group = Node::paint(gid, name.clone(), SurfaceId(0));
+                group.kind = NodeKind::Group { children };
+                let insert_at = top_index + 1 - indices.len();
+                doc.insert_node_at(group, insert_at);
+                Ok(Inverse::UngroupRestore { group_id: gid, restore: indices })
+            }
+            Op::Ungroup { id } => {
+                // ★검증 우선★: 그룹인지 확인 후 변형.
+                let children = match &doc.get(*id).ok_or(OpError::NodeNotFound(*id))?.kind {
+                    NodeKind::Group { children } => children.clone(),
+                    _ => return Err(OpError::NodeNotFound(*id)),
+                };
+                let (group, index) = doc.remove_node(*id).expect("존재 확인됨");
+                // 자식들을 그룹이 있던 위치에 bottom-to-top 순서대로 펼친다.
+                for (i, cid) in children.iter().enumerate() {
+                    doc.insert_order_at(*cid, index + i);
+                }
+                Ok(Inverse::RegroupRestore { group, index })
+            }
+            Op::SetFrames { frames } => {
+                let prev = std::mem::replace(&mut doc.frames, frames.clone());
+                Ok(Inverse::RestoreFrames { frames: prev })
             }
         }
     }
@@ -167,6 +270,38 @@ impl Inverse {
                 node.meta = props.meta;
                 Ok(())
             }
+            Inverse::ReinsertDeletedGroup { group, index, children, surfaces } => {
+                for (sid, s) in surfaces {
+                    doc.pixels_mut().restore(sid, s);
+                }
+                for child in children {
+                    doc.put_node_entry(child);
+                }
+                doc.insert_node_at(group, index);
+                Ok(())
+            }
+            Inverse::UngroupRestore { group_id, restore } => {
+                // 그룹 노드 제거(자식 엔트리는 맵에 그대로) + 자식들을 원래 인덱스로.
+                doc.remove_node(group_id).ok_or(OpError::NodeNotFound(group_id))?;
+                for (cid, idx) in restore {
+                    doc.insert_order_at(cid, idx);
+                }
+                Ok(())
+            }
+            Inverse::RegroupRestore { group, index } => {
+                // 자식들을 루트 order에서 다시 빼고 그룹 노드 복원.
+                if let NodeKind::Group { children } = &group.kind {
+                    for cid in children.iter().rev() {
+                        doc.remove_from_order(*cid);
+                    }
+                }
+                doc.insert_node_at(group, index);
+                Ok(())
+            }
+            Inverse::RestoreFrames { frames } => {
+                doc.frames = frames;
+                Ok(())
+            }
         }
     }
 }
@@ -181,4 +316,90 @@ pub fn add_paint_with_surface(
 ) -> Op {
     let sid = doc.add_surface(surface);
     Op::AddPaintLayer { name: name.into(), surface: sid, index, forced_id: None }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    use crate::History;
+    use dcli_color::BitDepth;
+
+    fn doc3() -> History {
+        // 레이어 3개(아래부터 a, b, c).
+        let mut h = History::new(Document::new(8, 8, BitDepth::U8));
+        for name in ["a", "b", "c"] {
+            let op = add_paint_with_surface(&mut h.doc, name, Surface::new(8, 8), None);
+            h.apply(op).unwrap();
+        }
+        h
+    }
+
+    #[test]
+    fn group_then_ungroup_roundtrip() {
+        let mut h = doc3();
+        let (a, b) = (h.doc.order()[0], h.doc.order()[1]);
+        h.apply(Op::GroupLayers { ids: vec![a, b], name: "g".into(), forced_id: None }).unwrap();
+        // 루트: [group, c] — 그룹은 멤버 최상단 위치(인덱스 1 → 제거 보정 후 0).
+        assert_eq!(h.doc.order().len(), 2);
+        let gid = h.doc.order()[0];
+        match &h.doc.get(gid).unwrap().kind {
+            NodeKind::Group { children } => assert_eq!(children, &vec![a, b]),
+            _ => panic!("그룹이어야"),
+        }
+        // ungroup → 원래 평면 복원.
+        h.apply(Op::Ungroup { id: gid }).unwrap();
+        assert_eq!(h.doc.order(), &[a, b, h.doc.order()[2]]);
+        assert!(h.doc.get(gid).is_none(), "그룹 노드 제거됨");
+    }
+
+    #[test]
+    fn group_undo_restores_flat_order() {
+        let mut h = doc3();
+        let before: Vec<_> = h.doc.order().to_vec();
+        let (a, b) = (before[0], before[1]);
+        h.apply(Op::GroupLayers { ids: vec![a, b], name: "g".into(), forced_id: None }).unwrap();
+        assert!(h.undo().unwrap());
+        assert_eq!(h.doc.order(), &before[..], "undo 후 평면 순서 복원");
+        // redo는 같은 그룹 id 재사용(forced_id 규율).
+        assert!(h.redo().unwrap());
+        let gid1 = h.doc.order()[0];
+        assert!(h.undo().unwrap());
+        assert!(h.redo().unwrap());
+        assert_eq!(h.doc.order()[0], gid1, "redo가 같은 그룹 id 재사용");
+    }
+
+    #[test]
+    fn delete_group_restores_children_and_surfaces() {
+        let mut h = doc3();
+        let (a, b) = (h.doc.order()[0], h.doc.order()[1]);
+        h.apply(Op::GroupLayers { ids: vec![a, b], name: "g".into(), forced_id: None }).unwrap();
+        let gid = h.doc.order()[0];
+        let surfaces_before = h.doc.pixels().len();
+        let nodes_before = h.doc.node_count();
+
+        h.apply(Op::DeleteLayer { id: gid }).unwrap();
+        assert_eq!(h.doc.pixels().len(), surfaces_before - 2, "자식 표면 2개 회수");
+        assert!(h.doc.get(a).is_none() && h.doc.get(b).is_none(), "자식 노드 제거");
+
+        h.undo().unwrap();
+        assert_eq!(h.doc.pixels().len(), surfaces_before, "표면 복원");
+        assert_eq!(h.doc.node_count(), nodes_before, "노드 복원");
+        match &h.doc.get(gid).unwrap().kind {
+            NodeKind::Group { children } => assert_eq!(children, &vec![a, b]),
+            _ => panic!("그룹 복원"),
+        }
+    }
+
+    #[test]
+    fn set_frames_undo() {
+        let mut h = History::new(Document::new(8, 8, BitDepth::U8));
+        let f = crate::Frame { id: 0, name: "card".into(), x: -100, y: 50, w: 200, h: 100 };
+        h.apply(Op::SetFrames { frames: vec![f.clone()] }).unwrap();
+        assert_eq!(h.doc.frames.len(), 1);
+        assert_eq!(h.doc.find_frame("card"), Some(&f));
+        h.undo().unwrap();
+        assert!(h.doc.frames.is_empty());
+        h.redo().unwrap();
+        assert_eq!(h.doc.frames.len(), 1);
+    }
 }

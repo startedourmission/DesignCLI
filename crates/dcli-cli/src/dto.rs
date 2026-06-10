@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 pub fn node_kind_str(node: &Node) -> &'static str {
     match node.kind {
         NodeKind::Paint { .. } => "paint",
-        NodeKind::Group => "group",
+        NodeKind::Group { .. } => "group",
     }
 }
 
@@ -41,7 +41,22 @@ pub fn node_json(node: &Node) -> Value {
         "rotation": node.rotation,
         "meta": node.meta,
         "surface": node.surface_id().map(|s| s.0),
+        // 그룹이면 자식 id 목록(bottom-to-top), 아니면 null.
+        "children": match &node.kind {
+            NodeKind::Group { children } => Some(children.iter().map(|c| c.0).collect::<Vec<_>>()),
+            _ => None,
+        },
     })
+}
+
+/// Frame 목록 JSON — 무한 작업영역의 export 단위.
+pub fn frames_json(doc: &Document) -> Value {
+    let arr: Vec<Value> = doc
+        .frames
+        .iter()
+        .map(|f| json!({ "id": f.id, "name": f.name, "x": f.x, "y": f.y, "w": f.w, "h": f.h }))
+        .collect();
+    json!({ "frames": arr })
 }
 
 /// 문서 메타 JSON(희소, 인지 루프 1단계).

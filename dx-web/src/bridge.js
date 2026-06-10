@@ -45,3 +45,10 @@ export const setRotation = (id, rotation) => ({ op: "set_props", id: ref(id), pa
 function ref(id) {
   return typeof id === "string" ? { bind: id } : { node: id };
 }
+// 자유곡선(브러시) — points = [x0,y0,x1,y1,...].
+export const path = (points, width, rgba) => ({ shape: "path", points, width, rgba });
+// 그룹 묶기/해제.
+export const groupLayers = (ids, name = "group") => ({ op: "group_layers", ids: ids.map(ref), name });
+export const ungroup = (id) => ({ op: "ungroup", id: ref(id) });
+// Frame 목록 전체 교체(무한 작업영역의 export 단위).
+export const setFrames = (frames) => ({ op: "set_frames", frames });
