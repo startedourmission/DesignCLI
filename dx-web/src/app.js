@@ -9,6 +9,7 @@ export class Renderer {
     this._dirty = false;
     this._raf = 0;
     this.excludeId = null; // 텍스트 인라인 편집 중 화면에서만 제외할 레이어(문서 무오염).
+    this.viewport = { x: 0, y: 0, w: editor.width(), h: editor.height() };
     this.canvas = canvas; // setter가 ctx까지 함께 잡는다.
   }
   // 캔버스 교체 시 ctx도 반드시 같이 갱신(dx-canvas가 실제 캔버스를 주입할 때).
@@ -20,9 +21,16 @@ export class Renderer {
   get canvas() {
     return this._canvas;
   }
+  setViewport(x, y, w, h) {
+    const next = { x: Math.floor(x), y: Math.floor(y), w: Math.max(1, Math.ceil(w)), h: Math.max(1, Math.ceil(h)) };
+    const old = this.viewport;
+    this.viewport = next;
+    if (this.canvas.width !== next.w) this.canvas.width = next.w;
+    if (this.canvas.height !== next.h) this.canvas.height = next.h;
+    if (!old || old.x !== next.x || old.y !== next.y || old.w !== next.w || old.h !== next.h) this.markDirty();
+  }
   resize() {
-    this.canvas.width = this.editor.width();
-    this.canvas.height = this.editor.height();
+    this.setViewport(0, 0, this.editor.width(), this.editor.height());
     this.markDirty();
   }
   markDirty() {
@@ -35,11 +43,12 @@ export class Renderer {
     this._dirty = false;
     // 매 프레임 새 복사본을 받는다(메모리 detach 무관 — wasm이 소유 복사본 반환).
     // composite_rgba_excluding은 신형 wasm에만 있음 — 구버전 캐시여도 렌더는 살리기(feature-detect).
-    const canExclude = typeof this.editor.composite_rgba_excluding === "function";
+    const { x, y, w, h } = this.viewport;
+    const canExclude = typeof this.editor.composite_region_rgba_excluding === "function";
     const buf = this.excludeId != null && canExclude
-      ? this.editor.composite_rgba_excluding(this.excludeId)
-      : this.editor.composite_rgba();
-    const img = new ImageData(buf, this.editor.width(), this.editor.height());
+      ? this.editor.composite_region_rgba_excluding(this.excludeId, x, y, w, h)
+      : this.editor.composite_region_rgba(x, y, w, h);
+    const img = new ImageData(buf, w, h);
     this.ctx.putImageData(img, 0, 0);
   }
 }
@@ -51,6 +60,7 @@ export class App extends EventTarget {
     this.renderer = renderer;
     this.live = null; // 라이브 모드면 LiveLink. 설정 시 쓰기가 데몬을 경유.
     this.selectedIds = []; // 선택툴이 고른 레이어 node id 배열(빈 배열=선택 없음). [0]이 primary.
+    this.selectedFrameId = null;
     this.clipboardIds = []; // 앱 내부 클립보드 — Cmd+C로 기억한 레이어 id들(문서 내 복제용).
   }
 
@@ -65,11 +75,31 @@ export class App extends EventTarget {
     const frames = this.frames();
     const id = frames.reduce((m, f) => Math.max(m, f.id + 1), 0);
     this.apply([B.setFrames([...frames, { id, name, x: x | 0, y: y | 0, w: w | 0, h: h | 0 }])]);
+    this.selectFrame(id);
   }
 
   /** Frame 제거. */
   removeFrame(id) {
     this.apply([B.setFrames(this.frames().filter((f) => f.id !== id))]);
+    if (this.selectedFrameId === id) this.selectedFrameId = null;
+  }
+
+  /** Frame 속성 부분 변경. */
+  updateFrame(id, patch) {
+    const frames = this.frames();
+    const next = frames.map((f) => f.id === id ? { ...f, ...patch } : f);
+    this.apply([B.setFrames(next)]);
+  }
+
+  selectFrame(id) {
+    this.selectedFrameId = id == null ? null : id;
+    this.selectedIds = [];
+    this._notify();
+  }
+
+  getSelectedFrame() {
+    if (this.selectedFrameId == null) return null;
+    return this.frames().find((f) => f.id === this.selectedFrameId) ?? null;
   }
 
   /** Frame 단위 PNG export — 라이브면 데몬 URL, 로컬이면 wasm으로 즉석 인코딩. */
@@ -90,7 +120,7 @@ export class App extends EventTarget {
 
   /** 선택 레이어들을 그룹으로(Cmd+G). 2개 미만이면 무시. */
   groupSelected() {
-    if (this.selectedIds.length < 1) return;
+    if (this.selectedIds.length < 2) return;
     this.apply([B.groupLayers([...this.selectedIds])]);
     this.select(null);
   }
@@ -118,6 +148,7 @@ export class App extends EventTarget {
 
   /** 단일 선택(교체). null이면 해제. changed로 캔버스·패널 동기. */
   select(id) {
+    this.selectedFrameId = null;
     this.selectedIds = id == null ? [] : [id];
     this._notify();
   }
@@ -125,6 +156,7 @@ export class App extends EventTarget {
   /** Shift+클릭 토글 — 이미 선택이면 제거, 아니면 추가. */
   toggleSelect(id) {
     if (id == null) return;
+    this.selectedFrameId = null;
     this.selectedIds = this.selectedIds.includes(id)
       ? this.selectedIds.filter((v) => v !== id)
       : [...this.selectedIds, id];
@@ -133,6 +165,7 @@ export class App extends EventTarget {
 
   /** 다중 선택 교체(마퀴 등). 중복 제거. */
   selectMany(ids) {
+    this.selectedFrameId = null;
     this.selectedIds = [...new Set(ids ?? [])];
     this._notify();
   }
@@ -156,8 +189,40 @@ export class App extends EventTarget {
 
   /** 캔버스 좌표 hit-test → 최상위 레이어 id(없으면 null). */
   hitTest(x, y) {
+    const textId = this.textBoxHitTest(x, y);
+    if (textId != null) return textId;
     const id = this.editor.hit_test(Math.floor(x), Math.floor(y));
     return id < 0 ? null : id;
+  }
+
+  textBoxHitTest(x, y) {
+    for (const l of this.layers()) {
+      let meta = null;
+      try { meta = l.meta ? JSON.parse(l.meta) : null; } catch { /* ignore */ }
+      if (meta?.type !== "text") continue;
+      const box = this.textBoxBounds(l, meta);
+      if (!box) continue;
+      const p = this.xformOf(l).inv(x, y);
+      if (p.x >= box.x && p.x <= box.x + box.w && p.y >= box.y && p.y <= box.y + box.h) return l.id;
+    }
+    return null;
+  }
+
+  textBoxBounds(l, meta) {
+    const size = meta.size ?? 32;
+    const padX = Math.max(8, size * 0.22);
+    const padY = Math.max(5, size * 0.16);
+    const lines = String(meta.text ?? "").split("\n");
+    const ctx = this._measureCtx ??= document.createElement("canvas").getContext("2d");
+    ctx.font = `${size}px Inter, system-ui, sans-serif`;
+    const width = Math.max(1, ...lines.map((line) => ctx.measureText(line || " ").width));
+    const lineHeight = size * 1.25;
+    return {
+      x: (meta.x ?? 0) - padX,
+      y: (meta.y ?? 0) - padY,
+      w: width + padX * 2,
+      h: Math.max(lineHeight, lines.length * lineHeight) + padY * 2,
+    };
   }
 
   /** 레이어 불투명 바운드 [x,y,w,h](offset 반영) 또는 null. */
@@ -180,7 +245,21 @@ export class App extends EventTarget {
   /** 여러 레이어 삭제 — 하나의 apply 배치로. */
   deleteMany(ids) {
     if (!ids?.length) return;
-    this.apply(ids.map((id) => B.deleteLayer(id)));
+    const res = this.apply(ids.map((id) => B.deleteLayer(id)));
+    if (!res?.deferred) this.cleanupSingletonGroups();
+  }
+
+  cleanupSingletonGroups() {
+    const acts = [];
+    const visit = (l) => {
+      for (const child of l.children ?? []) visit(child);
+      if (l.kind !== "group") return;
+      const n = l.children?.length ?? 0;
+      if (n === 1) acts.push(B.ungroup(l.id));
+      else if (n === 0) acts.push(B.deleteLayer(l.id));
+    };
+    for (const root of this.layerTree()) visit(root);
+    if (acts.length) this.apply(acts);
   }
 
   /** 선택 레이어 offset 상대이동(화살표 nudge). */
@@ -436,9 +515,18 @@ export class App extends EventTarget {
   }
 
   /** 레이어 목록(파생 뷰, top-to-bottom). */
-  layers() {
+  layerTree() {
     const j = JSON.parse(this.editor.layers());
     return j.layers.slice().reverse(); // bottom-to-top → 표시용 top-to-bottom
+  }
+  layers() {
+    const out = [];
+    const visit = (l) => {
+      out.push(l);
+      for (const child of l.children ?? []) visit(child);
+    };
+    for (const root of this.layerTree()) visit(root);
+    return out;
   }
   canUndo() { return this.editor.can_undo(); }
   canRedo() { return this.editor.can_redo(); }

@@ -49,6 +49,20 @@ pub fn node_json(node: &Node) -> Value {
     })
 }
 
+fn node_json_tree(doc: &Document, node: &Node) -> Value {
+    let mut v = node_json(node);
+    if let NodeKind::Group { children } = &node.kind {
+        v["children"] = json!(
+            children
+                .iter()
+                .filter_map(|id| doc.get(*id))
+                .map(|child| node_json_tree(doc, child))
+                .collect::<Vec<_>>()
+        );
+    }
+    v
+}
+
 /// Frame 목록 JSON — 무한 작업영역의 export 단위.
 pub fn frames_json(doc: &Document) -> Value {
     let arr: Vec<Value> = doc
@@ -72,7 +86,7 @@ pub fn doc_info_json(doc: &Document) -> Value {
 
 /// bottom-to-top 레이어 목록 JSON(인지 루프 2단계).
 pub fn layer_list_json(doc: &Document) -> Value {
-    let arr: Vec<Value> = doc.iter_bottom_to_top().map(node_json).collect();
+    let arr: Vec<Value> = doc.iter_bottom_to_top().map(|n| node_json_tree(doc, n)).collect();
     json!({ "layers": arr })
 }
 

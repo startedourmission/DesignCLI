@@ -27,6 +27,8 @@ const P = {
   dropper: svg`<path d="M9.5 4.5l2-2a1.4 1.4 0 012 2l-2 2M8.5 5.5l-5 5L3 13l2.5-.5 5-5z"/>`,
   plus: svg`<path d="M8 3v10M3 8h10"/>`,
   chevDown: svg`<path d="M4 6.5l4 4 4-4"/>`,
+  chevRight: svg`<path d="M6.5 4l4 4-4 4"/>`,
+  chevLeft: svg`<path d="M9.5 4l-4 4 4 4"/>`,
   chevUpS: svg`<path d="M4 9.5l4-4 4 4"/>`,
   chevDownS: svg`<path d="M4 6.5l4 4 4-4"/>`,
   eye: svg`<path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>`,
@@ -45,10 +47,12 @@ const P = {
   alignT: svg`<path d="M2 2.5h12"/><rect x="4" y="4.5" width="3" height="8" rx=".5"/><rect x="9" y="4.5" width="3" height="5" rx=".5"/>`,
   alignCV: svg`<path d="M2 8h12"/><rect x="4" y="3" width="3" height="10" rx=".5"/><rect x="9" y="5" width="3" height="6" rx=".5"/>`,
   alignB: svg`<path d="M2 13.5h12"/><rect x="4" y="3.5" width="3" height="8" rx=".5"/><rect x="9" y="6.5" width="3" height="5" rx=".5"/>`,
-  brush: svg`<path d="M3.5 12.5c1.8-.4 2.4-.9 2.8-2.7l6-6a1.5 1.5 0 10-2.1-2.1l-6 6c-1.8.4-2.3 1-2.7 2.8z"/>`,
+  pencil: svg`<path d="M3 11.5l-.5 2 2-.5 7.8-7.8a1.4 1.4 0 00-2-2z"/><path d="M9.3 4.2l2.5 2.5"/>`,
   frame: svg`<path d="M4.5 1.5v13M11.5 1.5v13M1.5 4.5h13M1.5 11.5h13"/>`,
   folder: svg`<path d="M1.5 4.5a1 1 0 011-1h3.2l1.4 1.8h6.4a1 1 0 011 1v5.7a1 1 0 01-1 1h-11a1 1 0 01-1-1z"/>`,
   download: svg`<path d="M8 2.5V10M5 7.5l3 3 3-3M3 13h10"/>`,
+  play: svg`<path d="M5 3.5l7 4.5-7 4.5z" fill="currentColor" stroke="none"/>`,
+  share: svg`<circle cx="4" cy="8" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.8 7.1l4.4-2.2M5.8 8.9l4.4 2.2"/>`,
 };
 const icon = (name, size = 15) => svg`
   <svg viewBox="0 0 16 16" width=${size} height=${size} fill="none"
@@ -86,46 +90,66 @@ const controls = css`
   input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); }
 `;
 
-// ───────── 상단 툴바 ─────────
+// ───────── 플로팅 툴바 ─────────
 class DxTopbar extends LitElement {
   static properties = {
     app: { attribute: false }, zoom: { attribute: false }, theme: { attribute: false },
     tool: { state: true }, color: { state: true }, alpha: { state: true },
     width: { state: true }, radius: { state: true }, fontSize: { state: true },
-    _shape: { state: true }, _menu: { state: true }, _v: { state: true },
+    _shape: { state: true }, _menu: { state: true }, _exportMenu: { state: true }, _v: { state: true },
   };
   static styles = [controls, css`
     :host {
-      grid-area: topbar; display: flex; align-items: center; gap: 2px;
-      height: 44px; padding: 0 8px; background: var(--bg-panel);
-      border-bottom: 1px solid var(--line);
+      display: contents;
     }
-    .logo {
-      font-weight: 600; font-size: 12.5px; color: var(--fg); letter-spacing: 0.2px;
-      padding: 0 10px 0 6px; display: flex; align-items: center; gap: 7px;
+    .corner {
+      position: fixed; right: 18px; top: 18px; z-index: 82;
+      display: flex; align-items: center; gap: 2px;
+      padding: 6px; background: var(--bg-panel);
+      border: 1px solid var(--line); border-radius: 10px;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
     }
-    .logo .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
-    .tools { display: flex; gap: 1px; align-items: center; position: relative; }
+    .tools {
+      position: fixed; left: 50%; bottom: 22px; z-index: 80;
+      transform: translateX(-50%);
+      display: flex; gap: 2px; align-items: center;
+      padding: 7px 8px; background: var(--bg-panel);
+      border: 1px solid var(--line); border-radius: 10px;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.34);
+    }
     .tools button { width: 34px; height: 34px; padding: 0; justify-content: center; }
     .tools button.dd { width: 44px; gap: 1px; }
     .sep { width: 1px; height: 20px; background: var(--line); margin: 0 7px; }
     .menu {
-      position: absolute; left: 36px; top: 40px; z-index: 50; background: var(--bg-panel);
+      position: absolute; left: 42px; bottom: 45px; z-index: 50; background: var(--bg-panel);
       border: 1px solid var(--line); border-radius: 9px; padding: 5px; min-width: 170px;
       box-shadow: var(--shadow-menu); display: flex; flex-direction: column; gap: 1px;
     }
     .menu button { width: 100%; justify-content: flex-start; height: 30px; color: var(--fg); }
     .menu button:hover { background: var(--accent); color: #fff; }
     .menu .key { margin-left: auto; color: inherit; opacity: 0.5; font-size: 10px; }
-    .opts { display: flex; align-items: center; gap: 8px; margin-left: 4px; }
+    .export-menu {
+      position: fixed; right: 18px; top: 58px; z-index: 90; background: var(--bg-panel);
+      border: 1px solid var(--line); border-radius: 9px; padding: 5px; min-width: 190px;
+      box-shadow: var(--shadow-menu); display: flex; flex-direction: column; gap: 1px;
+    }
+    .export-menu button { width: 100%; justify-content: flex-start; height: 30px; color: var(--fg); }
+    .export-menu button:hover { background: var(--accent); color: #10232c; }
+    .export-menu .hr { height: 1px; background: var(--line-soft); margin: 4px 3px; }
+    .opts {
+      position: fixed; left: 50%; bottom: 84px; z-index: 79;
+      transform: translateX(-50%);
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 9px; background: var(--bg-panel);
+      border: 1px solid var(--line); border-radius: 9px;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+    }
     .swatch { width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 5px;
               padding: 0; cursor: pointer; overflow: hidden; position: relative; flex: none; }
     .swatch input { position: absolute; inset: -4px; width: 36px; height: 36px; border: none; padding: 0; cursor: pointer; }
     .opts label { display: flex; align-items: center; gap: 5px; color: var(--fg-3); font-size: 10.5px; }
     .opts input[type="range"] { width: 64px; }
     .opts .num { width: 44px; text-align: right; }
-    .spacer { flex: 1; }
-    .doc { color: var(--fg-2); font-size: 11px; margin-right: 6px; }
     .zoom { display: flex; align-items: center; gap: 0; }
     .zoom .pct { min-width: 48px; text-align: center; color: var(--fg-2); cursor: pointer; }
     .ico { width: 30px; padding: 0; justify-content: center; }
@@ -134,14 +158,20 @@ class DxTopbar extends LitElement {
     super();
     this.tool = "select"; this.color = "#0d99ff"; this.alpha = 1;
     this.width = 4; this.radius = 12; this.fontSize = 32;
-    this._shape = "rect"; this._menu = false; this._v = 0;
+    this._shape = "rect"; this._menu = false; this._exportMenu = false; this._v = 0;
+    this._returnTool = "select";
     this.zoom = 1; this.theme = "dark";
   }
   connectedCallback() {
     super.connectedCallback();
     this._onChange = () => { this._v++; };
     this.app?.addEventListener("changed", this._onChange);
-    this._onDoc = (e) => { if (this._menu && !e.composedPath().includes(this)) this._menu = false; };
+    this._onDoc = (e) => {
+      if ((this._menu || this._exportMenu) && !e.composedPath().includes(this)) {
+        this._menu = false;
+        this._exportMenu = false;
+      }
+    };
     document.addEventListener("click", this._onDoc);
   }
   disconnectedCallback() {
@@ -151,8 +181,10 @@ class DxTopbar extends LitElement {
   }
   /** 외부(단축키/스포이드)에서 도구·색 설정. */
   setTool(t) { this._pick(t); }
+  finishEyedrop() { this._pick(this._returnTool || "select"); }
   setColor(rgba) { this.color = HEX(rgba); this._emit(); }
   _pick(t) {
+    if (t === "eyedrop") this._returnTool = this.tool === "eyedrop" ? this._returnTool : this.tool;
     this.tool = t;
     if (isShapeTool(t)) this._shape = t;
     this._menu = false;
@@ -173,7 +205,10 @@ class DxTopbar extends LitElement {
     const reader = new FileReader();
     reader.onload = () => {
       const b64 = String(reader.result).split(",")[1] || "";
-      this.app?.apply([B.addPaintLayer(file.name.replace(/\.[^.]+$/, ""), B.pngBase64(b64))]);
+      this.app?.apply([
+        B.addPaintLayer(file.name.replace(/\.[^.]+$/, ""), B.pngBase64(b64), { bind: "img" }),
+        B.setProps("img", { meta: JSON.stringify({ type: "image" }) }),
+      ]);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -181,22 +216,19 @@ class DxTopbar extends LitElement {
   render() {
     const cur = SHAPES.find((s) => s.id === this._shape) ?? SHAPES[0];
     const isDraw = this.tool !== "select" && this.tool !== "eyedrop" && this.tool !== "frame";
-    const docId = new URLSearchParams(location.search).get("doc");
+    const frames = this.app?.frames?.() ?? [];
     const t = (id, ic, title) => html`<button class=${this.tool === id ? "active" : ""}
       title=${title} @click=${() => this._pick(id)}>${icon(ic)}</button>`;
     return html`
-      <span class="logo" style="cursor:pointer" title="대시보드로"
-        @click=${() => { location.href = "/"; }}><span class="dot"></span>DesignCLI</span>
       <div class="tools">
         ${t("select", "cursor", "선택/이동 (V)")}
         <button class="dd ${isShapeTool(this.tool) ? "active" : ""}" title="도형 (${cur.label})"
           @click=${() => { this._menu = !this._menu; }}>${icon(cur.ic)}${icon("chevDown", 9)}</button>
         ${t("line", "line", "선 (L)")}
-        ${t("brush", "brush", "브러시 (B)")}
+        ${t("brush", "pencil", "브러시 (B)")}
         ${t("frame", "frame", "프레임 (F)")}
         ${t("text", "text", "텍스트 (T)")}
         <button title="이미지(PNG) 레이어" @click=${() => this.renderRoot.querySelector("#png").click()}>${icon("image")}</button>
-        ${t("eyedrop", "dropper", "스포이드 (I)")}
         <input id="png" type="file" accept="image/png" style="display:none" @change=${(e) => this._addPng(e)} />
         ${this._menu ? html`
           <div class="menu">
@@ -210,6 +242,7 @@ class DxTopbar extends LitElement {
         <div class="opts">
           <span class="swatch" style="background:${this.color}">
             <input type="color" .value=${this.color} @input=${(e) => { this.color = e.target.value; this._emit(); }} /></span>
+          <button title="스포이드" @click=${() => this._pick("eyedrop")}>${icon("dropper", 13)}</button>
           <label>A<input type="range" min="0" max="1" step="0.05" .value=${String(this.alpha)}
             @input=${(e) => { this.alpha = +e.target.value; this._emit(); }} /></label>
           ${needsWidth(this.tool) ? html`<label>W<input class="num" type="number" min="1" max="100" .value=${String(this.width)}
@@ -219,23 +252,38 @@ class DxTopbar extends LitElement {
           ${this.tool === "text" ? html`<label>크기<input class="num" type="number" min="6" max="400" .value=${String(this.fontSize)}
             @change=${(e) => { this.fontSize = +e.target.value || 12; this._emit(); }} /></label>` : nothing}
         </div>` : nothing}
-      <span class="spacer"></span>
-      <span class="doc">${docId ? `${docId} · live` : "local"}</span>
-      <button class="ico" title="undo (Cmd+Z)" ?disabled=${!this.app?.canUndo()} @click=${() => this.app.undo()}>${icon("undo")}</button>
-      <button class="ico" title="redo (Cmd+Shift+Z)" ?disabled=${!this.app?.canRedo()} @click=${() => this.app.redo()}>${icon("redo")}</button>
-      <span class="sep"></span>
-      <div class="zoom">
-        <button class="ico" title="축소" @click=${() => this._zoomCmd("out")}>−</button>
-        <span class="pct" title="100% (Shift+0) / 맞춤 (Shift+1)"
-          @click=${() => this._zoomCmd("reset")}>${Math.round(this.zoom * 100)}%</span>
-        <button class="ico" title="확대" @click=${() => this._zoomCmd("in")}>+</button>
+      <div class="corner">
+        <button class="ico" title="undo (Cmd+Z)" ?disabled=${!this.app?.canUndo()} @click=${() => this.app.undo()}>${icon("undo")}</button>
+        <button class="ico" title="redo (Cmd+Shift+Z)" ?disabled=${!this.app?.canRedo()} @click=${() => this.app.redo()}>${icon("redo")}</button>
+        <span class="sep"></span>
+        <div class="zoom">
+          <button class="ico" title="축소" @click=${() => this._zoomCmd("out")}>−</button>
+          <span class="pct" title="100% (Shift+0) / 맞춤 (Shift+1)"
+            @click=${() => this._zoomCmd("reset")}>${Math.round(this.zoom * 100)}%</span>
+          <button class="ico" title="확대" @click=${() => this._zoomCmd("in")}>+</button>
+        </div>
+        <span class="sep"></span>
+        <button title="내보내기" @click=${(e) => { e.stopPropagation(); this._exportMenu = !this._exportMenu; }}>
+          ${icon("export")}Export${icon("chevDown", 9)}
+        </button>
       </div>
-      <span class="sep"></span>
-      <button class="ico" title="테마 전환"
-        @click=${() => this.dispatchEvent(new CustomEvent("theme-toggle", { bubbles: true, composed: true }))}>
-        ${icon(this.theme === "dark" ? "sun" : "moon")}</button>
-      <button title="PNG 내보내기" @click=${() => this.dispatchEvent(new CustomEvent("export-png", { bubbles: true, composed: true }))}>${icon("export")}Export</button>
-      <button title=".dxpkg 저장" @click=${() => this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true, composed: true }))}>${icon("save")}</button>
+      ${this._exportMenu ? html`
+        <div class="export-menu">
+          <button @click=${() => { this._exportMenu = false; this.dispatchEvent(new CustomEvent("export-png", { bubbles: true, composed: true })); }}>
+            ${icon("export", 13)}전체 PNG
+          </button>
+          ${frames.length ? html`
+            <div class="hr"></div>
+            ${frames.map((f) => html`
+              <button @click=${() => { this._exportMenu = false; this.app.exportFrame(f); }}>
+                ${icon("frame", 13)}${f.name} PNG
+              </button>`)}
+          ` : nothing}
+          <div class="hr"></div>
+          <button @click=${() => { this._exportMenu = false; this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true, composed: true })); }}>
+            ${icon("save", 13)}.dxpkg 저장
+          </button>
+        </div>` : nothing}
     `;
   }
 }
@@ -244,13 +292,27 @@ customElements.define("dx-topbar", DxTopbar);
 // ───────── 캔버스 (줌/팬 + 선택/이동/리사이즈/회전 + 그리기 + 텍스트 + 스포이드) ─────────
 const HANDLE = 8; // 핸들 화면 px
 class DxCanvas extends LitElement {
-  static properties = { app: { attribute: false }, toolState: { attribute: false }, _v: { state: true }, _text: { state: true } };
+  static properties = {
+    app: { attribute: false },
+    toolState: { attribute: false },
+    _v: { state: true },
+    _text: { state: true },
+    _ctx: { state: true },
+    _bgMode: { state: true },
+  };
   static styles = css`
-    :host { grid-area: canvas; position: relative; display: block; overflow: auto; background: var(--bg-canvas); }
-    .wrap { position: relative; margin: 48px; width: fit-content; }
-    canvas { display: block; }
-    #base { box-shadow: 0 0 0 1px var(--line), 0 8px 30px rgba(0,0,0,0.35); background:
-      repeating-conic-gradient(rgba(127,127,127,0.12) 0% 25%, transparent 0% 50%) 50% / 16px 16px; }
+    :host {
+      grid-area: canvas; position: relative; display: block; overflow: hidden; background: var(--bg-canvas);
+    }
+    :host([data-bg="dot"]) {
+      background: var(--bg-canvas);
+      background-image: radial-gradient(rgba(106,116,128,0.48) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+    :host([data-bg="solid"]) { background-image: none; background: var(--bg-canvas); }
+    .wrap { position: absolute; inset: 0; }
+    canvas { display: block; position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+    #base { box-shadow: 0 0 0 1px var(--line), 0 10px 34px rgba(0,0,0,0.32); }
     #overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
     textarea.txt {
       position: absolute; z-index: 20; background: transparent; color: var(--fg);
@@ -258,10 +320,25 @@ class DxCanvas extends LitElement {
       font-family: "Pretendard", "Inter", sans-serif; line-height: 1.25; padding: 0; overflow: hidden;
       min-width: 40px; min-height: 1em; white-space: pre;
     }
+    .ctx {
+      position: absolute; z-index: 120; min-width: 168px; padding: 5px;
+      background: var(--bg-panel); border: 1px solid var(--line); border-radius: 9px;
+      box-shadow: var(--shadow-menu); display: flex; flex-direction: column; gap: 1px;
+    }
+    .ctx button {
+      height: 30px; border: none; background: none; color: var(--fg);
+      border-radius: 6px; padding: 0 8px; font: inherit; text-align: left;
+      display: flex; align-items: center; gap: 7px; cursor: pointer;
+    }
+    .ctx button.active { background: var(--accent-soft); color: var(--fg); }
+    .ctx button:hover { background: var(--accent); color: #10232c; }
+    .ctx .hr { height: 1px; background: var(--line-soft); margin: 4px 3px; }
   `;
   constructor() {
     super();
-    this._drag = null; this._v = 0; this._zoom = 1; this._space = false; this._text = null;
+    this._drag = null; this._hoverId = null; this._ctx = null; this._v = 0; this._zoom = 1; this._origin = { x: 0, y: 0 };
+    this._space = false; this._text = null;
+    this._bgMode = localStorage.getItem("dx.canvas.bg") || "dot";
   }
   connectedCallback() {
     super.connectedCallback();
@@ -274,6 +351,13 @@ class DxCanvas extends LitElement {
     this._ku = (e) => { if (e.code === "Space") { this._space = false; this.style.cursor = ""; } };
     window.addEventListener("keydown", this._kd);
     window.addEventListener("keyup", this._ku);
+    this._ctxDoc = (e) => {
+      if (!this._ctx) return;
+      const menu = this.renderRoot.querySelector(".ctx");
+      if (menu && e.composedPath().includes(menu)) return;
+      this._ctx = null;
+    };
+    document.addEventListener("pointerdown", this._ctxDoc);
   }
   disconnectedCallback() {
     this.app?.removeEventListener("changed", this._onChange);
@@ -281,6 +365,7 @@ class DxCanvas extends LitElement {
     window.removeEventListener("pointerup", this._up);
     window.removeEventListener("keydown", this._kd);
     window.removeEventListener("keyup", this._ku);
+    document.removeEventListener("pointerdown", this._ctxDoc);
     super.disconnectedCallback();
   }
   _isTyping(e) {
@@ -291,11 +376,30 @@ class DxCanvas extends LitElement {
     this.base = this.renderRoot.querySelector("#base");
     this.overlay = this.renderRoot.querySelector("#overlay");
     this.app.renderer.canvas = this.base;
-    this.app.renderer.resize();
     this._applyZoom();
     this.base.addEventListener("pointerdown", (e) => this._down(e));
     this.base.addEventListener("dblclick", (e) => this._dblclick(e));
+    this.addEventListener("contextmenu", (e) => this._context(e));
+    this.addEventListener("pointerleave", () => {
+      if (this._hoverId != null) {
+        this._hoverId = null;
+        this._drawOverlay();
+      }
+    });
     this.addEventListener("wheel", (e) => this._wheel(e), { passive: false });
+    this._ro = new ResizeObserver(() => this._applyZoom());
+    this._ro.observe(this);
+    this._applyBg();
+  }
+
+  _applyBg() {
+    this.dataset.bg = this._bgMode;
+  }
+
+  _setBgMode(mode) {
+    this._bgMode = mode;
+    localStorage.setItem("dx.canvas.bg", mode);
+    this._applyBg();
   }
 
   /** 텍스트 입력 오버레이 열기. 클릭 직후 캔버스의 포커스 스틸을 피해 지연 포커스. */
@@ -366,32 +470,30 @@ class DxCanvas extends LitElement {
   get zoom() { return this._zoom; }
   _applyZoom() {
     if (!this.base) return;
-    const W = this.app.editor.width(), H = this.app.editor.height();
     const z = this._zoom;
-    this.base.style.width = `${W * z}px`;
-    this.base.style.height = `${H * z}px`;
+    const vw = Math.max(1, Math.ceil(this.clientWidth / z));
+    const vh = Math.max(1, Math.ceil(this.clientHeight / z));
+    this.app.renderer.setViewport(this._origin.x, this._origin.y, vw, vh);
+    this.base.style.width = `${vw * z}px`;
+    this.base.style.height = `${vh * z}px`;
     this.base.style.imageRendering = z >= 1 ? "pixelated" : "auto";
-    const ow = Math.max(1, Math.round(W * z)), oh = Math.max(1, Math.round(H * z));
+    const ow = Math.max(1, this.clientWidth), oh = Math.max(1, this.clientHeight);
     if (this.overlay.width !== ow) this.overlay.width = ow;
     if (this.overlay.height !== oh) this.overlay.height = oh;
-    this.overlay.style.width = `${W * z}px`;
-    this.overlay.style.height = `${H * z}px`;
+    this.overlay.style.width = `${ow}px`;
+    this.overlay.style.height = `${oh}px`;
   }
   _setZoom(z, cx, cy) {
     const old = this._zoom;
     z = Math.min(8, Math.max(0.05, z));
     if (z === old) return;
-    // 포인터 위치 고정 줌: content 좌표 보존.
     const rect = this.getBoundingClientRect();
     const px = (cx ?? rect.left + rect.width / 2) - rect.left;
     const py = (cy ?? rect.top + rect.height / 2) - rect.top;
-    const k = z / old;
-    const sl = (this.scrollLeft + px) * k - px;
-    const st = (this.scrollTop + py) * k - py;
+    const world = { x: this._origin.x + px / old, y: this._origin.y + py / old };
     this._zoom = z;
+    this._origin = { x: world.x - px / z, y: world.y - py / z };
     this._applyZoom();
-    this.scrollLeft = sl;
-    this.scrollTop = st;
     this._drawOverlay();
     this.dispatchEvent(new CustomEvent("zoom-changed", { detail: z, bubbles: true, composed: true }));
   }
@@ -402,6 +504,7 @@ class DxCanvas extends LitElement {
     else if (action === "fit") {
       const W = this.app.editor.width(), H = this.app.editor.height();
       const z = Math.min((this.clientWidth - 96) / W, (this.clientHeight - 96) / H);
+      this._origin = { x: -48 / Math.max(z, 0.05), y: -48 / Math.max(z, 0.05) };
       this._setZoom(z);
     }
   }
@@ -409,23 +512,79 @@ class DxCanvas extends LitElement {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
       this._setZoom(this._zoom * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+      return;
     }
+    e.preventDefault();
+    const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? this.clientHeight : 1;
+    const dx = (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * unit;
+    const dy = (e.shiftKey && !e.deltaX ? 0 : e.deltaY) * unit;
+    this._origin = {
+      x: this._origin.x + dx / this._zoom,
+      y: this._origin.y + dy / this._zoom,
+    };
+    this._applyZoom();
+    this._drawOverlay();
   }
 
   // ---- 좌표 ----
   _coords(e) {
-    const r = this.base.getBoundingClientRect();
+    const r = this.getBoundingClientRect();
     return {
-      x: (e.clientX - r.left) * (this.base.width / r.width),
-      y: (e.clientY - r.top) * (this.base.height / r.height),
+      x: this._origin.x + (e.clientX - r.left) / this._zoom,
+      y: this._origin.y + (e.clientY - r.top) / this._zoom,
     };
+  }
+
+  _screen(p) {
+    return { x: (p.x - this._origin.x) * this._zoom, y: (p.y - this._origin.y) * this._zoom };
+  }
+
+  _frameAt(p) {
+    const tol = 6 / (this._zoom || 1);
+    for (const f of [...(this.app.frames?.() ?? [])].reverse()) {
+      const inside = p.x >= f.x - tol && p.x <= f.x + f.w + tol && p.y >= f.y - tol && p.y <= f.y + f.h + tol;
+      if (!inside) continue;
+      const edge = Math.min(Math.abs(p.x - f.x), Math.abs(p.x - (f.x + f.w)), Math.abs(p.y - f.y), Math.abs(p.y - (f.y + f.h)));
+      const label = p.x >= f.x && p.x <= f.x + 120 && p.y >= f.y - 24 && p.y <= f.y;
+      if (edge <= tol || label) return f;
+    }
+    return null;
+  }
+
+  _context(e) {
+    e.preventDefault();
+    const p = this._coords(e);
+    const host = this.getBoundingClientRect();
+    const frame = this._frameAt(p);
+    if (frame) {
+      this.app.selectFrame(frame.id);
+      this._ctx = { kind: "frame", x: e.clientX - host.left, y: e.clientY - host.top, id: frame.id };
+      return;
+    }
+    const hit = this.app.hitTest(p.x, p.y);
+    if (hit == null) {
+      this._ctx = { kind: "canvas", x: e.clientX - host.left, y: e.clientY - host.top };
+      return;
+    }
+    if (!this.app.selectedIds.includes(hit)) this.app.select(hit);
+    this._ctx = { kind: "layer", x: e.clientX - host.left, y: e.clientY - host.top, id: hit };
+  }
+
+  _menuAction(fn) {
+    this._ctx = null;
+    fn();
   }
 
   // ---- 핸들 (화면 좌표 계산) ----
   /** 레이어 1개의 선택 지오메트리(드래그 중 임시값 미리보기 반영). */
   _selGeomFor(sel) {
-    const b = this.app.layerBounds(sel.id);
+    let b = this.app.layerBounds(sel.id);
     if (!b) return null;
+    try {
+      const meta = sel.meta ? JSON.parse(sel.meta) : null;
+      const tb = meta?.type === "text" ? this.app.textBoxBounds(sel, meta) : null;
+      if (tb) b = [tb.x, tb.y, tb.w, tb.h];
+    } catch { /* non-text layer */ }
     const t = this.app.xformOf(sel);
     const d = this._drag;
     // 드래그 중 임시값 반영(미리보기). resize/rotate는 anchor 보정 offset도 함께.
@@ -441,7 +600,7 @@ class DxCanvas extends LitElement {
     const c4 = [
       tp.fwd(b[0], b[1]), tp.fwd(b[0] + b[2], b[1]),
       tp.fwd(b[0] + b[2], b[1] + b[3]), tp.fwd(b[0], b[1] + b[3]),
-    ].map((p) => ({ x: p.x * z, y: p.y * z })); // 시계방향 TL,TR,BR,BL (화면px)
+    ].map((p) => this._screen(p)); // 시계방향 TL,TR,BR,BL (화면px)
     const mid = (a, b2) => ({ x: (a.x + b2.x) / 2, y: (a.y + b2.y) / 2 });
     const handles = [
       { k: "tl", p: c4[0], ax: "xy" }, { k: "tm", p: mid(c4[0], c4[1]), ax: "y" },
@@ -470,7 +629,7 @@ class DxCanvas extends LitElement {
   _hitHandle(e) {
     const g = this._selGeom();
     if (!g) return null;
-    const r = this.base.getBoundingClientRect();
+    const r = this.getBoundingClientRect();
     const sx = e.clientX - r.left, sy = e.clientY - r.top;
     const near = (p, rad) => Math.hypot(p.x - sx, p.y - sy) <= rad;
     if (near(g.rot, HANDLE)) return { type: "rotate", g };
@@ -507,8 +666,9 @@ class DxCanvas extends LitElement {
 
   // ---- 포인터 ----
   _down(e) {
+    if (this._ctx) this._ctx = null;
     if (this._space) {
-      this._drag = { mode: "pan", sx: e.clientX, sy: e.clientY, sl: this.scrollLeft, st: this.scrollTop };
+      this._drag = { mode: "pan", sx: e.clientX, sy: e.clientY, ox: this._origin.x, oy: this._origin.y };
       this.style.cursor = "grabbing";
       return;
     }
@@ -582,6 +742,11 @@ class DxCanvas extends LitElement {
         return;
       }
       if (hit == null) {
+        const frame = this._frameAt(p);
+        if (frame) {
+          this.app.selectFrame(frame.id);
+          return;
+        }
         // 빈 공간 드래그 = 마퀴 다중선택(클릭이면 해제 — _end에서 판정).
         this._drag = { mode: "marquee", start: p, cur: p };
         return;
@@ -616,10 +781,14 @@ class DxCanvas extends LitElement {
   }
   _move(e) {
     const d = this._drag;
-    if (!d) return;
+    if (!d) { this._hover(e); return; }
     if (d.mode === "pan") {
-      this.scrollLeft = d.sl - (e.clientX - d.sx);
-      this.scrollTop = d.st - (e.clientY - d.sy);
+      this._origin = {
+        x: d.ox - (e.clientX - d.sx) / this._zoom,
+        y: d.oy - (e.clientY - d.sy) / this._zoom,
+      };
+      this._applyZoom();
+      this._drawOverlay();
       return;
     }
     const p = this._coords(e);
@@ -688,6 +857,20 @@ class DxCanvas extends LitElement {
       this._drawGhost();
     }
   }
+
+  _hover(e) {
+    if ((this.toolState?.tool ?? "select") !== "select" || this._space || this._text) {
+      if (this._hoverId != null) { this._hoverId = null; this._drawOverlay(); }
+      return;
+    }
+    const p = this._coords(e);
+    const hit = this.app.hitTest(p.x, p.y);
+    const next = hit == null || this.app.selectedIds?.includes(hit) ? null : hit;
+    if (next !== this._hoverId) {
+      this._hoverId = next;
+      this._drawOverlay();
+    }
+  }
   _end() {
     const d = this._drag;
     if (!d) return;
@@ -697,7 +880,10 @@ class DxCanvas extends LitElement {
     if (d.mode === "brush") {
       const s = this.toolState;
       if (d.pts.length >= 2) {
-        this.app.apply([B.addPaintLayer("brush", B.shapes([B.path(d.pts, s.width, s.rgba)]))]);
+        this.app.apply([
+          B.addPaintLayer("brush", B.shapes([B.path(d.pts, s.width, s.rgba)]), { bind: "drawn" }),
+          B.setProps("drawn", { meta: JSON.stringify({ type: "brush" }) }),
+        ]);
       }
       this._drawOverlay();
       return;
@@ -776,7 +962,10 @@ class DxCanvas extends LitElement {
         shape = B.line(start.x, start.y, cur.x, cur.y, s.width, rgba); name = "line"; break;
       default: return;
     }
-    this.app.apply([B.addPaintLayer(name, B.shapes([shape]))]);
+    this.app.apply([
+      B.addPaintLayer(name, B.shapes([shape]), { bind: "drawn" }),
+      B.setProps("drawn", { meta: JSON.stringify({ type: "shape", shape: s.tool }) }),
+    ]);
   }
 
   // ---- 텍스트 입력 커밋 ----
@@ -827,7 +1016,8 @@ class DxCanvas extends LitElement {
     o.fillStyle = `rgba(${r},${g},${b},${(a / 255) * 0.45})`;
     o.lineWidth = 1; o.setLineDash([4, 3]);
     const { start, cur } = this._drag;
-    const bx = Math.min(start.x, cur.x) * z, by = Math.min(start.y, cur.y) * z;
+    const s0 = this._screen(start), s1 = this._screen(cur);
+    const bx = Math.min(s0.x, s1.x), by = Math.min(s0.y, s1.y);
     const bw = Math.abs(cur.x - start.x) * z, bh = Math.abs(cur.y - start.y) * z;
     switch (s.tool) {
       case "rect": o.fillRect(bx, by, bw, bh); o.strokeRect(bx, by, bw, bh); break;
@@ -835,7 +1025,7 @@ class DxCanvas extends LitElement {
       case "stroke-rect": o.setLineDash([]); o.lineWidth = s.width * z; o.strokeRect(bx, by, bw, bh); break;
       case "stroke-ellipse": o.setLineDash([]); o.lineWidth = s.width * z; o.beginPath(); o.ellipse(bx + bw / 2, by + bh / 2, bw / 2, bh / 2, 0, 0, 7); o.stroke(); break;
       case "rounded-rect": o.beginPath(); if (o.roundRect) o.roundRect(bx, by, bw, bh, s.radius * z); else o.rect(bx, by, bw, bh); o.fill(); o.stroke(); break;
-      default: o.setLineDash([]); o.lineWidth = s.width * z; o.beginPath(); o.moveTo(start.x * z, start.y * z); o.lineTo(cur.x * z, cur.y * z); o.stroke();
+      default: o.setLineDash([]); o.lineWidth = s.width * z; o.beginPath(); o.moveTo(s0.x, s0.y); o.lineTo(s1.x, s1.y); o.stroke();
     }
     o.setLineDash([]);
   }
@@ -851,8 +1041,12 @@ class DxCanvas extends LitElement {
     o.strokeStyle = `rgba(${r},${g},${b},${a / 255})`;
     o.lineWidth = s.width * z; o.lineCap = "round"; o.lineJoin = "round";
     o.beginPath();
-    o.moveTo(d.pts[0] * z, d.pts[1] * z);
-    for (let i = 2; i < d.pts.length; i += 2) o.lineTo(d.pts[i] * z, d.pts[i + 1] * z);
+    let p0 = this._screen({ x: d.pts[0], y: d.pts[1] });
+    o.moveTo(p0.x, p0.y);
+    for (let i = 2; i < d.pts.length; i += 2) {
+      const p = this._screen({ x: d.pts[i], y: d.pts[i + 1] });
+      o.lineTo(p.x, p.y);
+    }
     o.stroke();
   }
 
@@ -864,14 +1058,22 @@ class DxCanvas extends LitElement {
     o.font = "11px Inter, sans-serif";
     for (const f of frames) {
       o.strokeStyle = fg; o.lineWidth = 1; o.setLineDash([]);
-      o.strokeRect(f.x * z + 0.5, f.y * z + 0.5, f.w * z, f.h * z);
+      const p = this._screen({ x: f.x, y: f.y });
+      if (this.app.selectedFrameId === f.id) {
+        o.fillStyle = "rgba(135,185,207,0.08)";
+        o.fillRect(p.x, p.y, f.w * z, f.h * z);
+        o.strokeStyle = getComputedStyle(this).getPropertyValue("--accent").trim() || "#87b9cf";
+        o.lineWidth = 1.5;
+      }
+      o.strokeRect(p.x + 0.5, p.y + 0.5, f.w * z, f.h * z);
       o.fillStyle = fg;
-      o.fillText(f.name, f.x * z, f.y * z - 5);
+      o.fillText(f.name, p.x, p.y - 5);
     }
     // 프레임 드래그 중 미리보기.
     const d = this._drag;
     if (d?.mode === "frame") {
-      const x = Math.min(d.start.x, d.cur.x) * z, y = Math.min(d.start.y, d.cur.y) * z;
+      const s0 = this._screen(d.start), s1 = this._screen(d.cur);
+      const x = Math.min(s0.x, s1.x), y = Math.min(s0.y, s1.y);
       const w = Math.abs(d.cur.x - d.start.x) * z, h = Math.abs(d.cur.y - d.start.y) * z;
       o.setLineDash([5, 4]);
       o.strokeStyle = fg;
@@ -889,11 +1091,13 @@ class DxCanvas extends LitElement {
     if (this._text) return; // 텍스트 편집 중엔 셀렉션 크롬 숨김(입력에 집중).
     if (this._drag?.mode === "draw") { this._drawGhost(); return; }
     if (this._drag?.mode === "brush") { this._drawBrushGhost(); return; }
-    const acc = getComputedStyle(this).getPropertyValue("--accent").trim() || "#0d99ff";
+    const cs = getComputedStyle(this);
+    const acc = cs.getPropertyValue("--accent-strong").trim() || cs.getPropertyValue("--accent").trim() || "#0b87e0";
     // 마퀴(점선 사각형, --accent 색).
     if (this._drag?.mode === "marquee") {
       const d = this._drag, z = this._zoom;
-      const x = Math.min(d.start.x, d.cur.x) * z, y = Math.min(d.start.y, d.cur.y) * z;
+      const s0 = this._screen(d.start), s1 = this._screen(d.cur);
+      const x = Math.min(s0.x, s1.x), y = Math.min(s0.y, s1.y);
       const w = Math.abs(d.cur.x - d.start.x) * z, h = Math.abs(d.cur.y - d.start.y) * z;
       o.setLineDash([4, 3]);
       o.strokeStyle = acc; o.lineWidth = 1;
@@ -904,6 +1108,19 @@ class DxCanvas extends LitElement {
     }
     // 선택된 각 레이어에 셀렉션 쿼드(회전 반영). 핸들은 단일 선택일 때만.
     const single = (this.app.selectedIds?.length ?? 0) === 1;
+    if (this._hoverId != null) {
+      const hov = this.app.layers().find((l) => l.id === this._hoverId);
+      const hg = hov ? this._selGeomFor(hov) : null;
+      if (hg) {
+        o.beginPath();
+        o.moveTo(hg.c4[0].x, hg.c4[0].y);
+        for (let i = 1; i < 4; i++) o.lineTo(hg.c4[i].x, hg.c4[i].y);
+        o.closePath();
+        o.strokeStyle = acc;
+        o.lineWidth = 1.5;
+        o.stroke();
+      }
+    }
     for (const sel of this.app.selectedLayers?.() ?? []) {
       const g = this._selGeomFor(sel);
       if (!g) continue;
@@ -913,7 +1130,7 @@ class DxCanvas extends LitElement {
       o.closePath();
       o.fillStyle = "rgba(13,153,255,0.08)";
       o.fill();
-      o.strokeStyle = acc; o.lineWidth = 1.5;
+      o.strokeStyle = acc; o.lineWidth = 2;
       o.stroke();
       if (!single) continue;
       // 회전 핸들(상단 중앙 바깥 원).
@@ -934,11 +1151,11 @@ class DxCanvas extends LitElement {
       const z = this._zoom;
       o.strokeStyle = "#f24822"; o.lineWidth = 1;
       for (const gx of gd.x) {
-        const px = Math.round(gx * z) + 0.5;
+        const px = Math.round((gx - this._origin.x) * z) + 0.5;
         o.beginPath(); o.moveTo(px, 0); o.lineTo(px, this.overlay.height); o.stroke();
       }
       for (const gy of gd.y) {
-        const py = Math.round(gy * z) + 0.5;
+        const py = Math.round((gy - this._origin.y) * z) + 0.5;
         o.beginPath(); o.moveTo(0, py); o.lineTo(this.overlay.width, py); o.stroke();
       }
     }
@@ -950,16 +1167,39 @@ class DxCanvas extends LitElement {
     return html`
       <div class="wrap">
         <canvas id="base"></canvas><canvas id="overlay"></canvas>
+        ${this._ctx ? html`
+          <div class="ctx" style="left:${this._ctx.x}px; top:${this._ctx.y}px">
+            ${this._ctx.kind === "canvas" ? html`
+              <button class=${this._bgMode === "dot" ? "active" : ""} @click=${() => this._menuAction(() => this._setBgMode("dot"))}>${icon("plus", 13)}도트 격자</button>
+              <button class=${this._bgMode === "solid" ? "active" : ""} @click=${() => this._menuAction(() => this._setBgMode("solid"))}>${icon("squareFill", 13)}단색 그레이</button>
+            ` : this._ctx.kind === "frame" ? (() => {
+              const f = this.app.frames().find((v) => v.id === this._ctx.id);
+              const id = this._ctx.id;
+              return html`
+                <button @click=${() => this._menuAction(() => f && this.app.exportFrame(f))}>${icon("download", 13)}프레임 PNG</button>
+                <button @click=${() => this._menuAction(() => this.app.removeFrame(id))}>${icon("trash", 13)}프레임 삭제</button>`;
+            })() : html`
+              <button @click=${() => this._menuAction(() => this.app.duplicateMany(this.app.selectedIds))}>${icon("dup", 13)}복제</button>
+              <button ?disabled=${this.app.selectedIds.length < 2} @click=${() => this._menuAction(() => this.app.groupSelected())}>${icon("folder", 13)}그룹</button>
+              <button ?disabled=${this.app.getSelected()?.kind !== "group"} @click=${() => this._menuAction(() => this.app.ungroupSelected())}>${icon("dup", 13)}그룹 해제</button>
+              <div class="hr"></div>
+              <button @click=${() => this._menuAction(() => this.app.raiseMany(this.app.selectedIds))}>${icon("chevUpS", 13)}앞으로</button>
+              <button @click=${() => this._menuAction(() => this.app.lowerMany(this.app.selectedIds))}>${icon("chevDownS", 13)}뒤로</button>
+              <div class="hr"></div>
+              <button @click=${() => this._menuAction(() => this.app.deleteMany(this.app.selectedIds))}>${icon("trash", 13)}삭제</button>
+            `}
+          </div>` : nothing}
         ${t ? (() => {
           // 편집 박스는 레이어의 **변환된 표시 위치**에(원시 meta 좌표 아님 — 위치 버그 수정).
           const xf = t.xf;
           const pos = xf
             ? this.app.xformOf({ offset: xf.offset, scale: xf.scale, rotation: xf.rotation }).fwd(t.x, t.y)
             : { x: t.x, y: t.y };
+          const sp = this._screen(pos);
           const [sxx, syy] = xf?.scale ?? [1, 1];
           const rotDeg = xf?.rotation ?? 0;
           return html`<textarea class="txt" spellcheck="false"
-          style="left:${pos.x * z}px; top:${pos.y * z}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}; transform: rotate(${rotDeg}deg) scale(${sxx}, ${syy}); transform-origin: 0 0;"
+          style="left:${sp.x}px; top:${sp.y}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}; transform: rotate(${rotDeg}deg) scale(${sxx}, ${syy}); transform-origin: 0 0;"
           .value=${t.value}
           @input=${(e) => { t.value = e.target.value; e.target.style.width = "auto"; e.target.style.width = e.target.scrollWidth + "px"; e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
           @keydown=${(e) => {
@@ -977,31 +1217,59 @@ customElements.define("dx-canvas", DxCanvas);
 
 // ───────── 레이어 패널 (좌측) ─────────
 class DxLayerPanel extends LitElement {
-  static properties = { app: { attribute: false }, _v: { state: true }, _menu: { state: true }, _editing: { state: true } };
+  static properties = {
+    app: { attribute: false }, _v: { state: true }, _menu: { state: true },
+    _editing: { state: true }, _dragId: { state: true }, _dropId: { state: true },
+    _ctx: { state: true }, _projectMenu: { state: true }, _query: { state: true },
+  };
   static styles = [controls, css`
     :host {
       grid-area: layers; display: flex; flex-direction: column; width: 240px;
       background: var(--bg-panel); border-right: 1px solid var(--line); overflow: hidden;
+      z-index: 25;
     }
     .head {
       padding: 12px 12px 8px; font-size: 11px; font-weight: 600; color: var(--fg);
       display: flex; align-items: center; justify-content: space-between;
+      gap: 8px;
     }
     .head .add { width: 24px; height: 24px; padding: 0; justify-content: center; }
+    .head-title { flex: none; }
+    .head-actions { display: flex; gap: 2px; }
+    .search {
+      flex: 1; min-width: 0; height: 24px; padding: 0 7px;
+      font-size: 11px; background: var(--bg-elev); border: 1px solid var(--line-soft);
+      border-radius: 6px; color: var(--fg);
+    }
+    .search::placeholder { color: var(--fg-3); }
+    .project {
+      position: relative; display: flex; align-items: center; gap: 8px;
+      min-height: 48px; padding: 0 10px 0 12px; border-bottom: 1px solid var(--line);
+    }
+    .project-name {
+      flex: 1; min-width: 0; color: var(--fg); font-size: 12px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .project .add { width: 28px; height: 28px; padding: 0; justify-content: center; flex: none; }
     .list { flex: 1; overflow-y: auto; padding: 0 6px 8px; position: relative; }
-    .menu {
+    .menu, .ctx, .project-menu {
       position: absolute; right: 10px; top: 2px; z-index: 40; background: var(--bg-panel);
       border: 1px solid var(--line); border-radius: 9px; padding: 5px; min-width: 160px;
       box-shadow: var(--shadow-menu); display: flex; flex-direction: column; gap: 1px;
     }
-    .menu button { width: 100%; justify-content: flex-start; height: 30px; color: var(--fg); }
-    .menu button:hover { background: var(--accent); color: #fff; }
+    .project-menu { top: 38px; min-width: 180px; }
+    .ctx { right: auto; }
+    .menu button, .ctx button, .project-menu button { width: 100%; justify-content: flex-start; height: 30px; color: var(--fg); }
+    .menu button:hover, .ctx button:hover, .project-menu button:hover { background: var(--accent); color: #fff; }
+    .ctx .hr, .project-menu .hr { height: 1px; background: var(--line-soft); margin: 4px 3px; }
     .row {
       display: flex; align-items: center; gap: 7px; padding: 0 6px; height: 32px;
       border-radius: var(--radius); font-size: 11.5px; cursor: default; color: var(--fg-2);
     }
     .row:hover { background: var(--bg-hover); color: var(--fg); }
     .row.sel { background: var(--accent-soft); color: var(--fg); }
+    .row.dragging { opacity: 0.45; }
+    .row.drop { box-shadow: inset 0 2px 0 var(--accent-strong); }
     .row .tic { color: var(--fg-3); flex: none; display: flex; }
     .row.sel .tic { color: var(--accent); }
     .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1013,17 +1281,27 @@ class DxLayerPanel extends LitElement {
     .b.danger:hover { background: var(--danger); color: #fff; }
     .empty { padding: 18px 12px; color: var(--fg-3); font-size: 11px; line-height: 1.7; }
   `];
-  constructor() { super(); this._v = 0; this._menu = false; this._editing = null; }
+  constructor() {
+    super();
+    this._v = 0; this._menu = false; this._editing = null;
+    this._dragId = null; this._dropId = null; this._ctx = null; this._projectMenu = false; this._query = "";
+  }
   connectedCallback() {
     super.connectedCallback();
     this._onChange = () => { this._v++; };
     this.app?.addEventListener("changed", this._onChange);
-    this._onDoc = (e) => { if (this._menu && !e.composedPath().includes(this)) this._menu = false; };
-    document.addEventListener("click", this._onDoc);
+    this._onDoc = (e) => {
+      if ((this._menu || this._ctx || this._projectMenu) && !e.composedPath().includes(this)) {
+        this._menu = false;
+        this._ctx = null;
+        this._projectMenu = false;
+      }
+    };
+    document.addEventListener("pointerdown", this._onDoc);
   }
   disconnectedCallback() {
     this.app?.removeEventListener("changed", this._onChange);
-    document.removeEventListener("click", this._onDoc);
+    document.removeEventListener("pointerdown", this._onDoc);
     super.disconnectedCallback();
   }
   _addLayer(color) {
@@ -1037,7 +1315,10 @@ class DxLayerPanel extends LitElement {
     const reader = new FileReader();
     reader.onload = () => {
       const b64 = String(reader.result).split(",")[1] || "";
-      this.app.apply([B.addPaintLayer(file.name.replace(/\.[^.]+$/, ""), B.pngBase64(b64))]);
+      this.app.apply([
+        B.addPaintLayer(file.name.replace(/\.[^.]+$/, ""), B.pngBase64(b64), { bind: "img" }),
+        B.setProps("img", { meta: JSON.stringify({ type: "image" }) }),
+      ]);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -1047,12 +1328,192 @@ class DxLayerPanel extends LitElement {
     const name = v.trim();
     if (name) this.app.apply([B.setProps(id, { name })]);
   }
-  render() {
-    const layers = this.app ? this.app.layers() : [];
-    const selIds = this.app?.selectedIds ?? [];
+  _dropOn(targetId) {
+    const dragId = this._dragId;
+    this._dragId = null;
+    this._dropId = null;
+    if (dragId == null || targetId == null || dragId === targetId) return;
+    const order = this.app.orderBottomToTop();
+    const from = order.indexOf(dragId);
+    const to = order.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    this.app.apply([B.moveLayer(dragId, to)]);
+  }
+  _openContext(e, l, depth) {
+    e.preventDefault();
+    e.stopPropagation();
+    const list = this.renderRoot.querySelector(".list")?.getBoundingClientRect();
+    const base = list ?? this.getBoundingClientRect();
+    const x = Math.min(Math.max(4, e.clientX - base.left), Math.max(8, base.width - 176));
+    const y = Math.min(Math.max(4, e.clientY - base.top), Math.max(8, base.height - 208));
+    if (l.itemType === "frame") {
+      this.app.selectFrame(l.id);
+      this._menu = false;
+      this._ctx = {
+        kind: "frame",
+        id: l.id,
+        depth,
+        x,
+        y,
+      };
+      return;
+    }
+    if (!this.app.selectedIds.includes(l.id)) this.app.select(l.id);
+    this._menu = false;
+    this._ctx = {
+      kind: "layer",
+      id: l.id,
+      depth,
+      x,
+      y,
+    };
+  }
+  _menuAction(fn) {
+    this._ctx = null;
+    fn();
+  }
+  _projectAction(fn) {
+    this._projectMenu = false;
+    fn();
+  }
+  async _renameProject(currentName) {
+    const next = prompt("새 프로젝트 이름", currentName)?.trim();
+    if (!next || next === currentName) return;
+    try {
+      const r = await fetch(`/projects/${encodeURIComponent(currentName)}/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: next }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      location.search = `?doc=${encodeURIComponent(next)}`;
+    } catch (e) {
+      alert(`프로젝트 이름 변경 실패: ${e.message}`);
+    }
+  }
+  _frameContains(frame, layer) {
+    const b = this.app.displayAABB(layer);
+    if (!b) return false;
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    return cx >= frame.x && cx <= frame.x + frame.w && cy >= frame.y && cy <= frame.y + frame.h;
+  }
+  _items() {
+    const layers = this.app ? this.app.layerTree() : [];
+    const frames = this.app?.frames?.() ?? [];
+    const frameNodes = frames.map((f) => ({ ...f, itemType: "frame", children: [] }));
+    const claimed = new Set();
+    for (const l of layers) {
+      const f = [...frameNodes].reverse().find((v) => this._frameContains(v, l));
+      if (!f) continue;
+      f.children.push(l);
+      claimed.add(l.id);
+    }
+    return [
+      ...frameNodes,
+      ...layers.filter((l) => !claimed.has(l.id)),
+    ];
+  }
+  _filterItems(items, q) {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return items;
+    const visit = (item) => {
+      const children = (item.children ?? []).map(visit).filter(Boolean);
+      const matched = String(item.name ?? "").toLowerCase().includes(needle);
+      return matched || children.length ? { ...item, children } : null;
+    };
+    return items.map(visit).filter(Boolean);
+  }
+  _layerIcon(l) {
+    if (l.itemType === "frame") return "frame";
+    if (l.kind === "group") return "folder";
+    let meta = null;
+    try { meta = l.meta ? JSON.parse(l.meta) : null; } catch { /* ignore */ }
+    if (meta?.type === "text") return "text";
+    if (meta?.type === "image") return "image";
+    if (meta?.type === "brush") return "pencil";
+    const shape = meta?.shape || String(l.name ?? "").toLowerCase();
+    if (shape.includes("ellipse")) return shape.includes("stroke") ? "circle" : "circleFill";
+    if (shape.includes("line")) return "line";
+    if (shape.includes("rounded")) return "rounded";
+    if (shape.includes("rect")) return shape.includes("stroke") ? "square" : "squareFill";
+    if (shape.includes("brush")) return "pencil";
+    if (shape.includes("fill")) return "squareFill";
+    return "square";
+  }
+  _row(l, depth, selIds) {
+    const isFrame = l.itemType === "frame";
+    const canReorder = !isFrame && this.app.orderBottomToTop().includes(l.id);
+    const selected = isFrame ? this.app.selectedFrameId === l.id : selIds.includes(l.id);
     return html`
-      <div class="head"><span>레이어</span>
-        <button class="add" title="레이어 추가" @click=${(e) => { e.stopPropagation(); this._menu = !this._menu; }}>${icon("plus")}</button>
+      <div class="row ${selected ? "sel" : ""} ${this._dragId === l.id ? "dragging" : ""} ${this._dropId === l.id ? "drop" : ""}"
+        draggable=${canReorder ? "true" : "false"}
+        style="padding-left:${6 + depth * 16}px"
+        @dragstart=${(e) => { if (!canReorder) return; this._dragId = l.id; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(l.id)); }}
+        @dragover=${(e) => { if (!canReorder || this._dragId == null || this._dragId === l.id) return; e.preventDefault(); this._dropId = l.id; }}
+        @dragleave=${() => { if (this._dropId === l.id) this._dropId = null; }}
+        @drop=${(e) => { e.preventDefault(); if (canReorder) this._dropOn(l.id); }}
+        @dragend=${() => { this._dragId = null; this._dropId = null; }}
+        @contextmenu=${(e) => this._openContext(e, l, depth)}
+        @click=${(e) => isFrame ? this.app.selectFrame(l.id) : (e.shiftKey ? this.app.toggleSelect(l.id) : this.app.select(l.id))}>
+        <span class="ord">
+          ${canReorder ? html`
+            <button title="위로" @click=${(e) => { e.stopPropagation(); this.app.raise(l.id); }}>${icon("chevUpS", 9)}</button>
+            <button title="아래로" @click=${(e) => { e.stopPropagation(); this.app.lower(l.id); }}>${icon("chevDownS", 9)}</button>` : nothing}
+        </span>
+        <span class="tic">${icon(this._layerIcon(l), 11)}</span>
+        <span class="name" title=${isFrame ? `(${l.x},${l.y}) ${l.w}x${l.h}` : ""}
+          @dblclick=${(e) => { if (!isFrame) { e.stopPropagation(); this._editing = l.id; } }}>
+          ${!isFrame && this._editing === l.id
+            ? html`<input .value=${l.name} autofocus
+                @click=${(e) => e.stopPropagation()}
+                @keydown=${(e) => { if (e.key === "Enter") this._rename(l.id, e.target.value); if (e.key === "Escape") this._editing = null; e.stopPropagation(); }}
+                @blur=${(e) => this._rename(l.id, e.target.value)} />`
+            : html`${l.name}${!isFrame && l.kind === "group" ? html` <span style="color:var(--fg-3)">(${l.children?.length ?? 0})</span>` : nothing}`}
+        </span>
+        ${isFrame ? html`
+          <button class="b" title="PNG export"
+            @click=${(e) => { e.stopPropagation(); this.app.exportFrame(l); }}>${icon("download", 13)}</button>
+          <button class="b danger" title="프레임 제거"
+            @click=${(e) => { e.stopPropagation(); this.app.removeFrame(l.id); }}>${icon("trash", 13)}</button>
+        ` : html`
+          <button class="b" title="표시/숨김"
+            @click=${(e) => { e.stopPropagation(); this.app.apply([B.setProps(l.id, { visible: !l.visible })]); }}>
+            ${icon(l.visible ? "eye" : "eyeOff", 13)}</button>
+          <button class="b danger" title="삭제"
+            @click=${(e) => { e.stopPropagation(); this.app.deleteMany([l.id]); }}>${icon("trash", 13)}</button>
+        `}
+      </div>
+      ${(l.children ?? []).slice().reverse().map((child) => this._row(child, depth + 1, selIds))}
+    `;
+  }
+  render() {
+    const items = this._filterItems(this._items(), this._query);
+    const selIds = this.app?.selectedIds ?? [];
+    const projectName = new URLSearchParams(location.search).get("doc") || "Untitled";
+    return html`
+      <div class="project">
+        <div class="project-name" title=${projectName}>${projectName}</div>
+        <button class="add" title="프로젝트 관리"
+          @click=${(e) => { e.stopPropagation(); this._projectMenu = !this._projectMenu; }}>
+          ${icon("chevDown", 13)}
+        </button>
+        ${this._projectMenu ? html`
+          <div class="project-menu">
+            <button @click=${() => this._projectAction(() => { location.href = "/"; })}>${icon("chevLeft", 13)}대시보드</button>
+            <button @click=${() => this._projectAction(() => this._renameProject(projectName))}>${icon("text", 13)}이름 변경</button>
+            <div class="hr"></div>
+            <button @click=${() => this._projectAction(() => this.dispatchEvent(new CustomEvent("export-png", { bubbles: true, composed: true })))}>${icon("export", 13)}전체 PNG</button>
+            <button @click=${() => this._projectAction(() => this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true, composed: true })))}>${icon("save", 13)}.dxpkg 저장</button>
+          </div>` : nothing}
+      </div>
+      <div class="head">
+        <span class="head-title">레이어</span>
+        <input class="search" type="search" placeholder="검색" .value=${this._query}
+          @input=${(e) => { this._query = e.target.value; }} />
+        <div class="head-actions">
+          <button class="add" title="레이어 추가" @click=${(e) => { e.stopPropagation(); this._menu = !this._menu; }}>${icon("plus")}</button>
+        </div>
       </div>
       <div class="list">
         ${this._menu ? html`
@@ -1062,43 +1523,27 @@ class DxLayerPanel extends LitElement {
             <button @click=${() => this.renderRoot.querySelector("#png2").click()}>${icon("image")}이미지 가져오기</button>
             <input id="png2" type="file" accept="image/png" style="display:none" @change=${(e) => this._addPng(e)} />
           </div>` : nothing}
-        ${layers.length === 0 ? html`<div class="empty">레이어가 없습니다.<br>도형을 그리거나 dx CLI로 추가하세요.</div>` : nothing}
-        ${layers.map((l) => html`
-          <div class="row ${selIds.includes(l.id) ? "sel" : ""}"
-            @click=${(e) => (e.shiftKey ? this.app.toggleSelect(l.id) : this.app.select(l.id))}>
-            <span class="ord">
-              <button title="위로" @click=${(e) => { e.stopPropagation(); this.app.raise(l.id); }}>${icon("chevUpS", 9)}</button>
-              <button title="아래로" @click=${(e) => { e.stopPropagation(); this.app.lower(l.id); }}>${icon("chevDownS", 9)}</button>
-            </span>
-            <span class="tic">${icon(l.kind === "group" ? "folder" : "square", 11)}</span>
-            <span class="name" @dblclick=${(e) => { e.stopPropagation(); this._editing = l.id; }}>
-              ${this._editing === l.id
-                ? html`<input .value=${l.name} autofocus
-                    @click=${(e) => e.stopPropagation()}
-                    @keydown=${(e) => { if (e.key === "Enter") this._rename(l.id, e.target.value); if (e.key === "Escape") this._editing = null; e.stopPropagation(); }}
-                    @blur=${(e) => this._rename(l.id, e.target.value)} />`
-                : html`${l.name}${l.kind === "group" ? html` <span style="color:var(--fg-3)">(${l.children?.length ?? 0})</span>` : nothing}`}
-            </span>
-            <button class="b" title="표시/숨김"
-              @click=${(e) => { e.stopPropagation(); this.app.apply([B.setProps(l.id, { visible: !l.visible })]); }}>
-              ${icon(l.visible ? "eye" : "eyeOff", 13)}</button>
-            <button class="b danger" title="삭제"
-              @click=${(e) => { e.stopPropagation(); this.app.apply([B.deleteLayer(l.id)]); }}>${icon("trash", 13)}</button>
-          </div>`)}
+        ${items.length === 0 ? html`<div class="empty">레이어가 없습니다.<br>도형을 그리거나 dx CLI로 추가하세요.</div>` : nothing}
+        ${items.map((l) => this._row(l, 0, selIds))}
+        ${this._ctx ? html`
+          <div class="ctx" style="left:${this._ctx.x}px; top:${this._ctx.y}px">
+            ${this._ctx.kind === "frame" ? (() => {
+              const f = this.app.frames().find((v) => v.id === this._ctx.id);
+              return html`
+                <button @click=${() => this._menuAction(() => f && this.app.exportFrame(f))}>${icon("download", 13)}프레임 PNG</button>
+                <button @click=${() => this._menuAction(() => this.app.removeFrame(this._ctx.id))}>${icon("trash", 13)}프레임 삭제</button>`;
+            })() : html`
+              <button @click=${() => this._menuAction(() => this.app.duplicateMany(this.app.selectedIds))}>${icon("dup", 13)}복제</button>
+              <button ?disabled=${selIds.length < 2} @click=${() => this._menuAction(() => this.app.groupSelected())}>${icon("folder", 13)}그룹</button>
+              <button ?disabled=${this.app.getSelected()?.kind !== "group"} @click=${() => this._menuAction(() => this.app.ungroupSelected())}>${icon("dup", 13)}그룹 해제</button>
+              <div class="hr"></div>
+              <button ?disabled=${!this.app.orderBottomToTop().includes(this._ctx.id)} @click=${() => this._menuAction(() => this.app.raiseMany(this.app.selectedIds))}>${icon("chevUpS", 13)}앞으로</button>
+              <button ?disabled=${!this.app.orderBottomToTop().includes(this._ctx.id)} @click=${() => this._menuAction(() => this.app.lowerMany(this.app.selectedIds))}>${icon("chevDownS", 13)}뒤로</button>
+              <div class="hr"></div>
+              <button @click=${() => this._menuAction(() => this.app.deleteMany(this.app.selectedIds))}>${icon("trash", 13)}삭제</button>
+            `}
+          </div>` : nothing}
       </div>
-      ${(this.app?.frames?.() ?? []).length ? html`
-        <div class="head" style="border-top:1px solid var(--line)"><span>프레임</span></div>
-        <div class="list" style="flex:none; max-height:160px">
-          ${this.app.frames().map((f) => html`
-            <div class="row">
-              <span class="tic">${icon("frame", 11)}</span>
-              <span class="name" title="(${f.x},${f.y}) ${f.w}x${f.h}">${f.name}</span>
-              <button class="b" title="PNG export"
-                @click=${(e) => { e.stopPropagation(); this.app.exportFrame(f); }}>${icon("download", 13)}</button>
-              <button class="b danger" title="프레임 제거"
-                @click=${(e) => { e.stopPropagation(); this.app.removeFrame(f.id); }}>${icon("trash", 13)}</button>
-            </div>`)}
-        </div>` : nothing}
     `;
   }
 }
@@ -1109,8 +1554,11 @@ class DxProps extends LitElement {
   static properties = { app: { attribute: false }, _v: { state: true } };
   static styles = [controls, css`
     :host {
-      grid-area: props; display: block; width: 240px; background: var(--bg-panel);
-      border-left: 1px solid var(--line); overflow-y: auto;
+      display: block; position: fixed; right: 24px; top: 108px; z-index: 70;
+      width: 244px; max-height: calc(100vh - 158px);
+      background: var(--bg-panel); border: 1px solid var(--line);
+      border-radius: 10px; overflow-y: auto;
+      box-shadow: 0 14px 38px rgba(0, 0, 0, 0.32);
     }
     .head {
       padding: 12px; font-size: 11px; font-weight: 600; color: var(--fg);
@@ -1141,6 +1589,37 @@ class DxProps extends LitElement {
   _set(patch) { this.app.apply([B.setProps(this.app.selectedId, patch)]); }
   render() {
     const ids = this.app?.selectedIds ?? [];
+    const frame = this.app?.getSelectedFrame?.();
+    this.style.display = (ids.length || frame) ? "block" : "none";
+    if (frame) {
+      const num = (label, value, onChange) => html`
+        <div class="cell"><span>${label}</span>
+          <input type="number" .value=${String(value)} @change=${(e) => onChange(+e.target.value || 0)} /></div>`;
+      return html`
+        <div class="head">Frame<span class="nm">· ${frame.name}</span>
+          <button class="b" title="PNG export" @click=${() => this.app.exportFrame(frame)}>${icon("download", 13)}</button>
+          <button class="b" title="삭제" @click=${() => this.app.removeFrame(frame.id)}>${icon("trash", 13)}</button>
+        </div>
+        <div class="sec">
+          <div class="sec-t">이름</div>
+          <input style="width:100%" .value=${frame.name}
+            @change=${(e) => this.app.updateFrame(frame.id, { name: e.target.value.trim() || frame.name })} />
+        </div>
+        <div class="sec">
+          <div class="sec-t">위치 · 크기</div>
+          <div class="grid2">
+            ${num("X", frame.x, (v) => this.app.updateFrame(frame.id, { x: Math.round(v) }))}
+            ${num("Y", frame.y, (v) => this.app.updateFrame(frame.id, { y: Math.round(v) }))}
+            ${num("W", frame.w, (v) => this.app.updateFrame(frame.id, { w: Math.max(1, Math.round(v)) }))}
+            ${num("H", frame.h, (v) => this.app.updateFrame(frame.id, { h: Math.max(1, Math.round(v)) }))}
+          </div>
+        </div>
+        <div class="sec">
+          <button style="width:100%; justify-content:center" @click=${() => this.app.exportFrame(frame)}>
+            ${icon("download", 13)}프레임 PNG 내보내기
+          </button>
+        </div>`;
+    }
     // 다중 선택: "N개 선택됨" + 공통 액션(정렬·삭제)만 표시.
     if (ids.length > 1) {
       return html`
@@ -1158,8 +1637,7 @@ class DxProps extends LitElement {
         <div class="empty">${ids.length}개 레이어가 선택되었습니다.<br>개별 속성은 단일 선택에서 편집하세요.</div>`;
     }
     const l = this.app?.getSelected?.();
-    if (!l) return html`<div class="head">Design</div>
-      <div class="empty">선택된 레이어가 없습니다.<br>V 도구로 캔버스에서 선택하세요.</div>`;
+    if (!l) return html``;
     const [ox, oy] = l.offset ?? [0, 0];
     const [sx, sy] = l.scale ?? [1, 1];
     const b = this.app.layerBounds(l.id);
@@ -1257,9 +1735,8 @@ class AppShell extends LitElement {
   static styles = css`
     :host {
       display: grid; height: 100vh;
-      grid-template-rows: 44px 1fr;
-      grid-template-columns: auto 1fr auto;
-      grid-template-areas: "topbar topbar topbar" "layers canvas props";
+      grid-template-columns: 240px 1fr;
+      grid-template-areas: "layers canvas";
       background: var(--bg-canvas);
     }
   `;
@@ -1322,7 +1799,7 @@ class AppShell extends LitElement {
     if (e.shiftKey && e.key === "0") { this._canvas?.zoomCmd("reset"); return; }
     if (e.shiftKey && e.key === "1") { this._canvas?.zoomCmd("fit"); return; }
     if (!meta) {
-      const map = { v: "select", r: "rect", e: "ellipse", l: "line", t: "text", i: "eyedrop", b: "brush", f: "frame" };
+      const map = { v: "select", r: "rect", e: "ellipse", l: "line", t: "text", b: "brush", f: "frame" };
       if (map[k]) { this._topbar?.setTool(map[k]); return; }
       if (e.key === "Escape") this.app.select(null);
     }
@@ -1341,10 +1818,12 @@ class AppShell extends LitElement {
         @theme-toggle=${() => this._toggleTheme()}
         @export-png=${() => this.dispatchEvent(new CustomEvent("export-png", { bubbles: true }))}
         @save-dxpkg=${() => this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true }))}></dx-topbar>
-      <dx-layer-panel .app=${this.app}></dx-layer-panel>
+      <dx-layer-panel .app=${this.app}
+        @export-png=${() => this.dispatchEvent(new CustomEvent("export-png", { bubbles: true }))}
+        @save-dxpkg=${() => this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true }))}></dx-layer-panel>
       <dx-canvas .app=${this.app} .toolState=${this._tool}
         @zoom-changed=${(e) => { this._zoom = e.detail; }}
-        @picked-color=${(e) => { this._topbar?.setColor(e.detail); this._topbar?.setTool("select"); }}
+        @picked-color=${(e) => { this._topbar?.setColor(e.detail); this._topbar?.finishEyedrop(); }}
         @text-finished=${() => this._topbar?.setTool("select")}></dx-canvas>
       <dx-props .app=${this.app}></dx-props>
     `;

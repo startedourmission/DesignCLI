@@ -156,6 +156,24 @@ impl Editor {
         js_sys::Uint8ClampedArray::from(rgba.as_slice())
     }
 
+    /// 특정 레이어를 화면에서만 제외하고 임의 영역 합성.
+    pub fn composite_region_rgba_excluding(
+        &self,
+        id: u32,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) -> js_sys::Uint8ClampedArray {
+        use dcli_model::NodeId;
+        let mut doc = self.hist.doc.clone();
+        if let Some(n) = doc.get_mut(NodeId(id as u64)) {
+            n.visible = false;
+        }
+        let rgba = dcli_raster::composite_region(&doc, x, y, w, h).to_srgb8_rgba();
+        js_sys::Uint8ClampedArray::from(rgba.as_slice())
+    }
+
     /// 임의 영역을 PNG로(Frame 단위 export).
     pub fn export_region_png(&self, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, JsError> {
         let rgba = dcli_raster::composite_region(&self.hist.doc, x, y, w, h).to_srgb8_rgba();

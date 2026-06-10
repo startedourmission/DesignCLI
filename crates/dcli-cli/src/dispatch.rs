@@ -264,15 +264,15 @@ fn decode_png(bytes: &[u8], w: u32, h: u32) -> Result<Surface, String> {
     Ok(s)
 }
 
-/// PixelSource를 표면으로 materialize.
-fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<Surface, String> {
+/// PixelSource를 표면으로 materialize. 반환 offset은 표면 (0,0)이 놓일 월드 좌표다.
+fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<(Surface, (i32, i32)), String> {
     match source {
-        PixelSource::Transparent => Ok(Surface::new(w, h)),
-        PixelSource::Fill { rgba } => Ok(Surface::filled(
+        PixelSource::Transparent => Ok((Surface::new(w, h), (0, 0))),
+        PixelSource::Fill { rgba } => Ok((Surface::filled(
             w,
             h,
             LinearPremul::from_srgb8_straight(rgba[0], rgba[1], rgba[2], rgba[3]),
-        )),
+        ), (0, 0))),
         PixelSource::LinearGradient { x0, y0, x1, y1, stops } => {
             if stops.is_empty() {
                 return Err("그라디언트 stops가 비어 있음".to_string());
@@ -280,7 +280,7 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<Surface, String> 
             let mut s = Surface::new(w, h);
             let pairs: Vec<(f32, [u8; 4])> = stops.iter().map(|g| (g.at, g.rgba)).collect();
             dcli_raster::shapes::fill_linear_gradient(&mut s, *x0, *y0, *x1, *y1, &pairs);
-            Ok(s)
+            Ok((s, (0, 0)))
         }
         PixelSource::RadialGradient { cx, cy, radius, stops } => {
             if stops.is_empty() {
@@ -289,26 +289,131 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<Surface, String> 
             let mut s = Surface::new(w, h);
             let pairs: Vec<(f32, [u8; 4])> = stops.iter().map(|g| (g.at, g.rgba)).collect();
             dcli_raster::shapes::fill_radial_gradient(&mut s, *cx, *cy, *radius, &pairs);
-            Ok(s)
+            Ok((s, (0, 0)))
         }
         PixelSource::PngBase64 { data } => {
             use base64::Engine;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data.trim())
                 .map_err(|e| format!("base64 디코드 오류: {e}"))?;
-            decode_png(&bytes, w, h)
+            decode_png(&bytes, w, h).map(|s| (s, (0, 0)))
         }
         #[cfg(feature = "fs-sources")]
         PixelSource::PngPath { path } => {
             let bytes = std::fs::read(path).map_err(|e| format!("이미지 읽기 실패: {e}"))?;
-            decode_png(&bytes, w, h)
+            decode_png(&bytes, w, h).map(|s| (s, (0, 0)))
         }
         PixelSource::Shapes { items } => {
-            let mut s = Surface::new(w, h);
-            for shape in items {
-                draw_shape(&mut s, shape);
+            if items.iter().any(|s| matches!(s, Shape::Text { .. })) {
+                let mut s = Surface::new(w, h);
+                for shape in items {
+                    draw_shape(&mut s, shape);
+                }
+                return Ok((s, (0, 0)));
             }
-            Ok(s)
+            let Some((x0, y0, x1, y1)) = shape_bounds(items) else {
+                return Ok((Surface::new(1, 1), (0, 0)));
+            };
+            let ox = x0.floor() as i32;
+            let oy = y0.floor() as i32;
+            let sw = ((x1.ceil() as i32) - ox).max(1) as u32;
+            let sh = ((y1.ceil() as i32) - oy).max(1) as u32;
+            let mut s = Surface::new(sw, sh);
+            for shape in items {
+                draw_shape(&mut s, &shift_shape(shape, -(ox as f32), -(oy as f32)));
+            }
+            Ok((s, (ox, oy)))
+        }
+    }
+}
+
+fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
+    let mut b: Option<(f32, f32, f32, f32)> = None;
+    let mut add = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        b = Some(match b {
+            Some((a, c, d, e)) => (a.min(x0), c.min(y0), d.max(x1), e.max(y1)),
+            None => (x0, y0, x1, y1),
+        });
+    };
+    for shape in items {
+        match shape {
+            Shape::Rect { x, y, w, h, .. } | Shape::RoundedRect { x, y, w, h, .. } => {
+                if *w > 0.0 && *h > 0.0 {
+                    add(*x - 1.0, *y - 1.0, *x + *w + 1.0, *y + *h + 1.0);
+                }
+            }
+            Shape::StrokeRect { x, y, w, h, width, .. } => {
+                if *w > 0.0 && *h > 0.0 && *width > 0.0 {
+                    let m = width.max(1.0);
+                    add(*x - m, *y - m, *x + *w + m, *y + *h + m);
+                }
+            }
+            Shape::Ellipse { cx, cy, rx, ry, .. } => {
+                if *rx > 0.0 && *ry > 0.0 {
+                    add(*cx - *rx - 1.0, *cy - *ry - 1.0, *cx + *rx + 1.0, *cy + *ry + 1.0);
+                }
+            }
+            Shape::StrokeEllipse { cx, cy, rx, ry, width, .. } => {
+                if *rx > 0.0 && *ry > 0.0 && *width > 0.0 {
+                    let m = width.max(1.0);
+                    add(*cx - *rx - m, *cy - *ry - m, *cx + *rx + m, *cy + *ry + m);
+                }
+            }
+            Shape::Line { x0, y0, x1, y1, width, .. } => {
+                if *width > 0.0 {
+                    let m = width * 0.5 + 1.0;
+                    add(x0.min(*x1) - m, y0.min(*y1) - m, x0.max(*x1) + m, y0.max(*y1) + m);
+                }
+            }
+            Shape::Path { points, width, .. } => {
+                if points.len() >= 2 && *width > 0.0 {
+                    let m = width * 0.5 + 1.0;
+                    let mut xs = points.iter().step_by(2).copied();
+                    let mut ys = points.iter().skip(1).step_by(2).copied();
+                    let (Some(mut minx), Some(mut miny)) = (xs.next(), ys.next()) else { continue };
+                    let (mut maxx, mut maxy) = (minx, miny);
+                    for x in xs {
+                        minx = minx.min(x);
+                        maxx = maxx.max(x);
+                    }
+                    for y in ys {
+                        miny = miny.min(y);
+                        maxy = maxy.max(y);
+                    }
+                    add(minx - m, miny - m, maxx + m, maxy + m);
+                }
+            }
+            Shape::Text { .. } => {}
+        }
+    }
+    b
+}
+
+fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
+    match shape {
+        Shape::Rect { x, y, w, h, rgba } =>
+            Shape::Rect { x: x + dx, y: y + dy, w: *w, h: *h, rgba: *rgba },
+        Shape::Ellipse { cx, cy, rx, ry, rgba } =>
+            Shape::Ellipse { cx: cx + dx, cy: cy + dy, rx: *rx, ry: *ry, rgba: *rgba },
+        Shape::Line { x0, y0, x1, y1, width, rgba } =>
+            Shape::Line { x0: x0 + dx, y0: y0 + dy, x1: x1 + dx, y1: y1 + dy, width: *width, rgba: *rgba },
+        Shape::StrokeRect { x, y, w, h, width, rgba } =>
+            Shape::StrokeRect { x: x + dx, y: y + dy, w: *w, h: *h, width: *width, rgba: *rgba },
+        Shape::StrokeEllipse { cx, cy, rx, ry, width, rgba } =>
+            Shape::StrokeEllipse { cx: cx + dx, cy: cy + dy, rx: *rx, ry: *ry, width: *width, rgba: *rgba },
+        Shape::RoundedRect { x, y, w, h, radius, rgba } =>
+            Shape::RoundedRect { x: x + dx, y: y + dy, w: *w, h: *h, radius: *radius, rgba: *rgba },
+        Shape::Text { x, y, text, size, rgba } =>
+            Shape::Text { x: x + dx, y: y + dy, text: text.clone(), size: *size, rgba: *rgba },
+        Shape::Path { points, width, rgba } => {
+            let mut p = points.clone();
+            for chunk in p.chunks_mut(2) {
+                if let [x, y] = chunk {
+                    *x += dx;
+                    *y += dy;
+                }
+            }
+            Shape::Path { points: p, width: *width, rgba: *rgba }
         }
     }
 }
@@ -446,12 +551,20 @@ fn try_one(
 ) -> Result<(), (String, String)> {
     match action {
         Action::AddPaintLayer { name, source, index, bind } => {
-            let surface = materialize(source, w, hh).map_err(|m| ("bad_surface_source".to_string(), m))?;
+            let (surface, offset) =
+                materialize(source, w, hh).map_err(|m| ("bad_surface_source".to_string(), m))?;
             let sid = h.doc.add_surface(surface);
             owned.push(sid); // 롤백 시 회수 대상으로 추적.
             h.stage(Op::AddPaintLayer { name: name.clone(), surface: sid, index: *index, forced_id: None })
                 .map_err(op_err)?;
             let node = *h.doc.order().last().expect("방금 추가됨");
+            if offset != (0, 0) {
+                let props = {
+                    let n = h.doc.get(node).expect("방금 추가됨");
+                    NodeProps { offset, ..NodeProps::of(n) }
+                };
+                h.stage(Op::SetProps { id: node, props }).map_err(op_err)?;
+            }
             if let Some(b) = bind {
                 if binder.contains_key(b) {
                     return Err(("duplicate_bind".to_string(), format!("bind 이름 '{b}' 중복")));
@@ -695,6 +808,29 @@ mod tests {
         assert_eq!(&out[idx..idx + 4], &[255, 0, 0, 255], "사각형 내부 빨강");
         // 바깥(0,0)은 투명.
         assert_eq!(&out[0..4], &[0, 0, 0, 0], "바깥 투명");
+    }
+
+    #[test]
+    fn shapes_outside_doc_are_preserved_in_content_sized_surface() {
+        let mut h = History::new(Document::new(16, 16, BitDepth::U8));
+        let actions = vec![Action::AddPaintLayer {
+            name: "outside".into(),
+            source: PixelSource::Shapes {
+                items: vec![Shape::Rect { x: 20.0, y: 4.0, w: 6.0, h: 6.0, rgba: [255, 0, 0, 255] }],
+            },
+            index: None,
+            bind: None,
+        }];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        let id = h.doc.order()[0];
+        let node = h.doc.get(id).unwrap();
+        assert_eq!(node.offset, (19, 3), "표면 원점은 AA 여백 포함 bounds");
+        let full = dcli_raster::composite(&h.doc).to_srgb8_rgba();
+        assert!(full.iter().all(|v| *v == 0), "문서 export 영역 밖이라 full doc에는 안 보임");
+        let region = dcli_raster::composite_region(&h.doc, 18, 0, 12, 12).to_srgb8_rgba();
+        let idx = ((6 * 12) + 4) * 4;
+        assert_eq!(&region[idx..idx + 4], &[255, 0, 0, 255], "문서 밖 region에서는 보임");
     }
 
     #[test]

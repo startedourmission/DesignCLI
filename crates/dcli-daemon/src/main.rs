@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/doc/:id/state", get(routes::state))
         .route("/doc/:id/live", get(routes::live))
         .route("/projects", get(routes::list_projects))
+        .route("/projects/:name/rename", post(routes::rename_project))
         .route("/projects/:name", delete(routes::delete_project))
         .with_state(Arc::clone(&app_state));
 

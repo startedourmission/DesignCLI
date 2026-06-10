@@ -46,6 +46,20 @@ export class DxDashboard extends LitElement {
 
   static styles = css`
     :host {
+      color-scheme: light;
+      --bg-canvas: #e9e9e6;
+      --bg-panel: #f5f5f3;
+      --bg-elev: #ffffff;
+      --bg-hover: #ececea;
+      --line: #d2d2ce;
+      --line-soft: #e3e3df;
+      --fg: #1e1e1e;
+      --fg-2: #555555;
+      --fg-3: #8a8a86;
+      --accent: #87b9cf;
+      --accent-strong: #5c9ab6;
+      --accent-soft: rgba(135, 185, 207, 0.18);
+      --danger: #d9401a;
       display: flex; flex-direction: column;
       min-height: 100vh; background: var(--bg-canvas);
       color: var(--fg); font-family: "Inter", system-ui, sans-serif;
@@ -56,7 +70,7 @@ export class DxDashboard extends LitElement {
     /* ── 헤더 ── */
     .header {
       display: flex; align-items: center; gap: 10px;
-      padding: 0 28px; height: 52px;
+      padding: 0 28px; height: 54px;
       background: var(--bg-panel); border-bottom: 1px solid var(--line);
       flex-shrink: 0;
     }
@@ -67,11 +81,22 @@ export class DxDashboard extends LitElement {
     .logo-text {
       font-weight: 600; font-size: 13px; color: var(--fg); letter-spacing: 0.2px;
     }
-
     /* ── 본문 ── */
     .body {
       flex: 1; padding: 32px 28px; overflow-y: auto;
     }
+    .body-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; margin-bottom: 18px;
+    }
+    .body-title { margin: 0; font-size: 22px; line-height: 1.15; color: var(--fg); }
+    .body-copy { margin: 4px 0 0; color: var(--fg-3); }
+    .btn-new-file {
+      height: 32px; border: none; border-radius: 7px; background: var(--fg);
+      color: var(--bg-panel); display: inline-flex; align-items: center; gap: 7px;
+      padding: 0 12px; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    .btn-new-file:hover { background: var(--accent); color: #10232c; }
     .section-title {
       font-size: 11px; font-weight: 600; color: var(--fg-3);
       text-transform: uppercase; letter-spacing: 0.6px;
@@ -81,15 +106,15 @@ export class DxDashboard extends LitElement {
     /* ── 카드 그리드 ── */
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-      gap: 14px;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      gap: 16px;
     }
 
     /* ── 프로젝트 카드 ── */
     .card {
       position: relative;
       background: var(--bg-panel); border: 1px solid var(--line);
-      border-radius: 10px; overflow: hidden;
+      border-radius: 8px; overflow: hidden;
       cursor: pointer; transition: border-color .15s, box-shadow .15s;
     }
     .card:hover {
@@ -108,6 +133,11 @@ export class DxDashboard extends LitElement {
       background: var(--bg-elev);
       display: flex; align-items: center; justify-content: center;
       color: var(--fg-3);
+    }
+    .thumb-placeholder::before {
+      content: ""; width: 34px; height: 26px; border: 1px solid var(--line);
+      border-radius: 4px; background: var(--bg-panel);
+      box-shadow: inset 0 -7px 0 var(--line-soft);
     }
 
     /* 카드 본문 */
@@ -137,7 +167,7 @@ export class DxDashboard extends LitElement {
     /* ── 새 프로젝트 카드 ── */
     .card-new {
       background: var(--bg-panel); border: 1.5px dashed var(--line);
-      border-radius: 10px; cursor: pointer;
+      border-radius: 8px; cursor: pointer;
       display: flex; flex-direction: column; align-items: center;
       justify-content: center; gap: 8px;
       aspect-ratio: unset; min-height: 140px;
@@ -150,7 +180,7 @@ export class DxDashboard extends LitElement {
     /* ── 새 프로젝트 인라인 폼 ── */
     .card-form {
       background: var(--bg-panel); border: 1.5px solid var(--accent);
-      border-radius: 10px; padding: 14px 14px 12px;
+      border-radius: 8px; padding: 14px 14px 12px;
       display: flex; flex-direction: column; gap: 8px;
       box-shadow: 0 0 0 3px var(--accent-soft);
     }
@@ -288,6 +318,13 @@ export class DxDashboard extends LitElement {
         <span class="logo-text">DesignCLI</span>
       </div>
       <div class="body">
+        <div class="body-head">
+          <div>
+            <h1 class="body-title">최근 작업</h1>
+            <p class="body-copy">로컬 문서와 라이브 캔버스를 한 곳에서 엽니다.</p>
+          </div>
+          <button class="btn-new-file" @click=${() => { this._creating = true; }}>${icon("plus", 14)}새 프로젝트</button>
+        </div>
         <p class="section-title">프로젝트</p>
         ${this._error
           ? html`<p class="msg err">${this._error}</p>`

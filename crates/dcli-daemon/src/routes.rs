@@ -235,6 +235,73 @@ fn parse_doc_size(path: &std::path::Path) -> (Option<u32>, Option<u32>) {
 
 // ─────────────────────── DELETE /projects/:name ───────────────────────
 
+#[derive(Deserialize)]
+pub struct RenameProjectReq {
+    name: String,
+}
+
+fn valid_project_name(name: &str) -> bool {
+    let n = name.trim();
+    !n.is_empty()
+        && n != "."
+        && n != ".."
+        && !n.contains('/')
+        && !n.contains('\\')
+        && !n.ends_with(".dxdoc")
+}
+
+// ─────────────────────── POST /projects/:name/rename ───────────────────────
+
+pub async fn rename_project(
+    State(app): Shared,
+    Path(old): Path<String>,
+    Json(req): Json<RenameProjectReq>,
+) -> impl IntoResponse {
+    let new = req.name.trim().to_string();
+    if !valid_project_name(&new) {
+        return (StatusCode::BAD_REQUEST, "유효하지 않은 프로젝트 이름").into_response();
+    }
+    if old == new {
+        return (StatusCode::OK, Json(json!({ "old": old, "name": new }))).into_response();
+    }
+
+    let old_path = app.projects_dir.join(format!("{}.dxdoc", old));
+    let new_path = app.projects_dir.join(format!("{}.dxdoc", new));
+    if new_path.exists() || app.docs.lock().unwrap().contains_key(&new) {
+        return (StatusCode::CONFLICT, format!("프로젝트 '{new}' 이미 존재")).into_response();
+    }
+
+    let mut moved_state = {
+        let mut docs = app.docs.lock().unwrap();
+        docs.remove(&old)
+    };
+
+    if let Some(ds) = moved_state.as_mut() {
+        let save_path = dcli_cli::storage::DocPath::new(old_path.clone());
+        if let Err(e) = save_path.save(&ds.hist.doc) {
+            let mut docs = app.docs.lock().unwrap();
+            docs.insert(old.clone(), moved_state.take().unwrap());
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("이름 변경 전 저장 실패: {e}")).into_response();
+        }
+        ds.dirty = false;
+    } else if !old_path.exists() {
+        return (StatusCode::NOT_FOUND, format!("프로젝트 '{old}' 없음")).into_response();
+    }
+
+    if let Err(e) = std::fs::rename(&old_path, &new_path) {
+        if let Some(ds) = moved_state.take() {
+            app.docs.lock().unwrap().insert(old.clone(), ds);
+        }
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("폴더 이름 변경 실패: {e}")).into_response();
+    }
+
+    if let Some(ds) = moved_state {
+        app.docs.lock().unwrap().insert(new.clone(), ds);
+    }
+    tracing::info!("프로젝트 이름 변경: {} -> {}", old, new);
+    (StatusCode::OK, Json(json!({ "old": old, "name": new }))).into_response()
+}
+
 pub async fn delete_project(
     State(app): Shared,
     Path(name): Path<String>,
