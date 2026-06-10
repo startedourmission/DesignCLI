@@ -261,6 +261,15 @@ export class App extends EventTarget {
     const size = meta.size ?? 32;
     const padX = Math.max(8, size * 0.22);
     const padY = Math.max(5, size * 0.16);
+    const raster = this.layerBounds(l.id);
+    if (raster) {
+      return {
+        x: raster[0] - padX,
+        y: raster[1] - padY,
+        w: raster[2] + padX * 2,
+        h: raster[3] + padY * 2,
+      };
+    }
     const lines = String(meta.text ?? "").split("\n");
     const ctx = this._measureCtx ??= document.createElement("canvas").getContext("2d");
     ctx.font = `${size}px Inter, system-ui, sans-serif`;
