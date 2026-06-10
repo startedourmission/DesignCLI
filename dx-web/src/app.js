@@ -71,6 +71,78 @@ export class App extends EventTarget {
     return JSON.parse(this.editor.layer_bounds(id));
   }
 
+  /** 레이어 복제(Cmd+D). 데몬/로컬 공통 — DuplicateLayer Action. */
+  duplicate(id) {
+    if (id == null) return;
+    this.apply([B.duplicateLayer(id)]);
+  }
+
+  /** 선택 레이어 offset 상대이동(화살표 nudge). */
+  nudge(id, dx, dy) {
+    const l = this.layers().find((v) => v.id === id);
+    if (!l) return;
+    const [ox, oy] = l.offset ?? [0, 0];
+    this.apply([B.setOffset(id, [ox + dx, oy + dy])]);
+  }
+
+  /** 레이어의 표시 트랜스폼(엔진과 동일 수학: 표면 중심 기준 scale→rotate→offset). */
+  xformOf(l) {
+    const W = this.editor.width(), H = this.editor.height();
+    const c = { x: W / 2, y: H / 2 };
+    const rad = ((l.rotation ?? 0) * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    const [sx, sy] = l.scale ?? [1, 1];
+    const [ox, oy] = l.offset ?? [0, 0];
+    return {
+      cos, sin, sx, sy, ox, oy, c,
+      /** src 좌표 → 캔버스 좌표 */
+      fwd(px, py) {
+        const vx = (px - c.x) * sx, vy = (py - c.y) * sy;
+        return { x: cos * vx - sin * vy + c.x + ox, y: sin * vx + cos * vy + c.y + oy };
+      },
+      /** 캔버스 좌표 → src 좌표 */
+      inv(qx, qy) {
+        const ax = qx - ox - c.x, ay = qy - oy - c.y;
+        const rx = cos * ax + sin * ay, ry = -sin * ax + cos * ay;
+        return { x: rx / sx + c.x, y: ry / sy + c.y };
+      },
+      /** 트랜스폼 중심(회전·스케일 고정점)의 캔버스 좌표 */
+      center() { return { x: c.x + ox, y: c.y + oy }; },
+    };
+  }
+
+  /** 레이어의 변환 후 AABB(캔버스 좌표) {x,y,w,h} 또는 null. 정렬·표시용. */
+  displayAABB(l) {
+    const b = this.layerBounds(l.id);
+    if (!b) return null;
+    const t = this.xformOf(l);
+    const pts = [
+      t.fwd(b[0], b[1]), t.fwd(b[0] + b[2], b[1]),
+      t.fwd(b[0], b[1] + b[3]), t.fwd(b[0] + b[2], b[1] + b[3]),
+    ];
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    const x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+  }
+
+  /** 선택 레이어를 문서 기준 정렬: left|center-h|right|top|center-v|bottom */
+  align(id, mode) {
+    const l = this.layers().find((v) => v.id === id);
+    if (!l) return;
+    const box = this.displayAABB(l);
+    if (!box) return;
+    const W = this.editor.width(), H = this.editor.height();
+    const [ox, oy] = l.offset ?? [0, 0];
+    let dx = 0, dy = 0;
+    if (mode === "left") dx = -box.x;
+    else if (mode === "center-h") dx = (W - box.w) / 2 - box.x;
+    else if (mode === "right") dx = W - box.w - box.x;
+    else if (mode === "top") dy = -box.y;
+    else if (mode === "center-v") dy = (H - box.h) / 2 - box.y;
+    else if (mode === "bottom") dy = H - box.h - box.y;
+    this.apply([B.setOffset(id, [Math.round(ox + dx), Math.round(oy + dy)])]);
+  }
+
   /** bottom-to-top 순서(엔진 order). moveLayer의 to는 이 인덱스 기준. */
   orderBottomToTop() {
     const j = JSON.parse(this.editor.layers());

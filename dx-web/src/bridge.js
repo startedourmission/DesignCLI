@@ -18,6 +18,8 @@ export const line = (x0, y0, x1, y1, width, rgba) => ({ shape: "line", x0, y0, x
 export const strokeRect = (x, y, w, h, width, rgba) => ({ shape: "stroke_rect", x, y, w, h, width, rgba });
 export const strokeEllipse = (cx, cy, rx, ry, width, rgba) => ({ shape: "stroke_ellipse", cx, cy, rx, ry, width, rgba });
 export const roundedRect = (x, y, w, h, radius, rgba) => ({ shape: "rounded_rect", x, y, w, h, radius, rgba });
+// 텍스트(번들 폰트 Pretendard, 한글/라틴). (x,y)=첫 줄 좌상단, size=px, '\n' 줄바꿈.
+export const text = (x, y, content, size, rgba) => ({ shape: "text", x, y, text: content, size, rgba });
 
 export const addPaintLayer = (name, source, opts = {}) => ({
   op: "add_paint_layer",
@@ -33,6 +35,11 @@ export const setBlend = (id, mode) => ({ op: "set_blend", id: ref(id), mode });
 export const setOffset = (id, offset) => ({ op: "set_props", id: ref(id), patch: { offset } });
 export const moveLayer = (id, to) => ({ op: "move_layer", id: ref(id), to });
 export const deleteLayer = (id) => ({ op: "delete_layer", id: ref(id) });
+// 레이어 복제(표면+속성 복사, offset +12px).
+export const duplicateLayer = (id) => ({ op: "duplicate_layer", id: ref(id) });
+// 비파괴 트랜스폼(표면 중심 기준).
+export const setScale = (id, scale) => ({ op: "set_props", id: ref(id), patch: { scale } });
+export const setRotation = (id, rotation) => ({ op: "set_props", id: ref(id), patch: { rotation } });
 
 // 숫자 id → {node}, 문자열 → {bind}.
 function ref(id) {
