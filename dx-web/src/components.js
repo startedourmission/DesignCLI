@@ -1638,6 +1638,7 @@ class DxLayerPanel extends LitElement {
     app: { attribute: false }, _v: { state: true }, _menu: { state: true },
     _editing: { state: true }, _dragId: { state: true }, _dropId: { state: true },
     _ctx: { state: true }, _projectMenu: { state: true }, _query: { state: true },
+    _collapsed: { state: true },
   };
   static styles = [controls, css`
     :host {
@@ -1688,6 +1689,13 @@ class DxLayerPanel extends LitElement {
     .row.dragging { opacity: 0.45; }
     .row.drop { box-shadow: inset 0 2px 0 var(--accent-strong); }
     .row .tic { color: var(--fg-3); flex: none; display: flex; }
+    .tri {
+      width: 14px; height: 14px; padding: 0; flex: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      color: var(--fg-3); border-radius: 3px;
+    }
+    .tri:hover { color: var(--fg); background: var(--bg-hover); }
+    .tri-sp { width: 14px; flex: none; }
     .row.sel .tic { color: var(--accent); }
     .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .name input { height: 22px; width: 100%; font-size: 11.5px; padding: 0 5px; }
@@ -1702,10 +1710,39 @@ class DxLayerPanel extends LitElement {
     super();
     this._v = 0; this._menu = false; this._editing = null;
     this._dragId = null; this._dropId = null; this._ctx = null; this._projectMenu = false; this._query = "";
+    this._collapsed = new Set(); // 접힌 그룹/프레임 키("n<id>"|"f<id>") — 세션 상태.
+  }
+
+  _toggleCollapse(key) {
+    const next = new Set(this._collapsed);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    this._collapsed = next;
+  }
+
+  /** 캔버스에서 선택된 레이어가 접힌 그룹/프레임 안에 있으면 펼친다(Figma reveal). */
+  _revealSelection() {
+    const sel = new Set(this.app?.selectedIds ?? []);
+    if (!sel.size || !this._collapsed.size) return;
+    const next = new Set(this._collapsed);
+    let changed = false;
+    const visit = (l, path) => {
+      if (sel.has(l.id)) {
+        for (const k of path) if (next.delete(k)) changed = true;
+      }
+      for (const c of l.children ?? []) visit(c, [...path, `n${l.id}`]);
+    };
+    for (const item of this._items()) {
+      if (item.itemType === "frame") {
+        for (const c of item.children ?? []) visit(c, [`f${item.id}`]);
+      } else {
+        visit(item, []);
+      }
+    }
+    if (changed) this._collapsed = next;
   }
   connectedCallback() {
     super.connectedCallback();
-    this._onChange = () => { this._v++; };
+    this._onChange = () => { this._revealSelection(); this._v++; };
     this.app?.addEventListener("changed", this._onChange);
     this._onDoc = (e) => {
       if ((this._menu || this._ctx || this._projectMenu) && !e.composedPath().includes(this)) {
@@ -1871,6 +1908,10 @@ class DxLayerPanel extends LitElement {
     const isFrame = l.itemType === "frame";
     const canReorder = !isFrame && this.app.orderBottomToTop().includes(l.id);
     const selected = isFrame ? this.app.selectedFrameId === l.id : selIds.includes(l.id);
+    const colKey = isFrame ? `f${l.id}` : `n${l.id}`;
+    const hasKids = (l.children?.length ?? 0) > 0;
+    // 검색 중엔 매치 가시성을 위해 강제 펼침.
+    const open = this._query.trim() ? true : !this._collapsed.has(colKey);
     return html`
       <div class="row ${selected ? "sel" : ""} ${this._dragId === l.id ? "dragging" : ""} ${this._dropId === l.id ? "drop" : ""}"
         draggable=${canReorder ? "true" : "false"}
@@ -1887,6 +1928,10 @@ class DxLayerPanel extends LitElement {
             <button title="위로" @click=${(e) => { e.stopPropagation(); this.app.raise(l.id); }}>${icon("chevUpS", 9)}</button>
             <button title="아래로" @click=${(e) => { e.stopPropagation(); this.app.lower(l.id); }}>${icon("chevDownS", 9)}</button>` : nothing}
         </span>
+        ${hasKids
+          ? html`<button class="tri" title=${open ? "접기" : "펼치기"}
+              @click=${(e) => { e.stopPropagation(); this._toggleCollapse(colKey); }}>${icon(open ? "chevDown" : "chevRight", 9)}</button>`
+          : html`<span class="tri-sp"></span>`}
         <span class="tic">${icon(this._layerIcon(l), 11)}</span>
         <span class="name" title=${isFrame ? `(${l.x},${l.y}) ${l.w}x${l.h}` : ""}
           @dblclick=${(e) => { if (!isFrame) { e.stopPropagation(); this._editing = l.id; } }}>
@@ -1910,7 +1955,7 @@ class DxLayerPanel extends LitElement {
             @click=${(e) => { e.stopPropagation(); this.app.deleteMany([l.id]); }}>${icon("trash", 13)}</button>
         `}
       </div>
-      ${(l.children ?? []).slice().reverse().map((child) => this._row(child, depth + 1, selIds))}
+      ${open ? (l.children ?? []).slice().reverse().map((child) => this._row(child, depth + 1, selIds)) : nothing}
     `;
   }
   render() {

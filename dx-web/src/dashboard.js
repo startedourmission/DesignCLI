@@ -42,6 +42,7 @@ export class DxDashboard extends LitElement {
     _newW:     { state: true },
     _newH:     { state: true },
     _saving:   { state: true },  // POST 요청 중 여부
+    _busyMsg:  { state: true },  // 장시간 작업(PSD 변환 등) 오버레이 메시지
   };
 
   static styles = css`
@@ -97,6 +98,24 @@ export class DxDashboard extends LitElement {
       padding: 0 12px; font: inherit; font-weight: 600; cursor: pointer;
     }
     .btn-new-file:hover { background: var(--accent); color: #10232c; }
+    .busy {
+      position: fixed; inset: 0; z-index: 999; display: flex;
+      align-items: center; justify-content: center;
+      background: rgba(10, 12, 14, 0.4); backdrop-filter: blur(2px);
+    }
+    .busy .box {
+      display: flex; align-items: center; gap: 10px; padding: 13px 18px;
+      max-width: min(560px, 80vw);
+      background: var(--bg-panel); color: var(--fg);
+      border: 1px solid var(--line); border-radius: 10px;
+      font-size: 12.5px; box-shadow: 0 14px 38px rgba(0, 0, 0, 0.4);
+    }
+    .busy .spin {
+      width: 14px; height: 14px; flex: none; border-radius: 50%;
+      border: 2px solid var(--accent); border-top-color: transparent;
+      animation: dxspin 0.8s linear infinite;
+    }
+    @keyframes dxspin { to { transform: rotate(360deg); } }
     .section-title {
       font-size: 11px; font-weight: 600; color: var(--fg-3);
       text-transform: uppercase; letter-spacing: 0.6px;
@@ -266,6 +285,7 @@ export class DxDashboard extends LitElement {
   async _importPsd(file) {
     const name = file.name.replace(/\.psd$/i, "").trim() || "imported";
     this._saving = true;
+    this._busyMsg = `"${file.name}" 변환 중… (레이어 보존 변환은 파일 크기에 따라 수십 초 걸릴 수 있음)`;
     try {
       const r = await fetch(`/projects/import-psd?name=${encodeURIComponent(name)}`, {
         method: "POST",
@@ -278,6 +298,7 @@ export class DxDashboard extends LitElement {
     } catch (e) {
       alert(`PSD 가져오기 실패: ${e.message}`);
       this._saving = false;
+      this._busyMsg = "";
     }
   }
 
@@ -332,6 +353,10 @@ export class DxDashboard extends LitElement {
 
   render() {
     return html`
+      ${this._busyMsg ? html`
+        <div class="busy">
+          <div class="box"><span class="spin"></span>${this._busyMsg}</div>
+        </div>` : nothing}
       <div class="header">
         <div class="logo-dot"></div>
         <span class="logo-text">DesignCLI</span>
