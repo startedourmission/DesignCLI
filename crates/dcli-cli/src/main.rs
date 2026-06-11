@@ -76,6 +76,9 @@ enum Command {
     /// PSD 호환 — import(PSD→문서)/export(문서→PSD).
     #[command(subcommand)]
     Psd(PsdCmd),
+    /// 사용 가능한 글꼴 목록(번들 + 시스템 + ./fonts).
+    #[command(subcommand)]
+    Font(FontCmd),
     /// 마지막 편집을 되돌린다(--server 모드 전용 — 디스크 모드는 세션 히스토리 없음).
     Undo,
     /// 되돌린 편집을 다시 적용한다(--server 모드 전용).
@@ -113,6 +116,12 @@ enum FrameCmd {
     },
     /// Frame 제거(이름 또는 id).
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum FontCmd {
+    /// 글꼴 이름 목록(시스템 스캔 — 최초 1회 수 초 걸릴 수 있음).
+    List,
 }
 
 #[derive(Subcommand)]
@@ -187,7 +196,7 @@ enum DrawCmd {
         #[arg(long, default_value = "stroke-ellipse")]
         name: String,
     },
-    /// 텍스트(한글/라틴, 번들 폰트): 좌상단 (x,y), 내용 TEXT. '\n' 줄바꿈.
+    /// 텍스트: 좌상단 (x,y), 내용 TEXT. '\n' 줄바꿈. --font로 시스템/로컬 글꼴 선택.
     Text {
         x: f32,
         y: f32,
@@ -196,6 +205,9 @@ enum DrawCmd {
         size: f32,
         #[arg(long, default_value = "0,0,0,255")]
         color: String,
+        /// 글꼴 이름(dx font list 참조). 미지정/미발견 = 번들 Pretendard.
+        #[arg(long)]
+        font: Option<String>,
         #[arg(long, default_value = "text")]
         name: String,
     },
@@ -317,6 +329,9 @@ enum LayerCmd {
         /// 글자색 "R,G,B,A".
         #[arg(long)]
         color: Option<String>,
+        /// 글꼴 이름(dx font list). 빈 문자열 = 번들 폰트로 복귀.
+        #[arg(long)]
+        font: Option<String>,
         /// 배경 박스 색 "R,G,B,A".
         #[arg(long)]
         bg: Option<String>,
@@ -514,6 +529,9 @@ fn restyle_layer(
         serde_json::from_str(&meta_str).map_err(|e| anyhow::anyhow!("meta 파싱 실패: {e}"))?;
     let old_items = dispatch::items_from_meta(&m);
     mutate(&mut m)?;
+    if let Some(f) = m.get("font").and_then(|f| f.as_str()) {
+        let _ = dcli_raster::sysfonts::ensure(f); // 미발견은 번들 폴백.
+    }
     let new_items = dispatch::items_from_meta(&m)
         .ok_or_else(|| anyhow::anyhow!("이 meta로는 아이템을 재구성할 수 없음"))?;
     let doc_sized = surface_size == Some(doc_dims);
@@ -678,6 +696,7 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
             text,
             size,
             color,
+            font,
             name,
         } => (
             Shape::Text {
@@ -686,6 +705,7 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
                 text: text.clone(),
                 size: *size,
                 rgba: parse_rgba(color)?,
+                font: font.clone(),
             },
             // 기본 이름이면 텍스트 내용을 레이어 이름으로(패널 가독성).
             if name == "text" {
@@ -888,6 +908,14 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             Ok(())
         }
         Command::Draw(cmd) => {
+            if let DrawCmd::Text { font: Some(f), .. } = cmd {
+                if !f.is_empty() {
+                    anyhow::ensure!(
+                        dcli_raster::sysfonts::ensure(f),
+                        "글꼴을 찾을 수 없음: {f} (dx font list로 확인)"
+                    );
+                }
+            }
             let (shape, name) = draw_to_shape(cmd)?;
             // 한 도형을 새 레이어로 그린다(layer add의 Shapes source).
             let mut actions = vec![Action::AddPaintLayer {
@@ -906,8 +934,10 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                     text,
                     size,
                     rgba,
+                    font,
                 } => serde_json::json!({
                     "type": "text", "x": x, "y": y, "text": text, "size": size, "rgba": rgba,
+                    "font": font,
                 }),
                 Shape::Path { rgba, .. } => serde_json::json!({
                     "type": "brush", "item": shape, "rgba": rgba,
@@ -1026,6 +1056,18 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 // 디스크 문서를 읽어 디스크에 쓴다 — live 라벨 금지(스테일 스냅샷 오인 방지).
                 if cli.dry_run { None } else { Some("disk") },
             );
+            Ok(())
+        }
+        Command::Font(FontCmd::List) => {
+            let mut names = vec![dcli_raster::text::DEFAULT_FONT.to_string()];
+            names.extend(dcli_raster::sysfonts::scan().iter().map(|f| f.name.clone()));
+            if cli.json {
+                emit.raw_json_or(&serde_json::json!({ "fonts": names }), "fonts");
+            } else {
+                for n in &names {
+                    println!("{n}");
+                }
+            }
             Ok(())
         }
         Command::Undo => {
@@ -1356,11 +1398,18 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             text,
             size,
             color,
+            font,
             bg,
             no_bg,
             bg_radius,
             bg_pad,
         } => {
+            if let Some(f) = font.as_deref().filter(|f| !f.is_empty()) {
+                anyhow::ensure!(
+                    dcli_raster::sysfonts::ensure(f),
+                    "글꼴을 찾을 수 없음: {f} (dx font list로 확인)"
+                );
+            }
             let color_rgba = color.as_deref().map(parse_rgba).transpose()?;
             let bg_rgba = bg.as_deref().map(parse_rgba).transpose()?;
             restyle_layer(cli, &path, *id, |m| {
@@ -1373,6 +1422,15 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                 }
                 if let Some(c) = color_rgba {
                     m["rgba"] = serde_json::json!(c);
+                }
+                if let Some(f) = font {
+                    if f.is_empty() {
+                        if let Some(o) = m.as_object_mut() {
+                            o.remove("font");
+                        }
+                    } else {
+                        m["font"] = serde_json::json!(f);
+                    }
                 }
                 if *no_bg {
                     if let Some(o) = m.as_object_mut() {

@@ -167,13 +167,16 @@ pub enum Shape {
         feather: f32,
         rgba: [u8; 4],
     },
-    /// 텍스트(번들 폰트 Pretendard — 한글/라틴). (x,y)=첫 줄 좌상단, size=px, '\n' 줄바꿈.
+    /// 텍스트. (x,y)=첫 줄 좌상단, size=px, '\n' 줄바꿈.
+    /// font = 등록된 글꼴 이름(없거나 미등록이면 번들 Pretendard 폴백).
     Text {
         x: f32,
         y: f32,
         text: String,
         size: f32,
         rgba: [u8; 4],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font: Option<String>,
     },
     /// 자유곡선(브러시) — 점들을 둥근 끝(capsule) 선분으로 연결. points = [x0,y0,x1,y1,...].
     Path {
@@ -315,6 +318,8 @@ struct TextMeta {
     text: String,
     size: f32,
     rgba: [u8; 4],
+    #[serde(default)]
+    font: Option<String>,
 }
 
 /// 구버전 문서의 텍스트 레이어를 내용 크기 표면으로 다시 굽는다.
@@ -357,6 +362,7 @@ pub fn compact_text_surfaces(doc: &mut Document) -> usize {
                 text: tm.text,
                 size: tm.size,
                 rgba: tm.rgba,
+                font: tm.font,
             }],
         };
         let Ok((new_surface, local_offset)) = materialize(&source, doc.width, doc.height) else {
@@ -554,10 +560,14 @@ pub fn items_from_meta(m: &serde_json::Value) -> Option<Vec<Shape>> {
             let size = num(m, "size", 32.0);
             let text = m.get("text")?.as_str()?.to_string();
             let rgba = rgba_of(m.get("rgba")?)?;
+            let font = m
+                .get("font")
+                .and_then(|f| f.as_str())
+                .map(|f| f.to_string());
             let mut v = Vec::new();
             if let Some(bg) = m.get("bg").filter(|b| !b.is_null()) {
                 if let Some(brgba) = bg.get("rgba").and_then(|c| rgba_of(c)) {
-                    let (tw, th) = dcli_raster::text::measure_text(&text, size);
+                    let (tw, th) = dcli_raster::text::measure_text_font(&text, size, font.as_deref());
                     let px = num(bg, "padX", (size * 0.35) as f64);
                     let py = num(bg, "padY", (size * 0.22) as f64);
                     v.push(Shape::RoundedRect {
@@ -574,7 +584,7 @@ pub fn items_from_meta(m: &serde_json::Value) -> Option<Vec<Shape>> {
                     });
                 }
             }
-            v.push(Shape::Text { x, y, text, size, rgba });
+            v.push(Shape::Text { x, y, text, size, rgba, font });
             Some(v)
         }
         "shape" | "brush" => {
@@ -746,9 +756,9 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
                 }
             }
             Shape::Text {
-                x, y, text, size, ..
+                x, y, text, size, font, ..
             } => {
-                let (tw, th) = dcli_raster::text::measure_text(text, *size);
+                let (tw, th) = dcli_raster::text::measure_text_font(text, *size, font.as_deref());
                 if tw > 0.0 && th > 0.0 {
                     let m = size.max(1.0) * 0.15 + 2.0;
                     add(*x - m, *y - m, *x + tw + m, *y + th + m);
@@ -886,12 +896,14 @@ fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
             text,
             size,
             rgba,
+            font,
         } => Shape::Text {
             x: x + dx,
             y: y + dy,
             text: text.clone(),
             size: *size,
             rgba: *rgba,
+            font: font.clone(),
         },
         Shape::Path {
             points,
@@ -1036,8 +1048,9 @@ fn draw_shape(s: &mut Surface, shape: &Shape) {
             text,
             size,
             rgba,
+            font,
         } => {
-            dcli_raster::text::draw_text(s, *x, *y, text, *size, *rgba);
+            dcli_raster::text::draw_text_font(s, *x, *y, text, *size, *rgba, font.as_deref());
         }
         Shape::Path {
             points,
@@ -1587,6 +1600,7 @@ mod tests {
                     text: "CLI로 만든".into(),
                     size: 78.0,
                     rgba: [23, 38, 35, 255],
+                    font: None,
                 }],
             },
             index: None,
@@ -1662,6 +1676,7 @@ mod tests {
                         text: "T".into(),
                         size: 16.0,
                         rgba: [0, 0, 0, 255],
+                        font: None,
                     }],
                 },
                 index: Some(1),

@@ -17,6 +17,8 @@
 
 pub mod shapes;
 pub mod text;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sysfonts;
 
 use dcli_color::{srgb_eotf, srgb_oetf, BlendSpace, LinearPremul};
 use dcli_model::{BlendMode, Document};
@@ -133,6 +135,7 @@ pub enum ViewItem {
         text: String,
         size: f32,
         rgba: [u8; 4],
+        font: Option<String>,
     },
     Shadow {
         x: f32,
@@ -330,12 +333,14 @@ fn view_item_to_screen(it: &ViewItem, vx: f32, vy: f32, s: f32) -> ViewItem {
             text,
             size,
             rgba,
+            font,
         } => ViewItem::Text {
             x: tx(*x),
             y: ty(*y),
             text: text.clone(),
             size: size * s,
             rgba: *rgba,
+            font: font.clone(),
         },
         ViewItem::Shadow {
             x,
@@ -430,12 +435,12 @@ fn view_item_bounds(it: &ViewItem) -> Option<(f32, f32, f32, f32)> {
             Some((nx - m, ny - m, mx + m, my + m))
         }
         ViewItem::Text {
-            x, y, text, size, ..
+            x, y, text, size, font, ..
         } => {
             if text.is_empty() || *size <= 0.0 {
                 return None;
             }
-            let (tw, th) = text::measure_text(text, *size);
+            let (tw, th) = text::measure_text_font(text, *size, font.as_deref());
             let m = size.max(1.0) * 0.15 + 2.0;
             (tw > 0.0 && th > 0.0).then_some((x - m, y - m, x + tw + m, y + th + m))
         }
@@ -571,8 +576,9 @@ fn draw_view_item(sfc: &mut Surface, it: &ViewItem) {
             text,
             size,
             rgba,
+            font,
         } => {
-            text::draw_text(sfc, *x, *y, text, *size, *rgba);
+            text::draw_text_font(sfc, *x, *y, text, *size, *rgba, font.as_deref());
         }
         ViewItem::Shadow {
             x,

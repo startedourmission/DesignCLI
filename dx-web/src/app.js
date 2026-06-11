@@ -337,10 +337,65 @@ export class App extends EventTarget {
     return [ox + on[0] - oc[0], oy + on[1] - oc[1]];
   }
 
+  /** 사용 가능한 글꼴 목록(데몬 스캔). 로컬 모드/실패 시 번들만. */
+  async fontList() {
+    if (this._fontList) return this._fontList;
+    try {
+      const r = await fetch("/fonts");
+      if (!r.ok) throw new Error(String(r.status));
+      const j = await r.json();
+      this._fontList = j.fonts ?? ["Pretendard"];
+    } catch {
+      this._fontList = ["Pretendard"];
+    }
+    return this._fontList;
+  }
+
+  /** 글꼴을 wasm에 등록(1회). 등록되면 벡터 캐시가 비워져 즉시 선명하게 재래스터. */
+  async ensureFont(name) {
+    if (!name || name === "Pretendard") return true;
+    this._loadedFonts ??= new Set();
+    if (this._loadedFonts.has(name)) return true;
+    if (typeof this.editor.register_font !== "function") return false;
+    try {
+      const r = await fetch(`/fonts/data?name=${encodeURIComponent(name)}`);
+      if (!r.ok) return false;
+      const idx = parseInt(r.headers.get("x-face-index") ?? "0", 10) || 0;
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      this.editor.register_font(name, bytes, idx);
+      this._loadedFonts.add(name);
+      this.renderer.markDirty();
+      return true;
+    } catch (e) {
+      console.warn("[font] 등록 실패:", name, e);
+      return false;
+    }
+  }
+
+  /** 문서가 쓰는 글꼴들을 미리 등록(열기 직후 — 폴백 글꼴 표시 방지). */
+  preloadDocFonts() {
+    const names = new Set();
+    for (const l of this.layers()) {
+      const f = this.metaOf(l)?.font;
+      if (f && f !== "Pretendard") names.add(f);
+    }
+    for (const n of names) this.ensureFont(n);
+  }
+
+  /** 텍스트 글꼴 변경(meta.font) — 노드 보존 재래스터. */
+  setTextFont(id, font) {
+    const l = this.layers().find((v) => v.id === id);
+    const meta = this._metaOf(l);
+    if (!l || meta?.type !== "text") return false;
+    const next = { ...meta };
+    if (font && font !== "Pretendard") next.font = font; else delete next.font;
+    return this._applyMetaRestyle(l, next);
+  }
+
   /** 엔진과 동일 metric의 텍스트 레이아웃 측정 [w, h] (배경 박스 구성용). */
-  measureText(text, size) {
+  measureText(text, size, font) {
     if (typeof this.editor.measure_text === "function") {
-      const m = this.editor.measure_text(String(text ?? ""), size);
+      const m = this.editor.measure_text(String(text ?? ""), size, font || undefined);
       return [m[0], m[1]];
     }
     // 구버전 wasm 폴백(근사).
@@ -358,7 +413,7 @@ export class App extends EventTarget {
       const size = meta.size ?? 32;
       const items = [];
       if (meta.bg?.rgba) {
-        const [tw, th] = this.measureText(meta.text, size);
+        const [tw, th] = this.measureText(meta.text, size, meta.font);
         const px = meta.bg.padX ?? size * 0.35;
         const py = meta.bg.padY ?? size * 0.22;
         const bg = B.roundedRect(
@@ -369,7 +424,9 @@ export class App extends EventTarget {
         if (meta.bg.gradient) bg.gradient = meta.bg.gradient;
         items.push(bg);
       }
-      items.push(B.text(meta.x ?? 0, meta.y ?? 0, meta.text ?? "", size, meta.rgba ?? [0, 0, 0, 255]));
+      const t = B.text(meta.x ?? 0, meta.y ?? 0, meta.text ?? "", size, meta.rgba ?? [0, 0, 0, 255]);
+      if (meta.font) t.font = meta.font;
+      items.push(t);
       return items;
     }
     if ((meta.type === "shape" || meta.type === "brush") && meta.item) {
@@ -1013,6 +1070,7 @@ export class App extends EventTarget {
     this.renderer.resize();
     this._notify();
     this._scheduleGeometryWarmup();
+    this.preloadDocFonts();
   }
 
   /** 원격(데몬 broadcast) 적용 후 화면·패널 갱신. */

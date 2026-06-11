@@ -75,6 +75,7 @@ tracing = "0.1"
 psd = "0.3"
 # 텍스트 래스터라이저(dcli-raster) — 순수 Rust, wasm 호환. 폰트는 Pretendard(OFL) 번들.
 ab_glyph = "0.2"
+ttf-parser = "0.25"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 console_error_panic_hook = "0.1"

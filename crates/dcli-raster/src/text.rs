@@ -5,16 +5,59 @@
 //! 한글/라틴 풀커버(Pretendard-Regular). 줄바꿈은 '\n'.
 
 use crate::shapes::{blend_px, to_linear};
-use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
+use ab_glyph::{Font, FontArc, FontVec, PxScale, ScaleFont};
 use dcli_tile::Surface;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 /// 번들 폰트 바이트(Pretendard-Regular, SIL OFL 1.1).
 static FONT_BYTES: &[u8] = include_bytes!("../assets/Pretendard-Regular.otf");
 
-fn font() -> &'static FontRef<'static> {
-    static F: OnceLock<FontRef<'static>> = OnceLock::new();
-    F.get_or_init(|| FontRef::try_from_slice(FONT_BYTES).expect("번들 폰트 파싱"))
+/// 번들 기본 폰트의 표시 이름 — meta.font 미지정/미등록 폰트의 폴백.
+pub const DEFAULT_FONT: &str = "Pretendard";
+
+fn bundled() -> FontArc {
+    static F: OnceLock<FontArc> = OnceLock::new();
+    F.get_or_init(|| FontArc::try_from_slice(FONT_BYTES).expect("번들 폰트 파싱"))
+        .clone()
+}
+
+fn registry() -> &'static RwLock<HashMap<String, FontArc>> {
+    static R: OnceLock<RwLock<HashMap<String, FontArc>>> = OnceLock::new();
+    R.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// 폰트 등록(TTF/OTF/TTC 바이트, collection은 face_index). 같은 이름은 교체.
+/// 등록은 프로세스 전역 — 문서는 meta.font에 이름만 기록하고, 미등록 환경에선
+/// 번들 폰트로 폴백한다(PSD와 같은 이식성 모델).
+pub fn register_font(name: &str, bytes: Vec<u8>, face_index: u32) -> Result<(), String> {
+    let font = FontVec::try_from_vec_and_index(bytes, face_index)
+        .map(FontArc::from)
+        .map_err(|e| format!("폰트 파싱 실패({name}): {e}"))?;
+    registry().write().unwrap().insert(name.to_string(), font);
+    Ok(())
+}
+
+/// 등록된 폰트 이름 목록(번들 제외).
+pub fn registered_fonts() -> Vec<String> {
+    registry().read().unwrap().keys().cloned().collect()
+}
+
+pub fn has_font(name: &str) -> bool {
+    name == DEFAULT_FONT || registry().read().unwrap().contains_key(name)
+}
+
+/// 이름 → 폰트(미등록/None은 번들 폴백).
+fn resolve(name: Option<&str>) -> FontArc {
+    match name {
+        Some(n) if n != DEFAULT_FONT => registry()
+            .read()
+            .unwrap()
+            .get(n)
+            .cloned()
+            .unwrap_or_else(bundled),
+        _ => bundled(),
+    }
 }
 
 /// 텍스트를 (x, y)에 그린다 — (x, y)는 첫 줄의 **좌상단** 기준, `size`는 px 단위.
@@ -28,11 +71,24 @@ pub fn draw_text(
     size: f32,
     rgba: [u8; 4],
 ) -> (f32, f32) {
+    draw_text_font(s, x, y, text, size, rgba, None)
+}
+
+/// draw_text + 폰트 선택(None/미등록 = 번들 Pretendard).
+pub fn draw_text_font(
+    s: &mut Surface,
+    x: f32,
+    y: f32,
+    text: &str,
+    size: f32,
+    rgba: [u8; 4],
+    font: Option<&str>,
+) -> (f32, f32) {
     if size <= 0.0 || text.is_empty() {
         return (0.0, 0.0);
     }
     let color = to_linear(rgba);
-    let f = font();
+    let f = resolve(font);
     let scaled = f.as_scaled(PxScale::from(size));
     let ascent = scaled.ascent();
     let line_h = scaled.height() + scaled.line_gap();
@@ -76,10 +132,15 @@ pub fn draw_text(
 
 /// 텍스트 레이아웃 크기만 계산한다. `draw_text`와 같은 advance/line-height contract를 쓴다.
 pub fn measure_text(text: &str, size: f32) -> (f32, f32) {
+    measure_text_font(text, size, None)
+}
+
+/// measure_text + 폰트 선택(draw_text_font와 동일 metric).
+pub fn measure_text_font(text: &str, size: f32, font: Option<&str>) -> (f32, f32) {
     if size <= 0.0 || text.is_empty() {
         return (0.0, 0.0);
     }
-    let f = font();
+    let f = resolve(font);
     let scaled = f.as_scaled(PxScale::from(size));
     let ascent = scaled.ascent();
     let line_h = scaled.height() + scaled.line_gap();

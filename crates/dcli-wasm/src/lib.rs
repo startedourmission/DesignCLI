@@ -272,9 +272,18 @@ impl Editor {
     }
 
     /// 텍스트 레이아웃 측정 [w, h] — 엔진과 동일 metric(텍스트 배경 박스 구성용).
-    pub fn measure_text(&self, text: &str, size: f32) -> Vec<f32> {
-        let (w, h) = dcli_raster::text::measure_text(text, size);
+    pub fn measure_text(&self, text: &str, size: f32, font: Option<String>) -> Vec<f32> {
+        let (w, h) = dcli_raster::text::measure_text_font(text, size, font.as_deref());
         vec![w, h]
+    }
+
+    /// 글꼴 등록(TTF/OTF/TTC 바이트). 등록 후 벡터 캐시를 비워 즉시 재래스터되게 한다.
+    pub fn register_font(&mut self, name: &str, bytes: &[u8], face_index: u32) -> Result<(), JsError> {
+        dcli_raster::text::register_font(name, bytes.to_vec(), face_index)
+            .map_err(|e| JsError::new(&e))?;
+        self.view_cache.borrow_mut().clear();
+        self.dirty = true;
+        Ok(())
     }
 
     /// 레이어 1개만 PNG로 export(피그마의 per-layer Export). 트랜스폼 적용된 표시 AABB
@@ -645,12 +654,14 @@ fn shape_to_view(sh: dcli_cli::dispatch::Shape, dx: f32, dy: f32) -> dcli_raster
             text,
             size,
             rgba,
+            font,
         } => V::Text {
             x: x + dx,
             y: y + dy,
             text,
             size,
             rgba,
+            font,
         },
         S::Shadow {
             x,

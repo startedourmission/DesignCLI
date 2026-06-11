@@ -846,6 +846,7 @@ dependencies = [
  "dcli-color",
  "dcli-model",
  "dcli-tile",
+ "ttf-parser",
 ]
 
 [[package]]

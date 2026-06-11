@@ -164,7 +164,7 @@ class DxTopbar extends LitElement {
   constructor() {
     super();
     this.tool = "select"; this.color = "#0d99ff"; this.alpha = 1;
-    this.width = 4; this.radius = 12; this.fontSize = 32;
+    this.width = 4; this.radius = 12; this.fontSize = 32; this.fontName = "Pretendard"; this._fonts = null;
     this._shape = "rect"; this._menu = false; this._exportMenu = false; this._v = 0;
     this._returnTool = "select";
     this.zoom = 1; this.theme = "dark";
@@ -201,7 +201,14 @@ class DxTopbar extends LitElement {
     return {
       tool: this.tool, rgba: RGBA(this.color, this.alpha),
       width: this.width, radius: this.radius, size: this.fontSize,
+      font: this.fontName === "Pretendard" ? null : this.fontName,
     };
+  }
+
+  async _loadFonts() {
+    if (this._fonts) return;
+    this._fonts = await this.app?.fontList?.() ?? ["Pretendard"];
+    this.requestUpdate();
   }
   _emit() { this.dispatchEvent(new CustomEvent("tool-changed", { detail: this._toolState(), bubbles: true, composed: true })); }
   _zoomCmd(action) { this.dispatchEvent(new CustomEvent("zoom-cmd", { detail: action, bubbles: true, composed: true })); }
@@ -253,8 +260,17 @@ class DxTopbar extends LitElement {
             @input=${(e) => { this.alpha = +e.target.value; this._emit(); }} /></label>
           ${needsWidth(this.tool) ? html`<label>W<input class="num" type="number" min="1" max="100" .value=${String(this.width)}
             @change=${(e) => { this.width = +e.target.value || 1; this._emit(); }} /></label>` : nothing}
-          ${this.tool === "text" ? html`<label>크기<input class="num" type="number" min="6" max="400" .value=${String(this.fontSize)}
-            @change=${(e) => { this.fontSize = +e.target.value || 12; this._emit(); }} /></label>` : nothing}
+          ${this.tool === "text" ? html`
+            <label>크기<input class="num" type="number" min="6" max="400" .value=${String(this.fontSize)}
+              @change=${(e) => { this.fontSize = +e.target.value || 12; this._emit(); }} /></label>
+            <select style="max-width:150px" .value=${this.fontName} title="글꼴"
+              @pointerdown=${() => this._loadFonts()}
+              @change=${async (e) => {
+                const v = e.target.value;
+                if (await this.app?.ensureFont?.(v) !== false) { this.fontName = v; this._emit(); }
+              }}>
+              ${(this._fonts ?? ["Pretendard"]).map((f) => html`<option value=${f} ?selected=${f === this.fontName}>${f}</option>`)}
+            </select>` : nothing}
         </div>` : nothing}
       <div class="corner">
         <button class="ico" title="undo (Cmd+Z)" ?disabled=${!this.app?.canUndo()} @click=${() => this.app.undo()}>${icon("undo")}</button>
@@ -493,7 +509,7 @@ class DxCanvas extends LitElement {
       this._openText({
         x: meta.x, y: meta.y, value: meta.text,
         size: meta.size, rgba: meta.rgba,
-        origText: meta.text, origSize: meta.size, bg: meta.bg ?? null,
+        origText: meta.text, origSize: meta.size, bg: meta.bg ?? null, font: meta.font ?? null,
         editId: hit, xf, box: this.app.textBoxBounds(layer, meta),
       });
     } catch (err) {
@@ -1378,14 +1394,15 @@ class DxCanvas extends LitElement {
     const s = this.toolState ?? {};
     const size = t.size ?? s.size ?? 32;
     const rgba = t.rgba ?? s.rgba ?? [13, 153, 255, 255];
-    const meta = JSON.stringify({ type: "text", x: t.x, y: t.y, text: v, size, rgba });
+    const font = t.font ?? s.font ?? null;
+    const meta = JSON.stringify({ type: "text", x: t.x, y: t.y, text: v, size, rgba, ...(font ? { font } : {}) });
     const name = v.split("\n")[0].slice(0, 20);
     if (t.editId != null) {
       // 기존 텍스트 편집: 노드 보존 재래스터(replace_paint_source) — 그룹 소속·z순서·
       // 선택이 그대로 유지된다. offset은 새 표면 origin 기준으로 리베이스
       // (레거시/이동 레이어 좌상단 점프 방지).
       const xf = t.xf ?? { offset: [0, 0], scale: [1, 1], rotation: 0 };
-      const metaObj = { type: "text", x: t.x, y: t.y, text: v, size, rgba, ...(t.bg ? { bg: t.bg } : {}) };
+      const metaObj = { type: "text", x: t.x, y: t.y, text: v, size, rgba, ...(font ? { font } : {}), ...(t.bg ? { bg: t.bg } : {}) };
       const items = this.app.itemsFromMeta(metaObj);
       const pseudo = { offset: xf.offset, surface_size: xf.surface_size };
       const oldItems = this.app.itemsFromMeta({ ...metaObj, text: t.origText ?? v, size: t.origSize ?? size });
@@ -1619,7 +1636,7 @@ class DxCanvas extends LitElement {
           const sp = this._screen(pos);
           const rotDeg = xf?.rotation ?? 0;
           return html`<textarea class="txt" spellcheck="false"
-          style="left:${sp.x}px; top:${sp.y}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}; transform: rotate(${rotDeg}deg); transform-origin: 0 0;"
+          style="left:${sp.x}px; top:${sp.y}px; font-size:${(t.size ?? s?.size ?? 32) * z}px; color:${HEX(t.rgba ?? s?.rgba ?? [13, 153, 255, 255])}; font-family: '${(t.font ?? s?.font ?? "Pretendard").replace(/'/g, "")}', Pretendard, Inter, sans-serif; transform: rotate(${rotDeg}deg); transform-origin: 0 0;"
           .value=${t.value}
           @input=${(e) => { t.value = e.target.value; e.target.style.width = "auto"; e.target.style.width = e.target.scrollWidth + "px"; e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
           @keydown=${(e) => {
@@ -2026,7 +2043,7 @@ customElements.define("dx-layer-panel", DxLayerPanel);
 
 // ───────── Design 패널 (우측) ─────────
 class DxProps extends LitElement {
-  static properties = { app: { attribute: false }, _v: { state: true }, _lock: { state: true } };
+  static properties = { app: { attribute: false }, _v: { state: true }, _lock: { state: true }, _fonts: { state: true } };
   static styles = [controls, css`
     :host {
       display: block; position: fixed; right: 24px; top: 108px; z-index: 70;
@@ -2048,10 +2065,29 @@ class DxProps extends LitElement {
     .sec-t .b, .rowbtns .b { width: 24px; height: 24px; padding: 0; justify-content: center; }
     .rowbtns { display: flex; gap: 2px; align-items: center; justify-content: flex-end; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
-    .cell { display: flex; align-items: center; gap: 0; background: var(--bg-elev); border-radius: var(--radius); border: 1px solid transparent; }
+    .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 7px; }
+    .cell {
+      display: flex; align-items: center; gap: 0; min-width: 0; height: 28px;
+      background: var(--bg-elev); border-radius: var(--radius); border: 1px solid transparent;
+    }
     .cell:focus-within { border-color: var(--accent); }
-    .cell span { padding: 0 0 0 7px; color: var(--fg-3); font-size: 10px; }
-    .cell input { background: none; border: none; width: 100%; padding: 0 6px 0 4px; }
+    .cell span {
+      padding: 0 0 0 8px; color: var(--fg-3); font-size: 10px;
+      flex: none; white-space: nowrap;
+    }
+    .cell input {
+      background: none; border: none; width: 100%; min-width: 0;
+      height: 100%; padding: 0 8px 0 5px;
+    }
+    .cell input[type="number"]::-webkit-outer-spin-button,
+    .cell input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .cell input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+    /* 피그마식: 라벨은 컨트롤 위 작은 회색 텍스트(셀 안 긴 라벨 = 줄바꿈 원인) */
+    .lbl { font-size: 10px; color: var(--fg-3); margin: 10px 0 5px; }
+    .lbl:first-child { margin-top: 0; }
+    .lbls { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 10px 0 5px; }
+    .lbls.three { grid-template-columns: 1fr 1fr 1fr; }
+    .lbls .lbl { margin: 0; }
     .alignr { display: flex; gap: 1px; justify-content: space-between; }
     .alignr button { width: 32px; height: 28px; padding: 0; justify-content: center; }
     .field { margin-top: 10px; }
@@ -2064,7 +2100,13 @@ class DxProps extends LitElement {
     .chk { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-2); cursor: pointer; }
     .empty { padding: 22px 14px; font-size: 11px; color: var(--fg-3); line-height: 1.8; }
   `];
-  constructor() { super(); this._v = 0; this._lock = false; }
+  constructor() { super(); this._v = 0; this._lock = false; this._fonts = null; }
+
+  async _loadFonts() {
+    if (this._fonts) return;
+    this._fonts = await this.app?.fontList?.() ?? ["Pretendard"];
+    this.requestUpdate();
+  }
   connectedCallback() { super.connectedCallback(); this._onChange = () => { this._v++; }; this.app?.addEventListener("changed", this._onChange); }
   disconnectedCallback() { this.app?.removeEventListener("changed", this._onChange); super.disconnectedCallback(); }
   _set(patch) { this.app.apply([B.setProps(this.app.selectedId, patch)]); }
@@ -2173,15 +2215,20 @@ class DxProps extends LitElement {
       </div>
       <div class="sec">
         <div class="sec-t">위치</div>
+        <div class="lbl">정렬</div>
         <div class="alignr">
           ${["left", "center-h", "right", "top", "center-v", "bottom"].map((m, i) => html`
             <button title=${m} @click=${() => this.app.align(l.id, m)}>
               ${icon(["alignL", "alignCH", "alignR", "alignT", "alignCV", "alignB"][i], 14)}</button>`)}
         </div>
-        <div class="grid2" style="margin-top:8px">
+        <div class="lbl">위치</div>
+        <div class="grid2">
           ${num("X", absX, (v) => commitXY("x", v))}
           ${num("Y", absY, (v) => commitXY("y", v))}
-          ${num("R°", Math.round((l.rotation ?? 0) * 10) / 10, (v) => setRotAnchored(+v || 0))}
+        </div>
+        <div class="lbl">회전</div>
+        <div class="grid2">
+          ${num("∠", Math.round((l.rotation ?? 0) * 10) / 10, (v) => setRotAnchored(+v || 0))}
           <div class="rowbtns">
             <button class="b" title="90° 회전" @click=${() => setRotAnchored((((l.rotation ?? 0) + 90) % 360 + 360) % 360)}>${icon("rot90", 13)}</button>
             <button class="b" title="좌우 반전 (Shift+H)" @click=${() => this.app.flipMany([l.id], "x")}>${icon("flipH", 13)}</button>
@@ -2195,6 +2242,7 @@ class DxProps extends LitElement {
           <button class="b ${this._lock ? "active" : ""}" title="비율 잠금"
             @click=${() => { this._lock = !this._lock; }}>${icon(this._lock ? "lock" : "unlock", 12)}</button>
         </div>
+        <div class="lbl">크기</div>
         <div class="grid2">
           ${num("W", wPx, (v) => {
             const nv = +v;
@@ -2210,6 +2258,9 @@ class DxProps extends LitElement {
               setScaleAnchored([sx * r, sy * r], tlAnchor);
             } else setH(nv);
           }, isText)}
+        </div>
+        <div class="lbl">스케일</div>
+        <div class="grid2">
           <div class="cell" style="grid-column:1/3"><span>S</span>
             <input type="text" .value=${`${fmt3(sx)} , ${fmt3(sy)}`} title=${isText ? "텍스트는 폰트 변형 방지를 위해 scale 편집이 비활성화됨" : "scale (x , y)"}
               ?disabled=${isText}
@@ -2226,16 +2277,21 @@ class DxProps extends LitElement {
           <button class="b" title=${l.visible ? "숨기기" : "표시"}
             @click=${() => this._set({ visible: !l.visible })}>${icon(l.visible ? "eye" : "eyeOff", 13)}</button>
         </div>
+        <div class="lbls">
+          <span class="lbl">불투명도</span>
+          ${canRadius ? html`<span class="lbl">모서리 반경</span>` : html`<span></span>`}
+        </div>
         <div class="grid2">
-          <div class="cell"><span>불투명</span>
+          <div class="cell"><span>%</span>
             <input type="number" min="0" max="100" step="1" .value=${String(Math.round(l.opacity * 100))}
               @change=${(e) => this._set({ opacity: Math.max(0, Math.min(100, +e.target.value || 0)) / 100 })} /></div>
           ${canRadius ? html`
-            <div class="cell"><span>반경</span>
+            <div class="cell"><span>⌒</span>
               <input type="number" min="0" max="400" step="1" .value=${String(Math.round(meta.radius ?? meta.item?.radius ?? 0))}
                 @change=${(e) => this.app.setShapeRadius(l.id, +e.target.value)} /></div>` : nothing}
         </div>
-        <div class="field">
+        <div class="lbl">블렌드</div>
+        <div class="field" style="margin-top:0">
           <select .value=${l.blend} @change=${(e) => this.app.apply([B.setBlend(l.id, e.target.value)])}>
             <option value="normal">Normal</option>
             <option value="multiply">Multiply</option>
@@ -2286,9 +2342,12 @@ class DxProps extends LitElement {
             ${mode === "linear" || mode === "radial" ? html`
               ${colorAlpha(c2, (c) => apply(mode, ang, c1, c))}
               ${mode === "linear" ? html`
-                <div class="cell" style="margin-top:6px"><span>각도</span>
-                  <input type="number" step="15" .value=${String(ang)}
-                    @change=${(e) => apply(mode, +e.target.value || 0)} /></div>` : nothing}
+                <div class="lbl">각도</div>
+                <div class="grid2">
+                  <div class="cell"><span>∠</span>
+                    <input type="number" step="15" .value=${String(ang)}
+                      @change=${(e) => apply(mode, +e.target.value || 0)} /></div>
+                </div>` : nothing}
             ` : nothing}`;
         };
         if (isShape) {
@@ -2311,9 +2370,12 @@ class DxProps extends LitElement {
               </div>
               ${hasStroke ? html`
                 ${colorAlpha(strokeRgba, (c) => this.app.setShapeStroke(l.id, c, Math.max(1, strokeWidth || 1)))}
-                <div class="cell" style="margin-top:6px"><span>두께</span>
-                  <input type="number" min="0" max="400" step="1" .value=${String(strokeWidth)}
-                    @change=${(e) => this.app.setShapeStroke(l.id, strokeRgba, +e.target.value)} /></div>
+                <div class="lbl">두께</div>
+                <div class="grid2">
+                  <div class="cell"><span>W</span>
+                    <input type="number" min="0" max="400" step="1" .value=${String(strokeWidth)}
+                      @change=${(e) => this.app.setShapeStroke(l.id, strokeRgba, +e.target.value)} /></div>
+                </div>
               ` : nothing}
             </div>
             <div class="sec">
@@ -2324,14 +2386,18 @@ class DxProps extends LitElement {
                   : html`<button class="b" title="그림자 추가" @click=${() => this.app.setShapeShadow(l.id, { dx: 0, dy: 8, blur: 24, rgba: [10, 14, 20, 110] })}>${icon("plus", 12)}</button>`}
               </div>
               ${shadow ? html`
-                <div class="grid2">
-                  <div class="cell"><span>X</span><input type="number" .value=${String(shadow.dx ?? 0)}
+                <div class="lbls three">
+                  <span class="lbl">X</span><span class="lbl">Y</span><span class="lbl">흐림</span>
+                </div>
+                <div class="grid3">
+                  <div class="cell"><input type="number" .value=${String(shadow.dx ?? 0)}
                     @change=${(e) => this.app.setShapeShadow(l.id, { ...shadow, dx: +e.target.value || 0 })} /></div>
-                  <div class="cell"><span>Y</span><input type="number" .value=${String(shadow.dy ?? 8)}
+                  <div class="cell"><input type="number" .value=${String(shadow.dy ?? 8)}
                     @change=${(e) => this.app.setShapeShadow(l.id, { ...shadow, dy: +e.target.value || 0 })} /></div>
-                  <div class="cell"><span>흐림</span><input type="number" min="0" .value=${String(shadow.blur ?? 24)}
+                  <div class="cell"><input type="number" min="0" .value=${String(shadow.blur ?? 24)}
                     @change=${(e) => this.app.setShapeShadow(l.id, { ...shadow, blur: Math.max(0, +e.target.value || 0) })} /></div>
                 </div>
+                <div class="lbl">색상</div>
                 ${colorAlpha(shadow.rgba ?? [10, 14, 20, 110], (c) => this.app.setShapeShadow(l.id, { ...shadow, rgba: c }))}
               ` : nothing}
             </div>`;
@@ -2341,15 +2407,27 @@ class DxProps extends LitElement {
           return html`
             <div class="sec">
               <div class="sec-t">텍스트</div>
+              <div class="lbl">글꼴</div>
+              <div class="field" style="margin-top:0">
+                <select .value=${meta.font ?? "Pretendard"} title="글꼴"
+                  @pointerdown=${() => this._loadFonts()}
+                  @change=${async (e) => {
+                    const v = e.target.value;
+                    if (await this.app.ensureFont(v) !== false) this.app.setTextFont(l.id, v);
+                  }}>
+                  ${(this._fonts ?? [meta.font ?? "Pretendard"]).map((f) => html`<option value=${f} ?selected=${f === (meta.font ?? "Pretendard")}>${f}</option>`)}
+                </select>
+              </div>
+              <div class="lbls">
+                <span class="lbl">크기</span><span></span>
+              </div>
               <div class="grid2">
-                <div class="cell"><span>크기</span>
+                <div class="cell"><span>px</span>
                   <input type="number" min="6" max="400" step="1" .value=${String(Math.round(meta.size ?? 32))}
                     @change=${(e) => this.app.setTextSize(l.id, +e.target.value)} /></div>
               </div>
-              <div class="field">
-                <label>글자색</label>
-                ${colorAlpha(styleRgba, (c) => this.app.setLayerColor(l.id, c))}
-              </div>
+              <div class="lbl">글자색</div>
+              ${colorAlpha(styleRgba, (c) => this.app.setLayerColor(l.id, c))}
             </div>
             <div class="sec">
               <div class="sec-t">배경
@@ -2366,10 +2444,13 @@ class DxProps extends LitElement {
                     else this.app.setTextBg(l.id, { ...bg, gradient: spec.gradient });
                   },
                 )}
-                <div class="grid2" style="margin-top:6px">
-                  <div class="cell"><span>패딩</span><input type="number" min="0" .value=${String(Math.round(bg.padX ?? (meta.size ?? 32) * 0.35))}
+                <div class="lbls">
+                  <span class="lbl">패딩</span><span class="lbl">모서리 반경</span>
+                </div>
+                <div class="grid2">
+                  <div class="cell"><input type="number" min="0" .value=${String(Math.round(bg.padX ?? (meta.size ?? 32) * 0.35))}
                     @change=${(e) => { const v = Math.max(0, +e.target.value || 0); this.app.setTextBg(l.id, { ...bg, padX: v, padY: Math.round(v * 0.63) }); }} /></div>
-                  <div class="cell"><span>반경</span><input type="number" min="0" .value=${String(Math.round(bg.radius ?? (meta.size ?? 32) * 0.18))}
+                  <div class="cell"><input type="number" min="0" .value=${String(Math.round(bg.radius ?? (meta.size ?? 32) * 0.18))}
                     @change=${(e) => this.app.setTextBg(l.id, { ...bg, radius: Math.max(0, +e.target.value || 0) })} /></div>
                 </div>
               ` : nothing}

@@ -344,6 +344,59 @@ pub async fn rename_project(
     (StatusCode::OK, Json(json!({ "old": old, "name": new }))).into_response()
 }
 
+/// 사용 가능한 글꼴 목록(번들 + 시스템 스캔 + ./fonts). 최초 호출 시 스캔(수 초 가능).
+pub async fn list_fonts() -> Response {
+    let names: Vec<String> = std::iter::once(dcli_raster::text::DEFAULT_FONT.to_string())
+        .chain(dcli_raster::sysfonts::scan().iter().map(|f| f.name.clone()))
+        .collect();
+    Json(serde_json::json!({ "fonts": names })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct FontDataParams {
+    pub name: String,
+}
+
+/// 글꼴 바이트 서빙(wasm 등록용). x-face-index 헤더로 TTC face 지정.
+pub async fn font_data(Query(p): Query<FontDataParams>) -> Response {
+    let Some(f) = dcli_raster::sysfonts::scan().iter().find(|f| f.name == p.name) else {
+        return (StatusCode::NOT_FOUND, format!("글꼴 없음: {}", p.name)).into_response();
+    };
+    match std::fs::read(&f.path) {
+        Ok(bytes) => (
+            [
+                ("content-type", "font/otf".to_string()),
+                ("x-face-index", f.index.to_string()),
+                ("cache-control", "max-age=86400".to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("글꼴 읽기 실패: {e}")).into_response(),
+    }
+}
+
+/// 액션에 등장하는 텍스트 글꼴을 데몬 프로세스에 지연 등록(서버측 래스터용).
+pub fn ensure_action_fonts(actions: &[dcli_cli::dispatch::Action]) {
+    use dcli_cli::dispatch::{Action, PixelSource, Shape};
+    let mut names: Vec<&str> = Vec::new();
+    for a in actions {
+        let src = match a {
+            Action::AddPaintLayer { source, .. } => Some(source),
+            Action::ReplacePaintSource { source, .. } => Some(source),
+            _ => None,
+        };
+        if let Some(PixelSource::Shapes { items }) = src {
+            for it in items {
+                if let Shape::Text { font: Some(f), .. } = it {
+                    names.push(f);
+                }
+            }
+        }
+    }
+    dcli_raster::sysfonts::ensure_all(names);
+}
+
 /// 라이브 문서를 PSD로 export(레이어 보존) — 에이전트/브라우저 다운로드용.
 pub async fn export_psd(State(app): Shared, Path(id): Path<String>) -> Response {
     let docs = app.docs.lock().unwrap();
@@ -448,6 +501,9 @@ pub async fn apply(
     if ensure_doc(&app, &id).is_none() {
         return doc_not_found(&id);
     }
+    // 텍스트 글꼴을 서버 프로세스에 지연 등록 — 없으면 데몬측 래스터가 번들로 폴백돼
+    // 클라이언트(웹) 표시와 어긋난다. 뮤텍스 잡기 전(I/O는 잠금 밖).
+    ensure_action_fonts(&actions);
     let mut docs = app.docs.lock().unwrap();
     let ds = docs.get_mut(&id).unwrap();
     let res = dispatch::apply_batch(&mut ds.hist, &actions, false);

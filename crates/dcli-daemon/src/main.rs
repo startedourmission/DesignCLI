@@ -89,6 +89,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/terminal/guide.md", get(terminal::terminal_guide))
         .route("/terminal/:kind", get(terminal::open_terminal))
         .route("/projects", get(routes::list_projects))
+        .route("/fonts", get(routes::list_fonts))
+        .route("/fonts/data", get(routes::font_data))
         .route("/projects/import-psd", post(routes::import_psd_project))
         .route("/projects/:name/rename", post(routes::rename_project))
         .route("/projects/:name", delete(routes::delete_project))

@@ -10,3 +10,7 @@ dcli-color.workspace = true
 dcli-tile.workspace = true
 dcli-model.workspace = true
 ab_glyph.workspace = true
+
+# 시스템 폰트 스캔(이름 테이블 파싱) — 네이티브 전용(wasm 제외).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ttf-parser.workspace = true
