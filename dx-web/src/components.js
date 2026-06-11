@@ -192,6 +192,7 @@ class DxTopbar extends LitElement {
   setColor(rgba) { this.color = HEX(rgba); this._emit(); }
   _pick(t) {
     if (t === "eyedrop") this._returnTool = this.tool === "eyedrop" ? this._returnTool : this.tool;
+    if (t === "text") this._loadFonts();
     this.tool = t;
     if (isShapeTool(t)) this._shape = t;
     this._menu = false;
@@ -205,10 +206,14 @@ class DxTopbar extends LitElement {
     };
   }
 
-  async _loadFonts() {
-    if (this._fonts) return;
-    this._fonts = await this.app?.fontList?.() ?? ["Pretendard"];
-    this.requestUpdate();
+  _loadFonts() {
+    if (this._fonts || this._fontsLoading) return;
+    this._fontsLoading = true;
+    (async () => {
+      this._fonts = await this.app?.fontList?.() ?? ["Pretendard"];
+      this._fontsLoading = false;
+      this.requestUpdate();
+    })();
   }
   _emit() { this.dispatchEvent(new CustomEvent("tool-changed", { detail: this._toolState(), bubbles: true, composed: true })); }
   _zoomCmd(action) { this.dispatchEvent(new CustomEvent("zoom-cmd", { detail: action, bubbles: true, composed: true })); }
@@ -264,7 +269,6 @@ class DxTopbar extends LitElement {
             <label>크기<input class="num" type="number" min="6" max="400" .value=${String(this.fontSize)}
               @change=${(e) => { this.fontSize = +e.target.value || 12; this._emit(); }} /></label>
             <select style="max-width:150px" .value=${this.fontName} title="글꼴"
-              @pointerdown=${() => this._loadFonts()}
               @change=${async (e) => {
                 const v = e.target.value;
                 if (await this.app?.ensureFont?.(v) !== false) { this.fontName = v; this._emit(); }
@@ -2102,10 +2106,14 @@ class DxProps extends LitElement {
   `];
   constructor() { super(); this._v = 0; this._lock = false; this._fonts = null; }
 
-  async _loadFonts() {
-    if (this._fonts) return;
-    this._fonts = await this.app?.fontList?.() ?? ["Pretendard"];
-    this.requestUpdate();
+  _loadFonts() {
+    if (this._fonts || this._fontsLoading) return;
+    this._fontsLoading = true;
+    (async () => {
+      this._fonts = await this.app?.fontList?.() ?? ["Pretendard"];
+      this._fontsLoading = false;
+      this.requestUpdate();
+    })();
   }
   connectedCallback() { super.connectedCallback(); this._onChange = () => { this._v++; }; this.app?.addEventListener("changed", this._onChange); }
   disconnectedCallback() { this.app?.removeEventListener("changed", this._onChange); super.disconnectedCallback(); }
@@ -2409,11 +2417,15 @@ class DxProps extends LitElement {
               <div class="sec-t">텍스트</div>
               <div class="lbl">글꼴</div>
               <div class="field" style="margin-top:0">
+                ${this._loadFonts() ?? nothing}
                 <select .value=${meta.font ?? "Pretendard"} title="글꼴"
-                  @pointerdown=${() => this._loadFonts()}
                   @change=${async (e) => {
                     const v = e.target.value;
-                    if (await this.app.ensureFont(v) !== false) this.app.setTextFont(l.id, v);
+                    if (await this.app.ensureFont(v) === false) {
+                      alert(`글꼴을 불러오지 못했습니다: ${v}`);
+                      return;
+                    }
+                    this.app.setTextFont(l.id, v);
                   }}>
                   ${(this._fonts ?? [meta.font ?? "Pretendard"]).map((f) => html`<option value=${f} ?selected=${f === (meta.font ?? "Pretendard")}>${f}</option>`)}
                 </select>

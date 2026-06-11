@@ -20,7 +20,7 @@ pub mod text;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sysfonts;
 
-use dcli_color::{srgb_eotf, srgb_oetf, BlendSpace, LinearPremul};
+use dcli_color::{srgb_eotf, srgb_eotf_fast, srgb_oetf, srgb_oetf_fast, BlendSpace, LinearPremul};
 use dcli_model::{BlendMode, Document};
 use dcli_tile::Surface;
 
@@ -198,12 +198,44 @@ pub fn composite_view_with(
     oh: u32,
     vec_render: VectorRender,
 ) -> Surface {
+    composite_view_impl(doc, vx, vy, s, ow, oh, vec_render, false)
+}
+
+/// **디스플레이 전용** 뷰 합성 — 감마 블렌드의 전달함수를 LUT(±1e-3)로 돌린다.
+///
+/// 반투명 레이어의 감마 블렌드는 픽셀당 powf ~9회로 화면 프레임의 지배 비용이다.
+/// 이 경로는 표시 프레임에만 쓰고, export/PSD/골든/materialize는 정확 경로
+/// (composite_view_with/composite/composite_region)를 유지한다 — 비트 계약 불변.
+#[allow(clippy::too_many_arguments)]
+pub fn composite_view_display(
+    doc: &Document,
+    vx: f32,
+    vy: f32,
+    s: f32,
+    ow: u32,
+    oh: u32,
+    vec_render: VectorRender,
+) -> Surface {
+    composite_view_impl(doc, vx, vy, s, ow, oh, vec_render, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn composite_view_impl(
+    doc: &Document,
+    vx: f32,
+    vy: f32,
+    s: f32,
+    ow: u32,
+    oh: u32,
+    vec_render: VectorRender,
+    fast: bool,
+) -> Surface {
     let mut acc = Surface::new(ow, oh);
     if s <= 0.0 {
         return acc;
     }
     for node in doc.iter_bottom_to_top() {
-        composite_node_view(&mut acc, doc, node, (vx, vy, s), 0, vec_render);
+        composite_node_view(&mut acc, doc, node, (vx, vy, s), 0, vec_render, fast);
     }
     acc
 }
@@ -459,8 +491,16 @@ fn view_item_bounds(it: &ViewItem) -> Option<(f32, f32, f32, f32)> {
 }
 
 /// ViewGrad → 절대 px 색 콜백(도형 bbox 앵커).
+///
+/// stop 보간은 256-구간 LUT + 구간 내 lerp로 선계산한다 — per-px stop 탐색 제거.
+/// gradient_color_at은 t에 대해 조각별 선형이라, 균일 격자 재표본 + lerp의 오차는
+/// stop이 격자 사이에 있을 때만 생기고 8bit 표시에서 ≤1 LSB(다MP 채움의 핫패스).
 fn view_grad_fn(g: &ViewGrad, bx: f32, by: f32, bw: f32, bh: f32) -> impl Fn(f32, f32) -> LinearPremul {
+    const N: usize = 256;
     let lin = shapes::stops_to_linear(&g.stops);
+    let lut: Vec<LinearPremul> = (0..=N)
+        .map(|i| shapes::gradient_color_at(&lin, i as f32 / N as f32))
+        .collect();
     let (ax, ay) = (bx + g.x0 * bw, by + g.y0 * bh);
     let (ex, ey) = (bx + g.x1 * bw, by + g.y1 * bh);
     let radial = g.radial;
@@ -474,7 +514,16 @@ fn view_grad_fn(g: &ViewGrad, bx: f32, by: f32, bw: f32, bh: f32) -> impl Fn(f32
         } else {
             (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
         };
-        shapes::gradient_color_at(&lin, t)
+        let f = t * N as f32;
+        let i = (f as usize).min(N - 1);
+        let fr = f - i as f32;
+        let (c0, c1) = (lut[i], lut[i + 1]);
+        LinearPremul {
+            r: c0.r + (c1.r - c0.r) * fr,
+            g: c0.g + (c1.g - c0.g) * fr,
+            b: c0.b + (c1.b - c0.b) * fr,
+            a: c0.a + (c1.a - c0.a) * fr,
+        }
     }
 }
 
@@ -600,6 +649,7 @@ fn composite_node_view(
     view: (f32, f32, f32),
     depth: u32,
     vec_render: VectorRender,
+    fast: bool,
 ) {
     if !node.visible || node.opacity <= 0.0 || depth > 32 {
         return;
@@ -621,6 +671,7 @@ fn composite_node_view(
                     node.blend,
                     node.opacity,
                     doc.blend_space,
+                    fast,
                 );
                 return;
             }
@@ -640,6 +691,7 @@ fn composite_node_view(
                         node.blend,
                         node.opacity,
                         doc.blend_space,
+                        fast,
                     );
                     return;
                 }
@@ -657,6 +709,7 @@ fn composite_node_view(
                 node.blend,
                 node.opacity,
                 doc.blend_space,
+                fast,
             );
         }
         NodeKind::Group { children } => {
@@ -664,7 +717,7 @@ fn composite_node_view(
             let mut tmp = Surface::new(acc.width(), acc.height());
             for cid in children {
                 if let Some(child) = doc.get(*cid) {
-                    composite_node_view(&mut tmp, doc, child, view, depth + 1, vec_render);
+                    composite_node_view(&mut tmp, doc, child, view, depth + 1, vec_render, fast);
                 }
             }
             if node.is_identity_transform() {
@@ -677,6 +730,7 @@ fn composite_node_view(
                     node.blend,
                     node.opacity,
                     doc.blend_space,
+                    fast,
                 );
             } else {
                 // 그룹 트랜스폼을 뷰 공간으로 옮긴다: 월드 피벗 C(문서 중심)는 뷰에서
@@ -699,6 +753,7 @@ fn composite_node_view(
                     node.blend,
                     node.opacity,
                     doc.blend_space,
+                    fast,
                 );
             }
         }
@@ -723,6 +778,7 @@ fn composite_layer_view(
     blend: BlendMode,
     opacity: f32,
     space: BlendSpace,
+    fast: bool,
 ) {
     let (dw, dh) = (acc.width() as i32, acc.height() as i32);
     let (sw, sh) = (src_dim.0 as f32, src_dim.1 as f32);
@@ -827,7 +883,7 @@ fn composite_layer_view(
                 continue;
             }
             let di = (y * dw + x) as usize;
-            dst[di] = blend_pixel(dst[di], sp, blend, opacity, space);
+            dst[di] = blend_pixel(dst[di], sp, blend, opacity, space, fast);
         }
     }
 }
@@ -859,6 +915,7 @@ fn composite_node(
                     node.blend,
                     node.opacity,
                     doc.blend_space,
+                    false,
                 );
             } else {
                 composite_layer_transformed(
@@ -894,6 +951,7 @@ fn composite_node(
                     node.blend,
                     node.opacity,
                     doc.blend_space,
+                    false,
                 );
             } else {
                 composite_layer_transformed(
@@ -926,6 +984,7 @@ fn composite_layer(
     blend: BlendMode,
     opacity: f32,
     space: BlendSpace,
+    fast: bool,
 ) {
     let (dw, dh) = (acc.width() as i32, acc.height() as i32);
     let (sw, sh) = (src_dim.0 as i32, src_dim.1 as i32);
@@ -936,7 +995,7 @@ fn composite_layer(
         let dst = acc.pixels_mut();
         debug_assert_eq!(dst.len(), src.len());
         for (d, s) in dst.iter_mut().zip(src.iter()) {
-            *d = blend_pixel(*d, *s, blend, opacity, space);
+            *d = blend_pixel(*d, *s, blend, opacity, space, fast);
         }
         return;
     }
@@ -951,7 +1010,7 @@ fn composite_layer(
         for x in x0..x1 {
             let s = src[((y - dy) * sw + (x - dx)) as usize];
             let di = (y * dw + x) as usize;
-            dst[di] = blend_pixel(dst[di], s, blend, opacity, space);
+            dst[di] = blend_pixel(dst[di], s, blend, opacity, space, fast);
         }
     }
 }
@@ -1059,7 +1118,8 @@ fn composite_layer_transformed(
                 continue; // 완전 투명 — 블렌드 기여 없음.
             }
             let di = (y * dw + x) as usize;
-            dst[di] = blend_pixel(dst[di], sp, blend, opacity, space);
+            // 트랜스폼 합성은 export/materialize 경로 전용 — 항상 정확 블렌드.
+            dst[di] = blend_pixel(dst[di], sp, blend, opacity, space, false);
         }
     }
 }
@@ -1074,6 +1134,7 @@ fn blend_pixel(
     blend: BlendMode,
     opacity: f32,
     space: BlendSpace,
+    fast: bool,
 ) -> LinearPremul {
     // 레이어 opacity를 src alpha와 premul 색에 동시 적용(premul 불변식 유지).
     let src = LinearPremul {
@@ -1098,6 +1159,9 @@ fn blend_pixel(
 
     match space {
         BlendSpace::Linear => blend_in_linear(dst, src, blend),
+        // fast = 디스플레이 프레임 전용(LUT ±1e-3). 정확 경로는 위 항등 fast path와
+        // 합쳐져 비트 계약(골든/parity/export)을 유지한다.
+        BlendSpace::Gamma if fast => blend_in_gamma_fast(dst, src, blend),
         BlendSpace::Gamma => blend_in_gamma(dst, src, blend),
     }
 }
@@ -1125,8 +1189,27 @@ fn blend_in_linear(dst: LinearPremul, src: LinearPremul, blend: BlendMode) -> Li
 /// 4) 결과를 다시 선형화(EOTF) → premultiply
 #[inline]
 fn blend_in_gamma(dst: LinearPremul, src: LinearPremul, blend: BlendMode) -> LinearPremul {
-    let dg = to_straight_gamma(dst);
-    let sg = to_straight_gamma(src);
+    blend_in_gamma_with(dst, src, blend, srgb_eotf, srgb_oetf)
+}
+
+/// **디스플레이 전용** 감마 블렌드 — 전달함수를 LUT(±1e-3)로. 비트 계약 경로 금지.
+#[inline]
+fn blend_in_gamma_fast(dst: LinearPremul, src: LinearPremul, blend: BlendMode) -> LinearPremul {
+    blend_in_gamma_with(dst, src, blend, srgb_eotf_fast, srgb_oetf_fast)
+}
+
+/// 감마 블렌드 본체 — 전달함수만 주입받는다(정확/LUT 경로가 블렌드 수학을 공유,
+/// 제네릭 단형화라 정확 경로의 인라인·비트 결과는 그대로).
+#[inline]
+fn blend_in_gamma_with(
+    dst: LinearPremul,
+    src: LinearPremul,
+    blend: BlendMode,
+    eotf: impl Fn(f32) -> f32,
+    oetf: impl Fn(f32) -> f32,
+) -> LinearPremul {
+    let dg = to_straight_gamma_with(dst, &oetf);
+    let sg = to_straight_gamma_with(src, &oetf);
 
     // 감마 공간 straight 성분에 블렌드 수학.
     let blended_gamma = match blend {
@@ -1165,9 +1248,9 @@ fn blend_in_gamma(dst: LinearPremul, src: LinearPremul, blend: BlendMode) -> Lin
 
     // 블렌드된 감마 색을 다시 linear straight로.
     let blended_lin = (
-        srgb_eotf(blended_gamma.0),
-        srgb_eotf(blended_gamma.1),
-        srgb_eotf(blended_gamma.2),
+        eotf(blended_gamma.0),
+        eotf(blended_gamma.1),
+        eotf(blended_gamma.2),
     );
 
     // alpha는 색공간과 무관하게 선형으로 합성. over compositing의 알파/색 결합:
@@ -1194,9 +1277,9 @@ struct StraightGamma {
     rgb: (f32, f32, f32),
 }
 
-/// linear-premul → straight 감마 인코딩. alpha==0 가드.
+/// linear-premul → straight 감마 인코딩. alpha==0 가드. 전달함수 주입형.
 #[inline]
-fn to_straight_gamma(p: LinearPremul) -> StraightGamma {
+fn to_straight_gamma_with(p: LinearPremul, oetf: &impl Fn(f32) -> f32) -> StraightGamma {
     if p.a <= 0.0 {
         return StraightGamma {
             rgb: (0.0, 0.0, 0.0),
@@ -1205,9 +1288,9 @@ fn to_straight_gamma(p: LinearPremul) -> StraightGamma {
     let inv = 1.0 / p.a;
     StraightGamma {
         rgb: (
-            srgb_oetf((p.r * inv).clamp(0.0, 1.0)),
-            srgb_oetf((p.g * inv).clamp(0.0, 1.0)),
-            srgb_oetf((p.b * inv).clamp(0.0, 1.0)),
+            oetf((p.r * inv).clamp(0.0, 1.0)),
+            oetf((p.g * inv).clamp(0.0, 1.0)),
+            oetf((p.b * inv).clamp(0.0, 1.0)),
         ),
     }
 }

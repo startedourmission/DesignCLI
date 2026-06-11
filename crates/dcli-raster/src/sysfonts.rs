@@ -66,6 +66,12 @@ fn scan_file(path: &Path, out: &mut Vec<SysFont>) {
         let Ok(face) = ttf_parser::Face::parse(&bytes, index) else {
             continue;
         };
+        // 한글 미지원 글꼴은 제외 — 이 에디터의 1차 사용 언어가 한국어다.
+        // (음절 2자 글리프 보유로 판정: 완성형 커버리지의 실용적 프록시.)
+        let hangul = face.glyph_index('가').is_some() && face.glyph_index('한').is_some();
+        if !hangul {
+            continue;
+        }
         if let Some(name) = face_name(&face) {
             out.push(SysFont {
                 name,

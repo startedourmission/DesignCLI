@@ -206,7 +206,8 @@ impl Editor {
         h: u32,
     ) -> js_sys::Uint8ClampedArray {
         let doc = &self.hist.doc;
-        let rgba = dcli_raster::composite_view_with(doc, vx, vy, s, w, h, &|n, sc| {
+        // 디스플레이 전용 LUT 감마 블렌드(±1e-3) — export/PSD는 정확 경로를 쓴다.
+        let rgba = dcli_raster::composite_view_display(doc, vx, vy, s, w, h, &|n, sc| {
             self.vector_render(doc, n, sc)
         })
         .to_srgb8_rgba_fast();
@@ -230,7 +231,7 @@ impl Editor {
         }
         let rgba = {
             let doc_ref = &doc;
-            dcli_raster::composite_view_with(doc_ref, vx, vy, s, w, h, &|n, sc| {
+            dcli_raster::composite_view_display(doc_ref, vx, vy, s, w, h, &|n, sc| {
                 self.vector_render(doc_ref, n, sc)
             })
             .to_srgb8_rgba_fast()
@@ -248,7 +249,8 @@ impl Editor {
         h: u32,
     ) -> Result<Vec<u8>, JsError> {
         let doc = &self.hist.doc;
-        let rgba = dcli_raster::composite_view_with(doc, vx, vy, s, w, h, &|n, sc| {
+        // 브라우저 표시와 같은 디스플레이 블렌드 경로(시각 검수 산출물의 대표성).
+        let rgba = dcli_raster::composite_view_display(doc, vx, vy, s, w, h, &|n, sc| {
             self.vector_render(doc, n, sc)
         })
         .to_srgb8_rgba();
@@ -478,7 +480,14 @@ impl Editor {
         let (sfc, origin) = dcli_raster::render_view_items(&items, s, 16_000_000)?;
         let entry = (std::rc::Rc::new(sfc), origin);
         let mut cache = self.view_cache.borrow_mut();
-        if cache.len() > 128 {
+        // 예산: 엔트리 수 + 총 픽셀(16B/px — 큰 표면 몇 장이면 수백 MB). 초과 시 전체
+        // 비움(단순·안전): 다음 프레임 가시 항목만 다시 채워져 working set으로 수렴한다.
+        let new_px = entry.0.width() as u64 * entry.0.height() as u64;
+        let total_px: u64 = cache
+            .values()
+            .map(|(s, _)| s.width() as u64 * s.height() as u64)
+            .sum();
+        if cache.len() > 128 || total_px + new_px > 32_000_000 {
             cache.clear();
         }
         cache.insert(key, entry.clone());

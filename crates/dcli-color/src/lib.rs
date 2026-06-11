@@ -189,6 +189,50 @@ impl LinearPremul {
     }
 }
 
+/// **디스플레이 전용** f32 LUT 전달함수 — 뷰 합성의 감마 블렌딩 핫패스용(±1e-3).
+/// export/PSD/골든은 정확한 srgb_eotf/srgb_oetf를 쓴다.
+#[inline]
+pub fn srgb_eotf_fast(c: f32) -> f32 {
+    use std::sync::OnceLock;
+    static LUT: OnceLock<Box<[f32; 4097]>> = OnceLock::new();
+    let lut = LUT.get_or_init(|| {
+        let mut t = Box::new([0f32; 4097]);
+        for (i, v) in t.iter_mut().enumerate() {
+            *v = srgb_eotf(i as f32 / 4096.0);
+        }
+        t
+    });
+    let x = c.clamp(0.0, 1.0) * 4096.0;
+    let i = x as usize;
+    if i >= 4096 {
+        return lut[4096];
+    }
+    let f = x - i as f32;
+    lut[i] + (lut[i + 1] - lut[i]) * f
+}
+
+/// linear [0,1] → 감마 f32 (sqrt-간격 LUT + 보간, ±1e-3) — 디스플레이 전용.
+#[inline]
+pub fn srgb_oetf_fast(c: f32) -> f32 {
+    use std::sync::OnceLock;
+    static LUT: OnceLock<Box<[f32; 4097]>> = OnceLock::new();
+    let lut = LUT.get_or_init(|| {
+        let mut t = Box::new([0f32; 4097]);
+        for (i, v) in t.iter_mut().enumerate() {
+            let sq = i as f32 / 4096.0;
+            *v = srgb_oetf(sq * sq);
+        }
+        t
+    });
+    let x = c.clamp(0.0, 1.0).sqrt() * 4096.0;
+    let i = x as usize;
+    if i >= 4096 {
+        return lut[4096];
+    }
+    let f = x - i as f32;
+    lut[i] + (lut[i + 1] - lut[i]) * f
+}
+
 /// linear [0,1] → sRGB u8, sqrt-간격 LUT(4096칸). sqrt 인덱싱이 어두운 영역에
 /// 칸을 몰아줘 균일 4096칸보다 저역 오차가 작다(최대 ±1 LSB).
 #[inline]
