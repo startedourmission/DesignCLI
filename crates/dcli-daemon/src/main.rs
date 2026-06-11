@@ -10,6 +10,7 @@
 
 mod routes;
 mod state;
+mod terminal;
 
 use axum::{
     routing::{delete, get, post},
@@ -84,9 +85,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/doc/:id/thumb.png", get(routes::thumb_png))
         .route("/doc/:id/state", get(routes::state))
         .route("/doc/:id/live", get(routes::live))
+        .route("/terminal/guide.md", get(terminal::terminal_guide))
+        .route("/terminal/:kind", get(terminal::open_terminal))
         .route("/projects", get(routes::list_projects))
+        .route("/projects/import-psd", post(routes::import_psd_project))
         .route("/projects/:name/rename", post(routes::rename_project))
         .route("/projects/:name", delete(routes::delete_project))
+        .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024))
         .with_state(Arc::clone(&app_state));
 
     let app = api

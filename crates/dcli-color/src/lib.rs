@@ -128,7 +128,12 @@ pub struct LinearPremul {
 }
 
 impl LinearPremul {
-    pub const TRANSPARENT: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    pub const TRANSPARENT: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
 
     /// 8bit straight-alpha sRGB(감마 인코딩) → linear premultiplied.
     ///
@@ -139,7 +144,12 @@ impl LinearPremul {
         let lg = srgb_eotf(g as f32 / 255.0);
         let lb = srgb_eotf(b as f32 / 255.0);
         // premultiply는 선형화 후.
-        Self { r: lr * af, g: lg * af, b: lb * af, a: af }
+        Self {
+            r: lr * af,
+            g: lg * af,
+            b: lb * af,
+            a: af,
+        }
     }
 
     /// linear premultiplied → 8bit straight-alpha sRGB.
@@ -161,6 +171,39 @@ impl LinearPremul {
             quantize_u8(self.a),
         ]
     }
+
+    /// **디스플레이 전용** 빠른 변환 — OETF를 sqrt-간격 LUT(±1 LSB 이내)로 대체한다.
+    /// 픽셀당 powf×3이 화면 갱신(수 MP)의 지배 비용이라 뷰 렌더에만 쓴다.
+    /// export/PSD/골든 경로는 정확한 to_srgb8_straight를 유지(비트 계약 불변).
+    pub fn to_srgb8_straight_fast(self) -> [u8; 4] {
+        if self.a <= 0.0 {
+            return [0, 0, 0, 0];
+        }
+        let inv_a = 1.0 / self.a;
+        [
+            srgb_oetf_u8_fast((self.r * inv_a).clamp(0.0, 1.0)),
+            srgb_oetf_u8_fast((self.g * inv_a).clamp(0.0, 1.0)),
+            srgb_oetf_u8_fast((self.b * inv_a).clamp(0.0, 1.0)),
+            quantize_u8(self.a),
+        ]
+    }
+}
+
+/// linear [0,1] → sRGB u8, sqrt-간격 LUT(4096칸). sqrt 인덱싱이 어두운 영역에
+/// 칸을 몰아줘 균일 4096칸보다 저역 오차가 작다(최대 ±1 LSB).
+#[inline]
+pub fn srgb_oetf_u8_fast(c: f32) -> u8 {
+    use std::sync::OnceLock;
+    static LUT: OnceLock<[u8; 4097]> = OnceLock::new();
+    let lut = LUT.get_or_init(|| {
+        let mut t = [0u8; 4097];
+        for (i, v) in t.iter_mut().enumerate() {
+            let sq = i as f32 / 4096.0;
+            *v = quantize_u8(srgb_oetf(sq * sq));
+        }
+        t
+    });
+    lut[((c.max(0.0).sqrt() * 4096.0 + 0.5) as usize).min(4096)]
 }
 
 #[cfg(test)]
@@ -183,7 +226,10 @@ mod tests {
         let c = 0.04;
         let real = srgb_eotf(c);
         let naive = c.powf(2.2);
-        assert!((real - naive).abs() > 1e-3, "EOTF가 naive pow 2.2로 퇴화하면 안 됨");
+        assert!(
+            (real - naive).abs() > 1e-3,
+            "EOTF가 naive pow 2.2로 퇴화하면 안 됨"
+        );
     }
 
     #[test]

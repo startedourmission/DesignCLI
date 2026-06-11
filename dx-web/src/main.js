@@ -44,11 +44,15 @@ if (!docId) {
           shell.addEventListener("export-png", () => download(app.editor.export_png(), "export.png", "image/png"));
 
           // 라이브 모드: 데몬 snapshot 로드 + WS 구독. 쓰기는 데몬 경유.
+          // 큰 문서는 snapshot 직렬화·전송이 수 초 — 로딩 오버레이로 상태를 보여준다.
+          const loading = showLoading(`"${docId}" 불러오는 중…`);
           try {
             await connectLive(app, docId);
             console.log(`[live] 데몬 연결: doc="${docId}"`);
           } catch (e) {
             console.error("[live] 연결 실패, 로컬 모드로:", e);
+          } finally {
+            loading.remove();
           }
 
           // 초기 1프레임.
@@ -61,6 +65,40 @@ if (!docId) {
     document.body.innerHTML = `<pre style="padding:20px;color:#f88">초기화 실패:\n${e}</pre>`;
     console.error(e);
   });
+}
+
+/** 라이브 snapshot 로딩 오버레이 — 150ms 안에 끝나면 표시하지 않는다(플래시 방지). */
+function showLoading(msg) {
+  const el = document.createElement("div");
+  el.style.cssText = [
+    "position:fixed", "inset:0", "z-index:9999", "display:flex",
+    "align-items:center", "justify-content:center", "pointer-events:none",
+    "background:rgba(10,12,14,0.35)", "backdrop-filter:blur(2px)",
+    "opacity:0", "transition:opacity 160ms ease",
+  ].join(";");
+  const box = document.createElement("div");
+  box.style.cssText = [
+    "display:flex", "align-items:center", "gap:10px", "padding:12px 18px",
+    "background:var(--bg-panel, #1d2125)", "color:var(--fg, #e8eaed)",
+    "border:1px solid var(--line, #333)", "border-radius:10px",
+    "font:500 12.5px Inter, Pretendard, sans-serif",
+    "box-shadow:0 14px 38px rgba(0,0,0,0.4)",
+  ].join(";");
+  const spin = document.createElement("span");
+  spin.style.cssText = "width:14px;height:14px;border-radius:50%;border:2px solid var(--accent,#87b9cf);border-top-color:transparent;animation:dxspin 0.8s linear infinite";
+  const style = document.createElement("style");
+  style.textContent = "@keyframes dxspin{to{transform:rotate(360deg)}}";
+  box.append(style, spin, document.createTextNode(msg));
+  el.appendChild(box);
+  document.body.appendChild(el);
+  const t = setTimeout(() => { el.style.opacity = "1"; }, 150);
+  return {
+    remove() {
+      clearTimeout(t);
+      el.style.opacity = "0";
+      setTimeout(() => el.remove(), 180);
+    },
+  };
 }
 
 function download(bytes, name, type) {

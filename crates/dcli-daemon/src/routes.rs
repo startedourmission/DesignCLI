@@ -7,6 +7,7 @@
 //! 없으면 404.
 
 use crate::state::{AppState, DocState, LiveMsg};
+use crate::terminal;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -123,6 +124,9 @@ pub async fn create_doc(
             format!("디스크 저장 실패: {e}"),
         )
             .into_response();
+    }
+    if let Err(e) = terminal::seed_project_guide(&path.0) {
+        tracing::warn!("프로젝트 터미널 가이드 생성 실패 {}: {}", id, e);
     }
     let mut docs = app.docs.lock().unwrap();
     docs.insert(id.clone(), DocState::new(History::new(doc)));
@@ -338,6 +342,54 @@ pub async fn rename_project(
     }
     tracing::info!("프로젝트 이름 변경: {} -> {}", old, new);
     (StatusCode::OK, Json(json!({ "old": old, "name": new }))).into_response()
+}
+
+/// PSD 업로드 → 새 프로젝트 생성. body = PSD 바이너리, ?name= 프로젝트 이름(중복 시 -2).
+/// 변환은 dcli-psd(레이어/블렌드/불투명도 보존)가 하고, 디스크에 저장 후 이름을 돌려준다.
+#[derive(serde::Deserialize)]
+pub struct ImportPsdParams {
+    pub name: Option<String>,
+}
+
+pub async fn import_psd_project(
+    State(app): Shared,
+    Query(p): Query<ImportPsdParams>,
+    body: axum::body::Bytes,
+) -> Response {
+    let raw = p.name.unwrap_or_else(|| "imported".into());
+    // 파일시스템 안전 이름: 경로 구분자/숨김 prefix 제거.
+    let base: String = raw
+        .chars()
+        .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .collect::<String>()
+        .trim()
+        .trim_start_matches('.')
+        .to_string();
+    let base = if base.is_empty() { "imported".to_string() } else { base };
+    let doc = match dcli_psd::import_psd(&body) {
+        Ok(d) => d,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("PSD 변환 실패: {e}")).into_response();
+        }
+    };
+    let mut name = base.clone();
+    let mut i = 2;
+    while app.projects_dir.join(format!("{name}.dxdoc")).exists() {
+        name = format!("{base}-{i}");
+        i += 1;
+    }
+    let path = dcli_cli::storage::DocPath::new(app.projects_dir.join(format!("{name}.dxdoc")));
+    if let Err(e) = path.save(&doc) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("저장 실패: {e}")).into_response();
+    }
+    tracing::info!("PSD import → 프로젝트 {} ({}x{}, 노드 {})", name, doc.width, doc.height, doc.node_count());
+    Json(serde_json::json!({
+        "name": name,
+        "w": doc.width,
+        "h": doc.height,
+        "layers": doc.node_count(),
+    }))
+    .into_response()
 }
 
 pub async fn delete_project(State(app): Shared, Path(name): Path<String>) -> impl IntoResponse {

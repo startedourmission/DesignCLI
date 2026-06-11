@@ -5,8 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
-echo "▶ wasm32 release 빌드"
-cargo build -p dcli-wasm --target wasm32-unknown-unknown --release
+echo "▶ wasm32 release 빌드 (simd128 — 블렌드/샘플 루프 자동 벡터화)"
+RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128" \
+  cargo build -p dcli-wasm --target wasm32-unknown-unknown --release
 
 echo "▶ wasm-bindgen (--target web)"
 wasm-bindgen target/wasm32-unknown-unknown/release/dcli_wasm.wasm \

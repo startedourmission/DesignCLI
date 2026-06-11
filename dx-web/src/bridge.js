@@ -18,6 +18,7 @@ export const line = (x0, y0, x1, y1, width, rgba) => ({ shape: "line", x0, y0, x
 export const strokeRect = (x, y, w, h, width, rgba) => ({ shape: "stroke_rect", x, y, w, h, width, rgba });
 export const strokeEllipse = (cx, cy, rx, ry, width, rgba) => ({ shape: "stroke_ellipse", cx, cy, rx, ry, width, rgba });
 export const roundedRect = (x, y, w, h, radius, rgba) => ({ shape: "rounded_rect", x, y, w, h, radius, rgba });
+export const strokeRoundedRect = (x, y, w, h, radius, width, rgba) => ({ shape: "stroke_rounded_rect", x, y, w, h, radius, width, rgba });
 // 텍스트(번들 폰트 Pretendard, 한글/라틴). (x,y)=첫 줄 좌상단, size=px, '\n' 줄바꿈.
 export const text = (x, y, content, size, rgba) => ({ shape: "text", x, y, text: content, size, rgba });
 
@@ -30,6 +31,8 @@ export const addPaintLayer = (name, source, opts = {}) => ({
 });
 
 export const setProps = (id, patch) => ({ op: "set_props", id: ref(id), patch });
+// 픽셀 소스 교체(노드 id·그룹 소속·z순서·선택 보존) — 재스타일/재래스터 전용.
+export const replacePaintSource = (id, source) => ({ op: "replace_paint_source", id: ref(id), source });
 export const setBlend = (id, mode) => ({ op: "set_blend", id: ref(id), mode });
 // 캔버스 평행이동(절대 offset, [dx,dy]). Move 툴이 사용.
 export const setOffset = (id, offset) => ({ op: "set_props", id: ref(id), patch: { offset } });

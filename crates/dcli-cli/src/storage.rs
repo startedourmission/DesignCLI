@@ -69,12 +69,28 @@ impl DocPath {
         std::fs::write(tmp.join(DOC_JSON), json).context("임시 doc.json 쓰기 실패")?;
 
         // 참조되는 표면만 기록(orphan 방지). id 오름차순 — 결정적.
+        //
+        // ★증분 저장★: 표면은 같은 id로 내용이 바뀌지 않으므로(재스타일은 새 sid 발급)
+        // 기존 파일이 있으면 재직렬화 대신 hard-link로 재사용한다. 유일한 같은-sid 변형인
+        // compact_text_surfaces는 크기가 줄어 파일 길이가 달라지므로 자동 재기록된다.
+        // 이게 없으면 자동저장이 편집마다 문서 전체 픽셀(수십 MB)을 다시 쓰며 데몬
+        // 뮤텍스를 수 초씩 점유한다(undo/적용/스냅샷이 줄을 서는 체감 멈춤의 원인).
         let referenced = doc.referenced_surfaces();
+        let cur_pixels = target.join(PIXELS_DIR);
         for (id, surface) in doc.pixels().iter_sorted() {
             if !referenced.contains(&id) {
                 continue; // orphan 표면은 디스크에 쓰지 않는다.
             }
-            std::fs::write(tmp_pixels.join(format!("{}.bin", id.0)), surface.to_bytes())
+            let dst = tmp_pixels.join(format!("{}.bin", id.0));
+            let prev = cur_pixels.join(format!("{}.bin", id.0));
+            let expected_len = 13u64 + (surface.width() as u64) * (surface.height() as u64) * 16;
+            let reusable = std::fs::metadata(&prev)
+                .map(|m| m.is_file() && m.len() == expected_len)
+                .unwrap_or(false);
+            if reusable && std::fs::hard_link(&prev, &dst).is_ok() {
+                continue;
+            }
+            std::fs::write(&dst, surface.to_bytes())
                 .with_context(|| format!("임시 픽셀 쓰기 실패: {id}"))?;
         }
 
@@ -135,9 +151,14 @@ impl DocPath {
 pub fn export_png(path: &Path, surface: &Surface) -> Result<()> {
     let file = std::fs::File::create(path)
         .with_context(|| format!("PNG 생성 실패: {}", path.display()))?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), surface.width(), surface.height());
+    let mut enc = png::Encoder::new(
+        std::io::BufWriter::new(file),
+        surface.width(),
+        surface.height(),
+    );
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header()?.write_image_data(&surface.to_srgb8_rgba())?;
+    enc.write_header()?
+        .write_image_data(&surface.to_srgb8_rgba())?;
     Ok(())
 }

@@ -94,6 +94,21 @@ enum FrameCmd {
     },
     /// Frame 목록.
     List,
+    /// Frame 수정(이동/크기/이름 — 이름 또는 id로 찾기).
+    Set {
+        name: String,
+        #[arg(long, allow_negative_numbers = true)]
+        x: Option<i32>,
+        #[arg(long, allow_negative_numbers = true)]
+        y: Option<i32>,
+        #[arg(long)]
+        w: Option<u32>,
+        #[arg(long)]
+        h: Option<u32>,
+        /// 새 이름.
+        #[arg(long)]
+        rename: Option<String>,
+    },
     /// Frame 제거(이름 또는 id).
     Remove { name: String },
 }
@@ -238,9 +253,80 @@ enum LayerCmd {
         /// 단색 채우기 "R,G,B,A" (0-255). --image 없을 때.
         #[arg(long)]
         fill: Option<String>,
+        /// 그라데이션 채우기 "R,G,B,A:R,G,B,A" (시작:끝, 문서 전체).
+        #[arg(long)]
+        gradient: Option<String>,
+        /// 그라데이션 각도(도). 90 = 위→아래.
+        #[arg(long, default_value_t = 90.0, allow_negative_numbers = true)]
+        gradient_angle: f32,
+        /// 방사형 그라데이션.
+        #[arg(long)]
+        gradient_radial: bool,
         /// 삽입 위치(bottom-to-top 인덱스, 없으면 맨 위).
         #[arg(long)]
         index: Option<usize>,
+    },
+    /// 레이어 재스타일(채움 없음/단색/그라데이션·테두리·반경·그림자) — 노드 보존.
+    Style {
+        id: u64,
+        /// 채움 단색 "R,G,B,A" (그라데이션 해제).
+        #[arg(long)]
+        fill: Option<String>,
+        /// 채움 제거(테두리/그림자만 남김).
+        #[arg(long)]
+        no_fill: bool,
+        /// 채움 그라데이션 "R,G,B,A:R,G,B,A" (시작:끝).
+        #[arg(long)]
+        gradient: Option<String>,
+        /// 그라데이션 각도(도). 90 = 위→아래.
+        #[arg(long, default_value_t = 90.0, allow_negative_numbers = true)]
+        gradient_angle: f32,
+        /// 방사형 그라데이션(중심→가장자리).
+        #[arg(long)]
+        gradient_radial: bool,
+        /// 테두리 색 "R,G,B,A".
+        #[arg(long)]
+        stroke: Option<String>,
+        /// 테두리 두께(px). 0 = 제거.
+        #[arg(long)]
+        stroke_width: Option<f32>,
+        /// 테두리 제거.
+        #[arg(long)]
+        no_stroke: bool,
+        /// 코너 반경(px, rect 계열).
+        #[arg(long)]
+        radius: Option<f32>,
+        /// 그림자 "dx,dy,blur,R,G,B,A".
+        #[arg(long)]
+        shadow: Option<String>,
+        /// 그림자 제거.
+        #[arg(long)]
+        no_shadow: bool,
+    },
+    /// 텍스트 레이어 편집(내용/크기/색/배경) — 노드 보존 재래스터.
+    Text {
+        id: u64,
+        /// 새 텍스트 내용('\n' 줄바꿈).
+        #[arg(long)]
+        text: Option<String>,
+        /// 폰트 크기(px).
+        #[arg(long)]
+        size: Option<f32>,
+        /// 글자색 "R,G,B,A".
+        #[arg(long)]
+        color: Option<String>,
+        /// 배경 박스 색 "R,G,B,A".
+        #[arg(long)]
+        bg: Option<String>,
+        /// 배경 제거.
+        #[arg(long)]
+        no_bg: bool,
+        /// 배경 코너 반경(px).
+        #[arg(long)]
+        bg_radius: Option<f32>,
+        /// 배경 패딩(px).
+        #[arg(long)]
+        bg_pad: Option<f32>,
     },
     /// 레이어 목록(bottom-to-top).
     List,
@@ -343,6 +429,120 @@ fn parse_blend(s: &str) -> Result<BlendModeDto> {
     }
 }
 
+/// "R,G,B,A:R,G,B,A" + 각도(도) → bbox 상대(0~1) GradFill.
+fn parse_gradient(spec: &str, angle_deg: f32, radial: bool) -> Result<dispatch::GradFill> {
+    let (a, b) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("그라데이션은 \"R,G,B,A:R,G,B,A\" 형식"))?;
+    let c1 = parse_rgba(a)?;
+    let c2 = parse_rgba(b)?;
+    let r = angle_deg.to_radians();
+    let (dx, dy) = (r.cos() / 2.0, r.sin() / 2.0);
+    Ok(dispatch::GradFill {
+        x0: 0.5 - dx,
+        y0: 0.5 - dy,
+        x1: 0.5 + dx,
+        y1: 0.5 + dy,
+        radial,
+        stops: vec![
+            dispatch::GradientStop { at: 0.0, rgba: c1 },
+            dispatch::GradientStop { at: 1.0, rgba: c2 },
+        ],
+    })
+}
+
+/// "dx,dy,blur,R,G,B,A" → meta.shadow JSON.
+fn parse_shadow(spec: &str) -> Result<serde_json::Value> {
+    let v: Vec<f32> = spec
+        .split(',')
+        .map(|t| t.trim().parse::<f32>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| anyhow::anyhow!("그림자는 \"dx,dy,blur,R,G,B,A\" 형식"))?;
+    anyhow::ensure!(v.len() == 7, "그림자는 \"dx,dy,blur,R,G,B,A\" 형식");
+    Ok(serde_json::json!({
+        "dx": v[0], "dy": v[1], "blur": v[2],
+        "rgba": [v[3].clamp(0.0,255.0) as u8, v[4].clamp(0.0,255.0) as u8, v[5].clamp(0.0,255.0) as u8, v[6].clamp(0.0,255.0) as u8],
+    }))
+}
+
+/// 재스타일 대상 노드 정보: (meta JSON, offset, 표면 크기, 문서 크기).
+fn read_node_info(cli: &Cli, path: &DocPath, id: u64) -> Result<(String, (i32, i32), Option<(u32, u32)>, (u32, u32))> {
+    if let Some(srv) = server_of(cli) {
+        let st = srv.state()?;
+        let docv = &st["doc"];
+        let dims = (docv["w"].as_u64().unwrap_or(0) as u32, docv["h"].as_u64().unwrap_or(0) as u32);
+        fn find<'a>(layers: &'a [serde_json::Value], id: u64) -> Option<&'a serde_json::Value> {
+            for l in layers {
+                if l["id"].as_u64() == Some(id) {
+                    return Some(l);
+                }
+                if let Some(ch) = l["children"].as_array() {
+                    if let Some(f) = find(ch, id) {
+                        return Some(f);
+                    }
+                }
+            }
+            None
+        }
+        let layers = st["layers"].as_array().cloned().unwrap_or_default();
+        let node = find(&layers, id).ok_or_else(|| anyhow::anyhow!("레이어 없음: n{id}"))?;
+        let meta = node["meta"].as_str().unwrap_or("").to_string();
+        anyhow::ensure!(!meta.is_empty(), "n{id}에 편집 meta가 없음(레거시 레이어) — draw로 다시 만들거나 웹에서 한 번 색을 바꿔 마이그레이션");
+        let off = node["offset"].as_array().map(|a| (a[0].as_i64().unwrap_or(0) as i32, a[1].as_i64().unwrap_or(0) as i32)).unwrap_or((0, 0));
+        let ss = node["surface_size"].as_array().map(|a| (a[0].as_u64().unwrap_or(0) as u32, a[1].as_u64().unwrap_or(0) as u32));
+        return Ok((meta, off, ss, dims));
+    }
+    let doc = path.load()?;
+    let node = doc.get(NodeId(id)).ok_or_else(|| anyhow::anyhow!("레이어 없음: n{id}"))?;
+    let meta = node.meta.clone().unwrap_or_default();
+    anyhow::ensure!(!meta.is_empty(), "n{id}에 편집 meta가 없음(레거시 레이어) — draw로 다시 만들거나 웹에서 한 번 색을 바꿔 마이그레이션");
+    let ss = node.surface_id().and_then(|sid| doc.pixels().get(sid)).map(|sf| (sf.width(), sf.height()));
+    Ok((meta, node.offset, ss, (doc.width, doc.height)))
+}
+
+/// meta 변형 → 아이템 재구성 → 위치 보존 리베이스 → replace_paint_source 적용(노드 보존).
+fn restyle_layer(
+    cli: &Cli,
+    path: &DocPath,
+    id: u64,
+    mutate: impl FnOnce(&mut serde_json::Value) -> Result<()>,
+) -> Result<serde_json::Value> {
+    let (meta_str, offset, surface_size, doc_dims) = read_node_info(cli, path, id)?;
+    let mut m: serde_json::Value =
+        serde_json::from_str(&meta_str).map_err(|e| anyhow::anyhow!("meta 파싱 실패: {e}"))?;
+    let old_items = dispatch::items_from_meta(&m);
+    mutate(&mut m)?;
+    let new_items = dispatch::items_from_meta(&m)
+        .ok_or_else(|| anyhow::anyhow!("이 meta로는 아이템을 재구성할 수 없음"))?;
+    let doc_sized = surface_size == Some(doc_dims);
+    let oc = if doc_sized {
+        (0, 0)
+    } else {
+        old_items
+            .as_deref()
+            .and_then(dispatch::shapes_origin)
+            .unwrap_or((0, 0))
+    };
+    let on = dispatch::shapes_origin(&new_items).unwrap_or((0, 0));
+    let new_offset = (offset.0 + on.0 - oc.0, offset.1 + on.1 - oc.1);
+    let actions = vec![
+        Action::ReplacePaintSource {
+            id: NodeRef::Node(id),
+            source: PixelSource::Shapes { items: new_items },
+        },
+        Action::SetProps {
+            id: NodeRef::Node(id),
+            patch: PropPatch {
+                meta: Some(m.to_string()),
+                offset: Some(new_offset),
+                ..Default::default()
+            },
+        },
+    ];
+    apply_actions(cli, path, actions)?;
+    Ok(m)
+}
+
 fn parse_rgba(s: &str) -> Result<[u8; 4]> {
     let parts: Vec<&str> = s.split(',').collect();
     anyhow::ensure!(parts.len() == 4, "fill은 'R,G,B,A' 형식 (0-255)");
@@ -371,6 +571,7 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
                 w: *w,
                 h: *h,
                 rgba: parse_rgba(color)?,
+                gradient: None,
             },
             name.clone(),
         ),
@@ -388,6 +589,7 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
                 rx: *rx,
                 ry: *ry,
                 rgba: parse_rgba(color)?,
+                gradient: None,
             },
             name.clone(),
         ),
@@ -464,6 +666,7 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
                 h: *h,
                 radius: *radius,
                 rgba: parse_rgba(color)?,
+                gradient: None,
             },
             name.clone(),
         ),
@@ -535,8 +738,22 @@ fn explicit_server_of(cli: &Cli) -> Option<Server> {
 /// 사용자가 --server를 명시하면 그 서버를 사용한다. 명시하지 않았더라도 로컬 데몬에서
 /// `projects/<id>.dxdoc`가 이미 열린 상태면 디스크 저장 대신 데몬에 적용해 웹 UI와
 /// 레이어 패널이 즉시 같은 상태를 보게 한다.
+///
+/// 자동 감지는 프로세스당 1회만 프로브한다(OnceLock) — 명령 하나가 apply와 출력 라벨에서
+/// server_of를 여러 번 부르므로, 캐시 없이는 HTTP 왕복이 배가되고 두 호출 사이에 데몬
+/// 상태가 바뀌면 실제 기록 위치와 라벨이 어긋난다(TOCTOU).
+/// --dry-run은 자동 승격하지 않는다: 데몬 모드는 dry-run을 지원하지 않아, 웹에서 문서를
+/// 열어둔 것만으로 검증용 스크립트가 깨지거나 실제 쓰기가 일어나면 안 된다.
 fn server_of(cli: &Cli) -> Option<Server> {
-    explicit_server_of(cli).or_else(|| Server::auto_for_open_project(&cli.doc))
+    if let Some(srv) = explicit_server_of(cli) {
+        return Some(srv);
+    }
+    if cli.dry_run {
+        return None;
+    }
+    static AUTO: std::sync::OnceLock<Option<Server>> = std::sync::OnceLock::new();
+    AUTO.get_or_init(|| Server::auto_for_open_project(&cli.doc))
+        .clone()
 }
 
 fn write_target(cli: &Cli) -> Option<&'static str> {
@@ -600,10 +817,12 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
         Command::Doc(DocCmd::Create { w, h, depth }) => {
             let depth_bd = parse_depth(depth)?;
             if let Some(srv) = server_of(cli) {
-                // 데몬에 문서 등록(이미 있으면 멱등). 데몬이 진실원.
-                srv.ensure_doc(*w, *h, depth)?;
+                // 데몬에 문서 등록(이미 있으면 멱등). 데몬이 진실원. dry-run은 호출 생략.
+                if !cli.dry_run {
+                    srv.ensure_doc(*w, *h, depth)?;
+                }
                 let doc = Document::new(*w, *h, depth_bd);
-                emit.doc_created_target(&cli.doc, &doc, false, Some("live"));
+                emit.doc_created_target(&cli.doc, &doc, cli.dry_run, Some("live"));
                 return Ok(());
             }
             anyhow::ensure!(
@@ -630,7 +849,12 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             Ok(())
         }
         Command::Doc(DocCmd::Compact) => {
-            anyhow::ensure!(cli.server.is_none(), "doc compact는 디스크 모드 전용");
+            // 디스크 전용 동작 — 데몬에 열린 문서면 디스크/메모리가 갈라지므로 거부한다
+            // (자동 감지 포함). 라벨도 실제 기록 위치(disk)로 정직하게.
+            anyhow::ensure!(
+                server_of(cli).is_none(),
+                "doc compact는 디스크 모드 전용(데몬에 열린 문서는 먼저 닫기)"
+            );
             let mut doc = path.load()?;
             let changed = dispatch::compact_text_surfaces(&mut doc);
             if changed > 0 && !cli.dry_run {
@@ -639,7 +863,7 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             emit.ok_target(
                 &format!("문서 압축: 텍스트 표면 {changed}개"),
                 cli.dry_run,
-                write_target(cli),
+                if cli.dry_run { None } else { Some("disk") },
             );
             Ok(())
         }
@@ -672,27 +896,51 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 index: None,
                 bind: Some("new".into()),
             }];
-            // 텍스트는 편집용 meta를 자동 저장(웹 더블클릭 편집과 호환).
-            if let Shape::Text {
-                x,
-                y,
-                text,
-                size,
-                rgba,
-            } = &shape
-            {
-                let meta = serde_json::json!({
+            // 편집용 meta를 자동 저장(웹 색상/텍스트 편집과 호환).
+            let meta = match &shape {
+                Shape::Text {
+                    x,
+                    y,
+                    text,
+                    size,
+                    rgba,
+                } => serde_json::json!({
                     "type": "text", "x": x, "y": y, "text": text, "size": size, "rgba": rgba,
-                })
-                .to_string();
-                actions.push(Action::SetProps {
-                    id: NodeRef::Bind("new".into()),
-                    patch: PropPatch {
-                        meta: Some(meta),
-                        ..Default::default()
-                    },
-                });
+                }),
+                Shape::Path { rgba, .. } => serde_json::json!({
+                    "type": "brush", "item": shape, "rgba": rgba,
+                }),
+                Shape::Rect { rgba, .. }
+                | Shape::Ellipse { rgba, .. }
+                | Shape::Line { rgba, .. }
+                | Shape::StrokeRect { rgba, .. }
+                | Shape::StrokeEllipse { rgba, .. }
+                | Shape::Shadow { rgba, .. } => serde_json::json!({
+                    "type": "shape", "shape": name, "item": shape, "fill": rgba, "rgba": rgba,
+                    "stroke": null, "strokeWidth": 0, "radius": 0,
+                }),
+                Shape::RoundedRect { rgba, radius, .. } => serde_json::json!({
+                    "type": "shape", "shape": "rect", "item": shape, "fill": rgba, "rgba": rgba,
+                    "stroke": null, "strokeWidth": 0, "radius": radius,
+                }),
+                Shape::StrokeRoundedRect {
+                    rgba,
+                    radius,
+                    width,
+                    ..
+                } => serde_json::json!({
+                    "type": "shape", "shape": "rect", "item": shape, "fill": rgba, "rgba": rgba,
+                    "stroke": rgba, "strokeWidth": width, "radius": radius,
+                }),
             }
+            .to_string();
+            actions.push(Action::SetProps {
+                id: NodeRef::Bind("new".into()),
+                patch: PropPatch {
+                    meta: Some(meta),
+                    ..Default::default()
+                },
+            });
             apply_actions(cli, &path, actions)?;
             emit.ok_target(
                 &format!("도형 그림: \"{name}\""),
@@ -703,7 +951,9 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
         }
         Command::Export(ExportCmd::Png { out, frame, region }) => {
             // --server면 데몬이 합성·인코딩한 PNG를 받아 저장(디스크 모드와 동일 인코딩 경로).
+            // dry-run은 실제 파일 쓰기가 일어나므로 데몬 경로에서 명시적으로 거부.
             if let Some(srv) = server_of(cli) {
+                anyhow::ensure!(!cli.dry_run, "--dry-run은 --server export 미지원");
                 let (w, h) = srv.export_png_with(out, frame.as_deref(), region.as_deref())?;
                 emit.exported_target(out, w, h, false, Some("live"));
                 return Ok(());
@@ -735,7 +985,7 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 surface.width(),
                 surface.height(),
                 cli.dry_run,
-                write_target(cli),
+                if cli.dry_run { None } else { Some("disk") },
             );
             Ok(())
         }
@@ -756,7 +1006,8 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                     doc.node_count()
                 ),
                 cli.dry_run,
-                write_target(cli),
+                // 항상 디스크에 쓴다 — 데몬이 같은 이름을 열고 있어도 live로 표기하지 않는다.
+                if cli.dry_run { None } else { Some("disk") },
             );
             Ok(())
         }
@@ -770,7 +1021,8 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
             emit.ok_target(
                 &format!("PSD export: {} ({} bytes)", out.display(), bytes.len()),
                 cli.dry_run,
-                write_target(cli),
+                // 디스크 문서를 읽어 디스크에 쓴다 — live 라벨 금지(스테일 스냅샷 오인 방지).
+                if cli.dry_run { None } else { Some("disk") },
             );
             Ok(())
         }
@@ -882,6 +1134,22 @@ fn run_frame(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &FrameCmd) -> Resul
             }
             Ok(())
         }
+        FrameCmd::Set { name, x, y, w, h, rename } => {
+            let mut frames = current_frames(cli, path)?;
+            let target = frames
+                .iter_mut()
+                .find(|f| &f.name == name || f.id.to_string() == *name)
+                .ok_or_else(|| anyhow::anyhow!("frame 없음: {name}"))?;
+            if let Some(v) = x { target.x = *v; }
+            if let Some(v) = y { target.y = *v; }
+            if let Some(v) = w { target.w = (*v).max(1); }
+            if let Some(v) = h { target.h = (*v).max(1); }
+            if let Some(n) = rename { target.name = n.clone(); }
+            let label = format!("frame 수정: {} ({},{} {}x{})", target.name, target.x, target.y, target.w, target.h);
+            apply_one(cli, path, Action::SetFrames { frames })?;
+            emit.ok_target(&label, cli.dry_run, write_target(cli));
+            Ok(())
+        }
         FrameCmd::Remove { name } => {
             let mut frames = current_frames(cli, path)?;
             let before = frames.len();
@@ -904,26 +1172,82 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             name,
             image,
             fill,
+            gradient,
+            gradient_angle,
+            gradient_radial,
             index,
         } => {
             // CLI 인자를 dispatch PixelSource로 변환.
+            let mut fill_meta: Option<String> = None;
             let source = if let Some(img) = image {
                 PixelSource::PngPath { path: img.clone() }
-            } else if let Some(f) = fill {
-                PixelSource::Fill {
-                    rgba: parse_rgba(f)?,
+            } else if let Some(gspec) = gradient {
+                // 문서 전체 그라데이션 — 각도를 문서 px 축으로 변환.
+                let g = parse_gradient(gspec, *gradient_angle, *gradient_radial)?;
+                let dims = if let Some(srv) = server_of(cli) {
+                    let st = srv.state()?;
+                    (
+                        st["doc"]["w"].as_u64().unwrap_or(512) as f32,
+                        st["doc"]["h"].as_u64().unwrap_or(512) as f32,
+                    )
+                } else {
+                    let d = path.load()?;
+                    (d.width as f32, d.height as f32)
+                };
+                let stops = g.stops.clone();
+                if *gradient_radial {
+                    PixelSource::RadialGradient {
+                        cx: dims.0 * 0.5,
+                        cy: dims.1 * 0.5,
+                        radius: (dims.0.max(dims.1)) * 0.5,
+                        stops,
+                    }
+                } else {
+                    PixelSource::LinearGradient {
+                        x0: g.x0 * dims.0,
+                        y0: g.y0 * dims.1,
+                        x1: g.x1 * dims.0,
+                        y1: g.y1 * dims.1,
+                        stops,
+                    }
                 }
+            } else if let Some(f) = fill {
+                // 단색 레이어는 벡터 rect meta를 함께 저장 — 뷰 합성이 전 배율 재래스터.
+                let rgba = parse_rgba(f)?;
+                let doc_for_dims = path.load().ok();
+                if let Some(d) = &doc_for_dims {
+                    let item = serde_json::json!({
+                        "shape": "rect", "x": 0, "y": 0, "w": d.width, "h": d.height, "rgba": rgba,
+                    });
+                    fill_meta = Some(
+                        serde_json::json!({
+                            "type": "shape", "shape": "rect", "item": item,
+                            "fill": rgba, "rgba": rgba, "stroke": null, "strokeWidth": 0,
+                        })
+                        .to_string(),
+                    );
+                }
+                PixelSource::Fill { rgba }
             } else {
                 PixelSource::Transparent
             };
-            let action = Action::AddPaintLayer {
+            let mut actions = vec![Action::AddPaintLayer {
                 name: name.clone(),
                 source,
                 index: *index,
                 bind: Some("new".into()),
-            };
+            }];
+            if let Some(meta) = fill_meta {
+                actions.push(Action::SetProps {
+                    id: NodeRef::Bind("new".into()),
+                    patch: PropPatch {
+                        meta: Some(meta),
+                        ..Default::default()
+                    },
+                });
+            }
             // 공통 경로(디스크/서버). 발급된 id는 BatchResult.bindings에서 읽는다.
-            let res = apply_actions(cli, path, vec![action])?;
+            let res = apply_actions(cli, path, actions)?;
             if cli.dry_run {
                 emit.ok_target(&format!("레이어 추가(dry-run): \"{name}\""), true, None);
             } else {
@@ -936,6 +1260,138 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                     write_target(cli),
                 );
             }
+            Ok(())
+        }
+        LayerCmd::Style {
+            id,
+            fill,
+            no_fill,
+            gradient,
+            gradient_angle,
+            gradient_radial,
+            stroke,
+            stroke_width,
+            no_stroke,
+            radius,
+            shadow,
+            no_shadow,
+        } => {
+            let fill_rgba = fill.as_deref().map(parse_rgba).transpose()?;
+            let grad = gradient
+                .as_deref()
+                .map(|g| parse_gradient(g, *gradient_angle, *gradient_radial))
+                .transpose()?;
+            let stroke_rgba = stroke.as_deref().map(parse_rgba).transpose()?;
+            let shadow_v = shadow.as_deref().map(parse_shadow).transpose()?;
+            restyle_layer(cli, &path, *id, |m| {
+                anyhow::ensure!(
+                    m["type"] == "shape" || m["type"] == "brush",
+                    "layer style은 도형/브러시 레이어 전용(텍스트는 layer text)"
+                );
+                if *no_fill {
+                    m["noFill"] = serde_json::json!(true);
+                }
+                if let Some(c) = fill_rgba {
+                    m["noFill"] = serde_json::json!(false);
+                    m["item"]["rgba"] = serde_json::json!(c);
+                    m["fill"] = serde_json::json!(c);
+                    m["rgba"] = serde_json::json!(c);
+                    if let Some(o) = m["item"].as_object_mut() {
+                        o.remove("gradient");
+                    }
+                }
+                if let Some(g) = grad {
+                    m["noFill"] = serde_json::json!(false);
+                    m["item"]["gradient"] = serde_json::to_value(g)?;
+                }
+                if *no_stroke {
+                    m["stroke"] = serde_json::Value::Null;
+                    m["strokeWidth"] = serde_json::json!(0);
+                }
+                if let Some(c) = stroke_rgba {
+                    m["stroke"] = serde_json::json!(c);
+                    if m["strokeWidth"].as_f64().unwrap_or(0.0) <= 0.0 {
+                        m["strokeWidth"] = serde_json::json!(4);
+                    }
+                }
+                if let Some(w) = stroke_width {
+                    m["strokeWidth"] = serde_json::json!(w.max(0.0));
+                    if *w <= 0.0 {
+                        m["stroke"] = serde_json::Value::Null;
+                    }
+                }
+                if let Some(r) = radius {
+                    let r = r.max(0.0);
+                    m["radius"] = serde_json::json!(r);
+                    let kind = m["item"]["shape"].as_str().unwrap_or("").to_string();
+                    if kind == "rect" || kind == "rounded_rect" {
+                        if r > 0.0 {
+                            m["item"]["shape"] = serde_json::json!("rounded_rect");
+                            m["item"]["radius"] = serde_json::json!(r);
+                        } else {
+                            m["item"]["shape"] = serde_json::json!("rect");
+                            if let Some(o) = m["item"].as_object_mut() {
+                                o.remove("radius");
+                            }
+                        }
+                    }
+                }
+                if *no_shadow {
+                    if let Some(o) = m.as_object_mut() {
+                        o.remove("shadow");
+                    }
+                }
+                if let Some(sh) = shadow_v {
+                    m["shadow"] = sh;
+                }
+                Ok(())
+            })?;
+            emit.ok_target(&format!("레이어 스타일: n{id}"), cli.dry_run, write_target(cli));
+            Ok(())
+        }
+        LayerCmd::Text {
+            id,
+            text,
+            size,
+            color,
+            bg,
+            no_bg,
+            bg_radius,
+            bg_pad,
+        } => {
+            let color_rgba = color.as_deref().map(parse_rgba).transpose()?;
+            let bg_rgba = bg.as_deref().map(parse_rgba).transpose()?;
+            restyle_layer(cli, &path, *id, |m| {
+                anyhow::ensure!(m["type"] == "text", "layer text는 텍스트 레이어 전용");
+                if let Some(t) = text {
+                    m["text"] = serde_json::json!(t.replace("\\n", "\n"));
+                }
+                if let Some(sz) = size {
+                    m["size"] = serde_json::json!(sz.clamp(6.0, 400.0));
+                }
+                if let Some(c) = color_rgba {
+                    m["rgba"] = serde_json::json!(c);
+                }
+                if *no_bg {
+                    if let Some(o) = m.as_object_mut() {
+                        o.remove("bg");
+                    }
+                }
+                if let Some(c) = bg_rgba {
+                    m["bg"] = serde_json::json!({ "rgba": c });
+                }
+                if m.get("bg").map(|b| !b.is_null()).unwrap_or(false) {
+                    if let Some(r) = bg_radius {
+                        m["bg"]["radius"] = serde_json::json!(r.max(0.0));
+                    }
+                    if let Some(pd) = bg_pad {
+                        m["bg"]["padX"] = serde_json::json!(pd.max(0.0));
+                        m["bg"]["padY"] = serde_json::json!((pd * 0.63).max(0.0));
+                    }
+                }
+                Ok(())
+            })?;
+            emit.ok_target(&format!("텍스트 편집: n{id}"), cli.dry_run, write_target(cli));
             Ok(())
         }
         LayerCmd::List => {

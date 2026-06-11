@@ -30,7 +30,36 @@ export class Renderer {
     if (this.canvas.height !== next.h) this.canvas.height = next.h;
     if (!old || old.x !== next.x || old.y !== next.y || old.w !== next.w || old.h !== next.h) this.markDirty();
   }
+
+  /** 신형 wasm이면 화면 공간 합성을 쓴다(보이는 픽셀만 — 장면 크기와 무관). */
+  hasViewComposite() {
+    return typeof this.editor.composite_view_rgba === "function";
+  }
+
+  /** 화면(뷰) 합성 설정. (x,y)=버퍼 (0,0)의 월드 좌표, zoom=문서px→CSSpx,
+   *  renderScale=CSSpx→버퍼px(보통 devicePixelRatio — 레티나 선명도). */
+  setView(x, y, zoom, cssW, cssH, renderScale) {
+    const w = Math.max(1, Math.round(cssW * renderScale));
+    const h = Math.max(1, Math.round(cssH * renderScale));
+    // 디바이스 1:1(s=1)에서 정수 시프트 비트 경로를 타도록 월드 원점을 양자화.
+    const s = zoom * renderScale;
+    const qx = Math.abs(s - 1) < 1e-6 ? Math.floor(x) : x;
+    const qy = Math.abs(s - 1) < 1e-6 ? Math.floor(y) : y;
+    const next = { x: qx, y: qy, zoom, cssW, cssH, renderScale, w, h };
+    const o = this.view;
+    this.view = next;
+    if (this.canvas.width !== w) this.canvas.width = w;
+    if (this.canvas.height !== h) this.canvas.height = h;
+    if (!o || o.x !== next.x || o.y !== next.y || o.zoom !== next.zoom
+      || o.w !== next.w || o.h !== next.h || o.renderScale !== next.renderScale) this.markDirty();
+  }
+
   resize() {
+    if (this.view) {
+      // 뷰 모드: 월드 좌표 뷰는 문서 교체와 무관 — 재합성만.
+      this.markDirty();
+      return;
+    }
     this.setViewport(0, 0, this.editor.width(), this.editor.height());
     this.markDirty();
   }
@@ -53,7 +82,17 @@ export class Renderer {
     if (!this._dirty) return;
     this._dirty = false;
     // 매 프레임 새 복사본을 받는다(메모리 detach 무관 — wasm이 소유 복사본 반환).
-    // composite_rgba_excluding은 신형 wasm에만 있음 — 구버전 캐시여도 렌더는 살리기(feature-detect).
+    // 신형 wasm이면 화면 공간 합성(벡터 재래스터 포함), 아니면 종전 영역 합성 폴백.
+    if (this.view && this.hasViewComposite()) {
+      const v = this.view;
+      const s = v.zoom * v.renderScale;
+      const canExclude = typeof this.editor.composite_view_rgba_excluding === "function";
+      const buf = this.excludeId != null && canExclude
+        ? this.editor.composite_view_rgba_excluding(this.excludeId, v.x, v.y, s, v.w, v.h)
+        : this.editor.composite_view_rgba(v.x, v.y, s, v.w, v.h);
+      this.ctx.putImageData(new ImageData(buf, v.w, v.h), 0, 0);
+      return;
+    }
     const { x, y, w, h } = this.viewport;
     const canExclude = typeof this.editor.composite_region_rgba_excluding === "function";
     const buf = this.excludeId != null && canExclude
@@ -74,6 +113,29 @@ export class App extends EventTarget {
     this.selectedFrameId = null;
     this.clipboardIds = []; // 앱 내부 클립보드 — Cmd+C로 기억한 레이어 id들(문서 내 복제용).
     this._cache = {};
+    // 편집을 넘어 살아남는 캐시(문서 교체 시에만 비움) — 핫패스 비용 제거.
+    this._metaCache = new Map(); // meta 문자열 → 파싱 결과(동일 문자열은 스냅샷 재생성을 넘어 재사용).
+    this._boundsCache = new Map(); // `${id}:${surface}:${w}x${h}` → src bounds(표면 픽셀에만 의존).
+  }
+
+  /** meta JSON 파싱(캐시). hover/overlay/패널이 같은 문자열을 반복 파싱하지 않게 한다
+   *  (브러시 meta는 점 배열로 수 KB~MB — 포인터무브마다 파싱하면 프레임 드랍). */
+  metaOf(l) {
+    const s = l?.meta;
+    if (!s) return null;
+    let v = this._metaCache.get(s);
+    if (v === undefined) {
+      if (this._metaCache.size > 512) this._metaCache.clear();
+      try { v = JSON.parse(s); } catch { v = null; }
+      this._metaCache.set(s, v);
+    }
+    return v;
+  }
+
+  /** id → 레이어 dict (캐시 세대당 1회 구축). */
+  layerById(id) {
+    const m = this._cache.layerById ??= new Map(this.layers().map((l) => [l.id, l]));
+    return m.get(id) ?? null;
   }
 
   _invalidateCache() {
@@ -151,6 +213,24 @@ export class App extends EventTarget {
     return this.frames().find((f) => f.id === this.selectedFrameId) ?? null;
   }
 
+  /** 레이어 1개 PNG export(피그마 per-layer Export) — wasm 즉석 인코딩. */
+  exportLayerPng(l) {
+    if (typeof this.editor.export_layer_png !== "function") return false;
+    try {
+      const png = this.editor.export_layer_png(l.id);
+      const url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(l.name || `layer-${l.id}`).replace(/[\\/:*?"<>|]/g, "_")}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return true;
+    } catch (e) {
+      console.error("[export] 레이어 export 실패:", e);
+      return false;
+    }
+  }
+
   /** Frame 단위 PNG export — 라이브면 데몬 URL, 로컬이면 wasm으로 즉석 인코딩. */
   exportFrame(f) {
     if (this.live) {
@@ -172,6 +252,366 @@ export class App extends EventTarget {
     if (this.selectedIds.length < 2) return;
     this.apply([B.groupLayers([...this.selectedIds])]);
     this.select(null);
+  }
+
+  _metaOf(l) {
+    return this.metaOf(l);
+  }
+
+  /** dispatch.rs materialize()의 표면 origin(min corner) JS 미러.
+   *  엔진은 shapes 소스를 콘텐츠 크기 표면으로 굽고 node.offset = floor(min corner)로 둔다.
+   *  재래스터 시 offset을 보정하려면 이 origin이 필요한데, min corner는 글리프 측정 없이
+   *  순수 수식이라(텍스트 포함) JS에서 동일하게 계산할 수 있다. (f32 미러: Math.fround) */
+  _itemsOrigin(items) {
+    let mx = Infinity, my = Infinity;
+    for (const it of items ?? []) {
+      let x0, y0;
+      switch (it?.shape) {
+        case "rect": case "rounded_rect":
+          if (!(it.w > 0 && it.h > 0)) continue;
+          x0 = it.x - 1; y0 = it.y - 1; break;
+        case "stroke_rect": case "stroke_rounded_rect": {
+          if (!(it.w > 0 && it.h > 0 && it.width > 0)) continue;
+          const m = Math.max(it.width, 1);
+          x0 = it.x - m; y0 = it.y - m; break;
+        }
+        case "ellipse":
+          if (!(it.rx > 0 && it.ry > 0)) continue;
+          x0 = it.cx - it.rx - 1; y0 = it.cy - it.ry - 1; break;
+        case "stroke_ellipse": {
+          if (!(it.rx > 0 && it.ry > 0 && it.width > 0)) continue;
+          const m = Math.max(it.width, 1);
+          x0 = it.cx - it.rx - m; y0 = it.cy - it.ry - m; break;
+        }
+        case "line": {
+          if (!(it.width > 0)) continue;
+          const m = it.width * 0.5 + 1;
+          x0 = Math.min(it.x0, it.x1) - m; y0 = Math.min(it.y0, it.y1) - m; break;
+        }
+        case "path": {
+          if (!(it.width > 0) || (it.points?.length ?? 0) < 4) continue;
+          const m = it.width * 0.5 + 1;
+          let px = Infinity, py = Infinity;
+          for (let i = 0; i + 1 < it.points.length; i += 2) {
+            px = Math.min(px, it.points[i]); py = Math.min(py, it.points[i + 1]);
+          }
+          x0 = px - m; y0 = py - m; break;
+        }
+        case "text": {
+          if (!(it.size > 0) || !it.text) continue;
+          const m = Math.max(it.size, 1) * 0.15 + 2;
+          x0 = it.x - m; y0 = it.y - m; break;
+        }
+        case "shadow": {
+          if (!(it.w > 0 && it.h > 0)) continue;
+          const m = Math.max(it.feather ?? 0, 0) + 1;
+          x0 = it.x - m; y0 = it.y - m; break;
+        }
+        default: continue;
+      }
+      mx = Math.min(mx, x0); my = Math.min(my, y0);
+    }
+    if (!Number.isFinite(mx)) return null;
+    return [Math.floor(Math.fround(mx)), Math.floor(Math.fround(my))];
+  }
+
+  /** 표면이 문서 크기인가(레거시 — origin이 (0,0) 기준). */
+  _isDocSizedSurface(l) {
+    return Array.isArray(l?.surface_size)
+      && l.surface_size[0] === this.editor.width()
+      && l.surface_size[1] === this.editor.height();
+  }
+
+  /** 재래스터 후에도 현재 화면 위치가 보존되는 offset.
+   *  현재 offset은 "마지막 materialize의 origin + 사용자 이동량"이므로, 새 아이템의 origin
+   *  변화량만큼 보정한다. 레거시(문서 크기 표면)나 oldItems 미상(local 좌표 fallback)은
+   *  origin=(0,0) 기준. 이 보정이 없으면 테두리 추가 시 (width−1)px 드리프트, 레거시
+   *  레이어는 좌상단 점프가 발생한다. */
+  _rebasedOffset(l, oldItems, newItems) {
+    const [ox, oy] = l.offset ?? [0, 0];
+    const on = this._itemsOrigin(newItems);
+    if (!on) return [ox, oy];
+    const oc = (!this._isDocSizedSurface(l) && oldItems?.length)
+      ? this._itemsOrigin(oldItems) ?? [0, 0]
+      : [0, 0];
+    return [ox + on[0] - oc[0], oy + on[1] - oc[1]];
+  }
+
+  /** 엔진과 동일 metric의 텍스트 레이아웃 측정 [w, h] (배경 박스 구성용). */
+  measureText(text, size) {
+    if (typeof this.editor.measure_text === "function") {
+      const m = this.editor.measure_text(String(text ?? ""), size);
+      return [m[0], m[1]];
+    }
+    // 구버전 wasm 폴백(근사).
+    const lines = String(text ?? "").split("\n");
+    const w = Math.max(1, ...lines.map((ln) => ln.length)) * size * 0.55;
+    return [w, lines.length * size * 1.25];
+  }
+
+  /** meta가 기술하는 전체 아이템 목록 — dispatch::items_from_meta와 동일 규약(단일 소스).
+   *  순서: [그림자?, 채움?(noFill이면 생략), 테두리?] / 텍스트: [배경?, 글자].
+   *  마지막 materialize와 같은 구성이어야 offset 리베이스가 정확하다. */
+  itemsFromMeta(meta) {
+    if (!meta) return null;
+    if (meta.type === "text") {
+      const size = meta.size ?? 32;
+      const items = [];
+      if (meta.bg?.rgba) {
+        const [tw, th] = this.measureText(meta.text, size);
+        const px = meta.bg.padX ?? size * 0.35;
+        const py = meta.bg.padY ?? size * 0.22;
+        const bg = B.roundedRect(
+          (meta.x ?? 0) - px, (meta.y ?? 0) - py,
+          tw + px * 2, th + py * 2,
+          meta.bg.radius ?? size * 0.18, meta.bg.rgba,
+        );
+        if (meta.bg.gradient) bg.gradient = meta.bg.gradient;
+        items.push(bg);
+      }
+      items.push(B.text(meta.x ?? 0, meta.y ?? 0, meta.text ?? "", size, meta.rgba ?? [0, 0, 0, 255]));
+      return items;
+    }
+    if ((meta.type === "shape" || meta.type === "brush") && meta.item) {
+      const it = meta.item;
+      const items = [];
+      // 그림자 — 채움 지오메트리에서 유도(맨 아래).
+      const g = it.shape === "rect" ? { x: it.x, y: it.y, w: it.w, h: it.h, r: 0 }
+        : it.shape === "rounded_rect" ? { x: it.x, y: it.y, w: it.w, h: it.h, r: it.radius ?? 0 }
+        : it.shape === "ellipse" ? { x: it.cx - it.rx, y: it.cy - it.ry, w: it.rx * 2, h: it.ry * 2, r: Math.min(it.rx, it.ry) }
+        : null;
+      if (meta.shadow?.rgba && g && g.w > 0 && g.h > 0) {
+        items.push({
+          shape: "shadow",
+          x: g.x + (meta.shadow.dx ?? 0), y: g.y + (meta.shadow.dy ?? 6),
+          w: g.w, h: g.h, radius: g.r,
+          feather: Math.max(0.5, meta.shadow.blur ?? 16),
+          rgba: meta.shadow.rgba,
+        });
+      }
+      if (!meta.noFill) items.push(it);
+      const sw = Math.max(0, Number(meta.strokeWidth) || 0);
+      if (sw > 0 && meta.stroke && (meta.stroke[3] ?? 255) > 0) {
+        const strokeItem = this._strokeShapeItem(it, meta.stroke, sw);
+        if (strokeItem) items.push(strokeItem);
+      }
+      return items.length ? items : null;
+    }
+    return null;
+  }
+
+  /** 현재 meta가 기술하는 아이템 목록(마지막 materialize에 쓰인 것과 동일해야 함). */
+  _currentItemsOf(l, meta) {
+    return this.itemsFromMeta(meta);
+  }
+
+  /** meta 패치 기반 재스타일 공통 경로 — 아이템 재구성 + 위치 보존 리베이스 + 교체. */
+  _applyMetaRestyle(l, nextMeta, name) {
+    const items = this.itemsFromMeta(nextMeta);
+    if (!items) return false;
+    const offset = this._rebasedOffset(l, this.itemsFromMeta(this.metaOf(l)) ?? undefined, items);
+    return !!this._replacePaintLayer(l, B.shapes(items), nextMeta, name ?? l.name, { offset });
+  }
+
+  _shapeWithRgba(item, rgba) {
+    return item ? { ...item, rgba } : null;
+  }
+
+  _shapeKindOf(meta, l) {
+    return String(meta?.shape ?? meta?.item?.shape ?? l?.name ?? "").toLowerCase();
+  }
+
+  _fallbackShapeItem(l, meta, rgba) {
+    const b = this.layerBounds(l.id);
+    if (!b) return null;
+    const kind = this._shapeKindOf(meta, l);
+    const [x, y, w, h] = b;
+    if (w <= 0 || h <= 0) return null;
+    if (kind.includes("stroke-ellipse")) return B.strokeEllipse(x + w / 2, y + h / 2, w / 2, h / 2, meta.width ?? 4, rgba);
+    if (kind.includes("ellipse")) return B.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, rgba);
+    if (kind.includes("stroke-rect")) return B.strokeRect(x, y, w, h, meta.width ?? 4, rgba);
+    if (kind.includes("rounded")) return B.roundedRect(x, y, w, h, meta.radius ?? Math.min(w, h) / 6, rgba);
+    if (kind.includes("rect") || meta?.type === "shape") return B.rect(x, y, w, h, rgba);
+    return null;
+  }
+
+  _strokeShapeItem(fillItem, rgba, width) {
+    const w = Math.max(0, Number(width) || 0);
+    if (!fillItem || w <= 0 || !rgba || (rgba[3] ?? 255) <= 0) return null;
+    switch (fillItem.shape) {
+      case "rect":
+        return B.strokeRect(fillItem.x, fillItem.y, fillItem.w, fillItem.h, w, rgba);
+      case "ellipse":
+        return B.strokeEllipse(fillItem.cx, fillItem.cy, fillItem.rx, fillItem.ry, w, rgba);
+      case "rounded_rect":
+        return B.strokeRoundedRect(fillItem.x, fillItem.y, fillItem.w, fillItem.h, fillItem.radius, w, rgba);
+      default:
+        return null;
+    }
+  }
+
+  /** 레이어의 픽셀 소스를 교체한다(재스타일/재래스터).
+   *  replace_paint_source라 노드 id·그룹 소속·z순서·선택·blend·visible이 전부 보존된다
+   *  (예전 delete+add 방식은 그룹 안 레이어에서 "노드 없음"으로 거부됐다).
+   *  overrides.offset: 배열=명시값, null=엔진 origin 그대로(아이템 좌표 = 월드 좌표일 때),
+   *  미지정=l.offset 유지. overrides.scale: scale 굽기(bake) 시 [1,1] 전달. */
+  _replacePaintLayer(l, source, meta, name = l.name, overrides = {}) {
+    const patch = {
+      name: name || l.name || "layer",
+      meta: JSON.stringify(meta),
+      scale: overrides.scale ?? l.scale ?? [1, 1],
+      rotation: l.rotation ?? 0,
+    };
+    if (overrides.offset !== null) patch.offset = overrides.offset ?? l.offset ?? [0, 0];
+    const res = this.apply([
+      B.replacePaintSource(l.id, source),
+      B.setProps(l.id, patch),
+    ]);
+    if (res?.ok === false) console.error("재스타일 실패:", res.issues);
+    return res;
+  }
+
+  /** shape meta를 보장한다 — 레거시(item 없음)는 bounds에서 item을 복원해 마이그레이션. */
+  _ensureShapeMeta(l, meta) {
+    if (meta?.item) return meta;
+    const rgba = meta?.fill ?? meta?.rgba ?? [13, 153, 255, 255];
+    const item = this._fallbackShapeItem(l, meta ?? {}, rgba);
+    if (!item) return null;
+    return { type: "shape", shape: meta?.shape ?? item.shape, ...meta, item };
+  }
+
+  setLayerColor(id, rgba) {
+    const l = this.layers().find((v) => v.id === id);
+    const meta = this._metaOf(l);
+    if (!l || !meta) return false;
+    if (meta.type === "text") {
+      const next = { ...meta, rgba };
+      return this._applyMetaRestyle(l, next, String(next.text ?? l.name).split("\n")[0].slice(0, 20) || l.name);
+    }
+    if (meta.type === "shape" || meta.type === "brush") {
+      const m = this._ensureShapeMeta(l, meta);
+      if (!m) return false;
+      // 단색 지정은 그라데이션을 해제한다(Figma 동작).
+      const item = { ...m.item, rgba };
+      delete item.gradient;
+      return this._applyMetaRestyle(l, { ...m, item, fill: rgba, rgba, noFill: false });
+    }
+    return false;
+  }
+
+  /** 채움 스타일 — {kind:"solid",rgba} | {kind:"gradient",gradient} | {kind:"none"} */
+  setShapeFill(id, spec) {
+    const l = this.layers().find((v) => v.id === id);
+    const m = this._ensureShapeMeta(l, this._metaOf(l));
+    if (!l || !m || m.type !== "shape") return false;
+    if (spec.kind === "none") {
+      return this._applyMetaRestyle(l, { ...m, noFill: true });
+    }
+    if (spec.kind === "gradient") {
+      const item = { ...m.item, gradient: spec.gradient };
+      return this._applyMetaRestyle(l, { ...m, item, noFill: false });
+    }
+    const item = { ...m.item, rgba: spec.rgba };
+    delete item.gradient;
+    return this._applyMetaRestyle(l, { ...m, item, fill: spec.rgba, rgba: spec.rgba, noFill: false });
+  }
+
+  setShapeStroke(id, stroke, strokeWidth) {
+    const l = this.layers().find((v) => v.id === id);
+    const m = this._ensureShapeMeta(l, this._metaOf(l));
+    if (!l || !m || m.type !== "shape") return false;
+    const nextStroke = stroke && (stroke[3] ?? 255) > 0 ? stroke : null;
+    const nextWidth = Math.max(0, Math.round(Number(strokeWidth) || 0));
+    return this._applyMetaRestyle(l, { ...m, stroke: nextStroke, strokeWidth: nextStroke ? nextWidth : 0 });
+  }
+
+  setShapeRadius(id, radius) {
+    const l = this.layers().find((v) => v.id === id);
+    const m = this._ensureShapeMeta(l, this._metaOf(l));
+    if (!l || !m || m.type !== "shape") return false;
+    const r = Math.max(0, Math.round(Number(radius) || 0));
+    const it = m.item;
+    let item = it;
+    if (it.shape === "rect" || it.shape === "rounded_rect") {
+      item = r > 0
+        ? { ...it, shape: "rounded_rect", radius: r }
+        : (() => { const v = { ...it, shape: "rect" }; delete v.radius; return v; })();
+    }
+    return this._applyMetaRestyle(l, { ...m, item, radius: r });
+  }
+
+  /** 그림자 — {dx, dy, blur, rgba} 또는 null(제거). */
+  setShapeShadow(id, shadow) {
+    const l = this.layers().find((v) => v.id === id);
+    const m = this._ensureShapeMeta(l, this._metaOf(l));
+    if (!l || !m || m.type !== "shape") return false;
+    const next = { ...m };
+    if (shadow) next.shadow = shadow; else delete next.shadow;
+    return this._applyMetaRestyle(l, next);
+  }
+
+  /** 텍스트 배경 — {rgba, padX?, padY?, radius?, gradient?} 또는 null(제거). */
+  setTextBg(id, bg) {
+    const l = this.layers().find((v) => v.id === id);
+    const meta = this._metaOf(l);
+    if (!l || meta?.type !== "text") return false;
+    const next = { ...meta };
+    if (bg) next.bg = bg; else delete next.bg;
+    return this._applyMetaRestyle(l, next);
+  }
+
+  setTextSize(id, size) {
+    const l = this.layers().find((v) => v.id === id);
+    const meta = this._metaOf(l);
+    if (!l || meta?.type !== "text") return false;
+    const next = { ...meta, size: Math.max(6, Math.min(400, Math.round(size || meta.size || 32))) };
+    return this._applyMetaRestyle(l, next, String(next.text ?? l.name).split("\n")[0].slice(0, 20) || l.name);
+  }
+
+  /** 도형/브러시 리사이즈를 벡터 재래스터로 굽는다(비파괴 scale → 지오메트리 확정).
+   *  scale 보간(블러/형태 붕괴) 대신 새 크기로 다시 그린다. 회전 레이어는 표면 중심이
+   *  바뀌면 위치가 틀어지므로 제외(기존 scale 방식 유지). 성공 시 true. */
+  bakeShapeScale(id, scale, offset) {
+    const l = this.layers().find((v) => v.id === id);
+    const meta = this._metaOf(l);
+    const bakeable = (meta?.type === "shape" || meta?.type === "brush") && meta?.item
+      && (l?.rotation ?? 0) === 0;
+    if (!bakeable) return false;
+    const prov = { ...l, scale: scale ?? l.scale ?? [1, 1], offset: offset ?? l.offset ?? [0, 0] };
+    const t = this.xformOf(prov);
+    // item 좌표 → src 좌표(− origin) → 월드 좌표. 결과 아이템은 월드 좌표가 된다.
+    const oc = this._isDocSizedSurface(l)
+      ? [0, 0]
+      : this._itemsOrigin(this._currentItemsOf(l, meta)) ?? [0, 0];
+    const W = (px, py) => t.fwd(px - oc[0], py - oc[1]);
+    const [asx, asy] = [Math.abs(prov.scale[0] || 1), Math.abs(prov.scale[1] || 1)];
+    const it = meta.item;
+    let baked = null;
+    if (it.shape === "rect" || it.shape === "rounded_rect") {
+      const a = W(it.x, it.y), b = W(it.x + it.w, it.y + it.h);
+      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+      baked = { ...it, x, y, w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
+    } else if (it.shape === "ellipse") {
+      const c = W(it.cx, it.cy);
+      baked = { ...it, cx: c.x, cy: c.y, rx: it.rx * asx, ry: it.ry * asy };
+    } else if (it.shape === "line") {
+      const a = W(it.x0, it.y0), b = W(it.x1, it.y1);
+      baked = { ...it, x0: a.x, y0: a.y, x1: b.x, y1: b.y, width: Math.max(0.5, it.width * (asx + asy) / 2) };
+    } else if (it.shape === "path") {
+      const pts = [];
+      for (let i = 0; i + 1 < (it.points?.length ?? 0); i += 2) {
+        const p = W(it.points[i], it.points[i + 1]);
+        pts.push(p.x, p.y);
+      }
+      baked = { ...it, points: pts, width: Math.max(0.5, it.width * (asx + asy) / 2) };
+    }
+    if (!baked) return false;
+    // 굽힌 아이템은 월드 좌표 — 엔진 origin을 그대로 쓰고(offset 생략) scale은 1로 리셋.
+    // 그림자/테두리/noFill/그라데이션은 meta에서 itemsFromMeta가 재구성한다.
+    const nextMeta = { ...meta, item: baked };
+    const items = this.itemsFromMeta(nextMeta);
+    if (!items) return false;
+    return !!this._replacePaintLayer(l, B.shapes(items), nextMeta, l.name, { offset: null, scale: [1, 1] });
   }
 
   /** 선택이 그룹이면 해제(Cmd+Shift+G). */
@@ -245,10 +685,10 @@ export class App extends EventTarget {
   }
 
   textBoxHitTest(x, y) {
-    for (const l of this.layers()) {
-      let meta = null;
-      try { meta = l.meta ? JSON.parse(l.meta) : null; } catch { /* ignore */ }
-      if (meta?.type !== "text") continue;
+    // 텍스트 레이어 목록은 캐시 세대당 1회만 추림(포인터무브 핫패스).
+    const txts = this._cache.textLayers ??= this.layers().filter((l) => this.metaOf(l)?.type === "text");
+    for (const l of txts) {
+      const meta = this.metaOf(l);
       const box = this.textBoxBounds(l, meta);
       if (!box) continue;
       const p = this.xformOf(l).inv(x, y);
@@ -283,12 +723,24 @@ export class App extends EventTarget {
     };
   }
 
-  /** 레이어 불투명 바운드 [x,y,w,h](offset 반영) 또는 null. */
+  /** 레이어 불투명 src 바운드 [x,y,w,h](표면 로컬 좌표 — offset 미포함) 또는 null.
+   *  src 바운드는 표면 픽셀에만 의존하므로 (node, surface, 크기)가 같으면 편집을 넘어
+   *  재사용한다 — 없으면 apply마다 모든 레이어를 wasm 알파 스캔(O(W×H)×N)해 매우 느리다.
+   *  (표면 in-place 페인팅 기능이 생기면 revision 키로 교체할 것 — 현재는 교체 방식만.) */
   layerBounds(id) {
-    const cache = this._cache.layerBounds ??= new Map();
-    if (cache.has(id)) return cache.get(id);
+    const l = this.layerById(id);
+    const key = l?.surface != null
+      ? `${id}:${l.surface}:${l.surface_size?.[0]}x${l.surface_size?.[1]}`
+      : null; // 그룹은 자식 파생이라 캐시 불가.
+    if (key) {
+      const hit = this._boundsCache.get(key);
+      if (hit !== undefined) return hit;
+    }
     const bounds = JSON.parse(this.editor.layer_bounds(id));
-    cache.set(id, bounds);
+    if (key) {
+      if (this._boundsCache.size > 1024) this._boundsCache.clear();
+      this._boundsCache.set(key, bounds);
+    }
     return bounds;
   }
 
@@ -556,6 +1008,8 @@ export class App extends EventTarget {
     this.editor = editor;
     this.renderer.editor = editor;
     this._invalidateCache();
+    this._boundsCache.clear(); // 문서가 통째로 바뀜 — (id,surface) 키 신뢰 불가.
+    this._metaCache.clear();
     this.renderer.resize();
     this._notify();
     this._scheduleGeometryWarmup();

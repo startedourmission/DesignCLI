@@ -49,10 +49,22 @@ pub(crate) fn to_linear(rgba: [u8; 4]) -> LinearPremul {
 ///
 /// 좌표는 f32 → 가장자리가 픽셀 경계에 안 맞으면 부분 커버리지가 생긴다.
 pub fn fill_rect(s: &mut Surface, x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4]) {
+    let color = to_linear(rgba);
+    fill_rect_with(s, x, y, w, h, &|_, _| color);
+}
+
+/// 픽셀별 색 콜백 버전(그라데이션 채움) — 커버리지 수학은 단색과 동일.
+pub fn fill_rect_with(
+    s: &mut Surface,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color_at: &dyn Fn(f32, f32) -> LinearPremul,
+) {
     if w <= 0.0 || h <= 0.0 {
         return;
     }
-    let color = to_linear(rgba);
     let (x0, y0, x1, y1) = (x, y, x + w, y + h);
     let px0 = x0.floor().max(0.0) as u32;
     let py0 = y0.floor().max(0.0) as u32;
@@ -62,7 +74,7 @@ pub fn fill_rect(s: &mut Surface, x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4])
         let cy = pixel_coverage_1d(py as f32, y0, y1);
         for px in px0..px1 {
             let cx = pixel_coverage_1d(px as f32, x0, x1);
-            blend_px(s, px, py, color, cx * cy);
+            blend_px(s, px, py, color_at(px as f32 + 0.5, py as f32 + 0.5), cx * cy);
         }
     }
 }
@@ -90,17 +102,32 @@ fn ellipse_coverage(px: u32, py: u32, cx: f32, cy: f32, rx: f32, ry: f32) -> f32
 
 /// 채워진 타원 — 중심 (cx, cy), 반지름 (rx, ry). 가장자리 AA(거리 기반).
 pub fn fill_ellipse(s: &mut Surface, cx: f32, cy: f32, rx: f32, ry: f32, rgba: [u8; 4]) {
+    let color = to_linear(rgba);
+    fill_ellipse_with(s, cx, cy, rx, ry, &|_, _| color);
+}
+
+/// 픽셀별 색 콜백 버전(그라데이션 채움).
+pub fn fill_ellipse_with(
+    s: &mut Surface,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    color_at: &dyn Fn(f32, f32) -> LinearPremul,
+) {
     if rx <= 0.0 || ry <= 0.0 {
         return;
     }
-    let color = to_linear(rgba);
     let x0 = ((cx - rx).floor().max(0.0)) as u32;
     let y0 = ((cy - ry).floor().max(0.0)) as u32;
     let x1 = (((cx + rx).ceil() as i64).clamp(0, s.width() as i64)) as u32;
     let y1 = (((cy + ry).ceil() as i64).clamp(0, s.height() as i64)) as u32;
     for py in y0..y1 {
         for px in x0..x1 {
-            blend_px(s, px, py, color, ellipse_coverage(px, py, cx, cy, rx, ry));
+            let cov = ellipse_coverage(px, py, cx, cy, rx, ry);
+            if cov > 0.0 {
+                blend_px(s, px, py, color_at(px as f32 + 0.5, py as f32 + 0.5), cov);
+            }
         }
     }
 }
@@ -110,17 +137,9 @@ pub fn fill_ellipse(s: &mut Surface, cx: f32, cy: f32, rx: f32, ry: f32, rgba: [
 /// 겹치지 않는 4개 스트립(상/하/좌/우)으로 분해해 fill_rect의 AA를 그대로 재사용한다
 /// (모서리 이중 블렌딩 없음). 두께가 절반 이상이면 채움과 동일.
 pub fn stroke_rect(s: &mut Surface, x: f32, y: f32, w: f32, h: f32, width: f32, rgba: [u8; 4]) {
-    if w <= 0.0 || h <= 0.0 || width <= 0.0 {
-        return;
-    }
-    let t = width;
-    if t * 2.0 >= w.min(h) {
-        return fill_rect(s, x, y, w, h, rgba);
-    }
-    fill_rect(s, x, y, w, t, rgba); // 상
-    fill_rect(s, x, y + h - t, w, t, rgba); // 하
-    fill_rect(s, x, y + t, t, h - 2.0 * t, rgba); // 좌
-    fill_rect(s, x + w - t, y + t, t, h - 2.0 * t, rgba); // 우
+    // 한 패스 링 커버리지(outer − inner). 예전 4-스트립(fill_rect×4) 방식은 분수 좌표에서
+    // 가로/세로 변이 각자 AA되어 이음새에 반투명 이격이 생겼다(뷰 벡터 재래스터에서 가시).
+    stroke_rounded_rect(s, x, y, w, h, 0.0, width, rgba)
 }
 
 /// 테두리 타원 — 링(외곽 타원 − 안쪽 타원), 두께 `width`(안쪽으로).
@@ -166,14 +185,27 @@ pub fn fill_rounded_rect(
     radius: f32,
     rgba: [u8; 4],
 ) {
+    let color = to_linear(rgba);
+    fill_rounded_rect_with(s, x, y, w, h, radius, &|_, _| color);
+}
+
+/// 픽셀별 색 콜백 버전(그라데이션 채움).
+pub fn fill_rounded_rect_with(
+    s: &mut Surface,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    color_at: &dyn Fn(f32, f32) -> LinearPremul,
+) {
     if w <= 0.0 || h <= 0.0 {
         return;
     }
     let r = radius.clamp(0.0, w.min(h) * 0.5);
     if r <= 0.0 {
-        return fill_rect(s, x, y, w, h, rgba);
+        return fill_rect_with(s, x, y, w, h, color_at);
     }
-    let color = to_linear(rgba);
     let (ccx, ccy) = (x + w * 0.5, y + h * 0.5); // 중심
     let (hx, hy) = (w * 0.5 - r, h * 0.5 - r); // 코너 중심까지 반치수
     let px0 = x.floor().max(0.0) as u32;
@@ -188,7 +220,112 @@ pub fn fill_rounded_rect(
             let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
             let d = outside + qx.max(qy).min(0.0) - r;
             let coverage = (0.5 - d).clamp(0.0, 1.0);
-            blend_px(s, px, py, color, coverage);
+            if coverage > 0.0 {
+                blend_px(s, px, py, color_at(px as f32 + 0.5, py as f32 + 0.5), coverage);
+            }
+        }
+    }
+}
+
+#[inline]
+fn rounded_rect_coverage(px: u32, py: u32, x: f32, y: f32, w: f32, h: f32, radius: f32) -> f32 {
+    if w <= 0.0 || h <= 0.0 {
+        return 0.0;
+    }
+    let r = radius.clamp(0.0, w.min(h) * 0.5);
+    if r <= 0.0 {
+        let cx = pixel_coverage_1d(px as f32, x, x + w);
+        let cy = pixel_coverage_1d(py as f32, y, y + h);
+        return cx * cy;
+    }
+    let (ccx, ccy) = (x + w * 0.5, y + h * 0.5);
+    let (hx, hy) = (w * 0.5 - r, h * 0.5 - r);
+    let qx = (px as f32 + 0.5 - ccx).abs() - hx;
+    let qy = (py as f32 + 0.5 - ccy).abs() - hy;
+    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+    let d = outside + qx.max(qy).min(0.0) - r;
+    (0.5 - d).clamp(0.0, 1.0)
+}
+
+/// 둥근 사각형 테두리 — 바깥 rounded box에서 안쪽 rounded box를 뺀 링.
+pub fn stroke_rounded_rect(
+    s: &mut Surface,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    width: f32,
+    rgba: [u8; 4],
+) {
+    if w <= 0.0 || h <= 0.0 || width <= 0.0 {
+        return;
+    }
+    let t = width;
+    if t * 2.0 >= w.min(h) {
+        return fill_rounded_rect(s, x, y, w, h, radius, rgba);
+    }
+    let color = to_linear(rgba);
+    let px0 = x.floor().max(0.0) as u32;
+    let py0 = y.floor().max(0.0) as u32;
+    let px1 = (((x + w).ceil() as i64).clamp(0, s.width() as i64)) as u32;
+    let py1 = (((y + h).ceil() as i64).clamp(0, s.height() as i64)) as u32;
+    for py in py0..py1 {
+        for px in px0..px1 {
+            let outer = rounded_rect_coverage(px, py, x, y, w, h, radius);
+            let inner = rounded_rect_coverage(
+                px,
+                py,
+                x + t,
+                y + t,
+                w - t * 2.0,
+                h - t * 2.0,
+                (radius - t).max(0.0),
+            );
+            blend_px(s, px, py, color, (outer - inner).clamp(0.0, 1.0));
+        }
+    }
+}
+
+/// 부드러운 그림자 — rounded-box SDF를 feather 폭의 smoothstep으로 풀어낸다.
+/// feather=0이면 일반 rounded rect와 동일(1px AA).
+pub fn fill_shadow(
+    s: &mut Surface,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    feather: f32,
+    rgba: [u8; 4],
+) {
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let f = feather.max(0.0);
+    if f <= 0.0 {
+        return fill_rounded_rect(s, x, y, w, h, radius, rgba);
+    }
+    let color = to_linear(rgba);
+    let r = radius.clamp(0.0, w.min(h) * 0.5);
+    let (ccx, ccy) = (x + w * 0.5, y + h * 0.5);
+    let (hx, hy) = (w * 0.5 - r, h * 0.5 - r);
+    let px0 = (x - f).floor().max(0.0) as u32;
+    let py0 = (y - f).floor().max(0.0) as u32;
+    let px1 = (((x + w + f).ceil() as i64).clamp(0, s.width() as i64)) as u32;
+    let py1 = (((y + h + f).ceil() as i64).clamp(0, s.height() as i64)) as u32;
+    for py in py0..py1 {
+        for px in px0..px1 {
+            let qx = (px as f32 + 0.5 - ccx).abs() - hx;
+            let qy = (py as f32 + 0.5 - ccy).abs() - hy;
+            let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+            let d = outside + qx.max(qy).min(0.0) - r;
+            // smoothstep: 경계(d=0) 안팎 ±f/2 폭으로 부드럽게.
+            let t = (0.5 - d / f).clamp(0.0, 1.0);
+            let cov = t * t * (3.0 - 2.0 * t);
+            if cov > 0.0 {
+                blend_px(s, px, py, color, cov);
+            }
         }
     }
 }
@@ -218,15 +355,18 @@ pub fn stroke_line(s: &mut Surface, x0: f32, y0: f32, x1: f32, y1: f32, width: f
 ///
 /// ★색 contract★: 그라디언트 색 보간은 반드시 linear-premul 공간에서 한다 —
 /// 감마 공간 보간은 중간 톤이 어두워지는 고전적 함정(gamma-vs-linear-landmine).
-fn stops_to_linear(stops: &[(f32, [u8; 4])]) -> Vec<(f32, LinearPremul)> {
-    stops.iter().map(|(at, rgba)| (*at, to_linear(*rgba))).collect()
+pub fn stops_to_linear(stops: &[(f32, [u8; 4])]) -> Vec<(f32, LinearPremul)> {
+    stops
+        .iter()
+        .map(|(at, rgba)| (*at, to_linear(*rgba)))
+        .collect()
 }
 
 /// t(0~1 권장, 범위 밖 clamp)에 해당하는 보간 색. stops는 at 오름차순 가정.
 ///
 /// 첫 stop 이전/마지막 stop 이후는 끝 색으로 clamp. stop 사이는 성분별 선형 보간
 /// (linear-premul이므로 premul 성분을 그대로 lerp하면 합성과 일관된 결과).
-fn gradient_color_at(stops: &[(f32, LinearPremul)], t: f32) -> LinearPremul {
+pub fn gradient_color_at(stops: &[(f32, LinearPremul)], t: f32) -> LinearPremul {
     let first = &stops[0];
     if t <= first.0 {
         return first.1;
@@ -241,7 +381,11 @@ fn gradient_color_at(stops: &[(f32, LinearPremul)], t: f32) -> LinearPremul {
         let (a1, c1) = pair[1];
         if t <= a1 {
             let span = a1 - a0;
-            let f = if span <= f32::EPSILON { 0.0 } else { (t - a0) / span };
+            let f = if span <= f32::EPSILON {
+                0.0
+            } else {
+                (t - a0) / span
+            };
             return LinearPremul {
                 r: c0.r + (c1.r - c0.r) * f,
                 g: c0.g + (c1.g - c0.g) * f,
@@ -278,8 +422,7 @@ pub fn fill_linear_gradient(
                 0.0
             } else {
                 // 픽셀 중심을 축에 투영한 비율.
-                (((px as f32 + 0.5 - x0) * dx + (py as f32 + 0.5 - y0) * dy) / len2)
-                    .clamp(0.0, 1.0)
+                (((px as f32 + 0.5 - x0) * dx + (py as f32 + 0.5 - y0) * dy) / len2).clamp(0.0, 1.0)
             };
             blend_px(s, px, py, gradient_color_at(&lin, t), 1.0);
         }
@@ -370,8 +513,15 @@ mod tests {
     fn line_draws_along_path() {
         let mut s = Surface::new(20, 20);
         stroke_line(&mut s, 2.0, 10.0, 18.0, 10.0, 3.0, [0, 0, 0, 255]);
-        assert!(s.get(10, 10).to_srgb8_straight()[3] > 200, "선 위 픽셀 불투명");
-        assert_eq!(s.get(10, 2).to_srgb8_straight()[3], 0, "선에서 먼 픽셀 투명");
+        assert!(
+            s.get(10, 10).to_srgb8_straight()[3] > 200,
+            "선 위 픽셀 불투명"
+        );
+        assert_eq!(
+            s.get(10, 2).to_srgb8_straight()[3],
+            0,
+            "선에서 먼 픽셀 투명"
+        );
     }
 
     #[test]
@@ -397,7 +547,10 @@ mod tests {
         let mut s = Surface::new(30, 30);
         stroke_ellipse(&mut s, 15.0, 15.0, 12.0, 12.0, 3.0, [0, 0, 255, 255]);
         // 링 위(중심에서 ~10.5px 거리, 경계 12와 내부 9 사이).
-        assert!(s.get(15 + 10, 15).to_srgb8_straight()[3] > 200, "링 위 불투명");
+        assert!(
+            s.get(15 + 10, 15).to_srgb8_straight()[3] > 200,
+            "링 위 불투명"
+        );
         assert_eq!(s.get(15, 15).to_srgb8_straight()[3], 0, "중심 투명");
         assert_eq!(s.get(0, 0).to_srgb8_straight()[3], 0, "바깥 투명");
     }
@@ -419,7 +572,11 @@ mod tests {
         let stops = [(0.0_f32, [0u8, 0, 0, 255]), (1.0, [255, 255, 255, 255])];
         fill_linear_gradient(&mut s, 0.5, 0.0, 16.5, 0.0, &stops);
         assert_eq!(s.get(0, 0).to_srgb8_straight(), [0, 0, 0, 255], "t=0 검정");
-        assert_eq!(s.get(16, 0).to_srgb8_straight(), [255, 255, 255, 255], "t=1 흰색");
+        assert_eq!(
+            s.get(16, 0).to_srgb8_straight(),
+            [255, 255, 255, 255],
+            "t=1 흰색"
+        );
         // t=0.5 — ★linear 공간 보간★: linear 0.5 → sRGB8 ≈ 188 (감마 보간이면 128).
         let mid = s.get(8, 0).to_srgb8_straight();
         assert!(
@@ -436,10 +593,22 @@ mod tests {
         let mut s = Surface::new(17, 17);
         let stops = [(0.0_f32, [0u8, 0, 0, 255]), (1.0, [255, 255, 255, 255])];
         fill_radial_gradient(&mut s, 8.5, 8.5, 8.0, &stops);
-        assert_eq!(s.get(8, 8).to_srgb8_straight(), [0, 0, 0, 255], "중심 t=0 검정");
-        assert_eq!(s.get(16, 8).to_srgb8_straight(), [255, 255, 255, 255], "가장자리 t=1 흰색");
+        assert_eq!(
+            s.get(8, 8).to_srgb8_straight(),
+            [0, 0, 0, 255],
+            "중심 t=0 검정"
+        );
+        assert_eq!(
+            s.get(16, 8).to_srgb8_straight(),
+            [255, 255, 255, 255],
+            "가장자리 t=1 흰색"
+        );
         // radius 밖(모서리)은 t=1로 clamp → 흰색.
-        assert_eq!(s.get(0, 0).to_srgb8_straight(), [255, 255, 255, 255], "범위 밖 clamp");
+        assert_eq!(
+            s.get(0, 0).to_srgb8_straight(),
+            [255, 255, 255, 255],
+            "범위 밖 clamp"
+        );
     }
 
     #[test]
@@ -448,8 +617,16 @@ mod tests {
         let mut s = Surface::new(17, 1);
         let stops = [(0.25_f32, [255u8, 0, 0, 255]), (0.75, [0, 0, 255, 255])];
         fill_linear_gradient(&mut s, 0.5, 0.0, 16.5, 0.0, &stops);
-        assert_eq!(s.get(0, 0).to_srgb8_straight(), [255, 0, 0, 255], "t=0 → 첫 stop");
-        assert_eq!(s.get(16, 0).to_srgb8_straight(), [0, 0, 255, 255], "t=1 → 마지막 stop");
+        assert_eq!(
+            s.get(0, 0).to_srgb8_straight(),
+            [255, 0, 0, 255],
+            "t=0 → 첫 stop"
+        );
+        assert_eq!(
+            s.get(16, 0).to_srgb8_straight(),
+            [0, 0, 255, 255],
+            "t=1 → 마지막 stop"
+        );
     }
 
     #[test]

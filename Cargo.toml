@@ -61,6 +61,8 @@ eframe = { version = "0.28", default-features = false, features = ["wgpu", "defa
 egui = "0.28"
 schemars = "1"
 base64 = "0.22"
+futures-util = "0.3"
+libc = "0.2"
 rmcp = { version = "1", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-std", "sync"] }
 # daemon(dx-daemon)용 웹 스택. daemon crate만 사용 — 코어/CLI/wasm 빌드엔 무영향.

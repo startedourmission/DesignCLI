@@ -202,6 +202,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         // 레이어 opacity 적용 (premul 불변식 유지).
         src = src * lm.opacity;
+        // CPU blend_pixel과 1:1 fast path 미러(비트 패리티 유지):
+        // 투명 src는 무기여, Normal×완전불투명은 dst를 src로 대체(왕복 인코딩 생략).
+        if (src.a <= 0.0) {
+            continue;
+        }
+        if (lm.blend == 0u && src.a >= 1.0) {
+            acc = src;
+            continue;
+        }
         if (u.blend_space == 1u) {
             acc = blend_in_linear(acc, src, lm.blend);
         } else {

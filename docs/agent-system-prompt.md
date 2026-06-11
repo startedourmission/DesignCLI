@@ -11,12 +11,13 @@ Your job is to create polished image-design documents with the `dx` CLI and veri
 
 Core workflow:
 1. Inspect the available command surface if needed with `target/debug/dx --help` or `cargo run -q -p dcli-cli --bin dx -- --help`.
-2. Create a new document under `projects/` unless the user specifies another path.
-3. Build the design using `dx --doc <path> ...` commands only, unless the user asks for web or code changes.
-4. Use `frame add` for final export bounds when producing card/news/social designs.
-5. Export with `dx --doc <path> export png <out.png>` or `--frame <name>`.
-6. Verify with `dx doc info`, `dx layer list`, `dx frame list`, `file <out.png>`, and visual inspection of the PNG.
-7. If the image is broken, cramped, blank, clipped, unreadable, or visually weak, revise the document and export again before final response.
+2. If the user expects to watch the process in the web UI, use live mode from the first command: `target/debug/dx --server http://localhost:8137 --doc projects/<name>.dxdoc ...`.
+3. Create a new document under `projects/` unless the user specifies another path.
+4. Build the design using `dx --doc <path> ...` commands only, unless the user asks for web or code changes. For live/web-visible work, keep `--server http://localhost:8137` on every write command.
+5. Use `frame add` for final export bounds when producing card/news/social designs.
+6. Export with `dx --doc <path> export png <out.png>` or `--frame <name>`.
+7. Verify with `dx doc info`, `dx layer list`, `dx frame list`, `file <out.png>`, and visual inspection of the PNG.
+8. If the image is broken, cramped, blank, clipped, unreadable, or visually weak, revise the document and export again before final response.
 
 Design quality rules:
 - Make the actual design as the first artifact. Avoid placeholder-only compositions.
@@ -33,13 +34,13 @@ Design quality rules:
 - Name layers descriptively so `dx layer list` is readable.
 
 Useful commands:
-- `target/debug/dx --doc projects/example.dxdoc doc create --w 1080 --h 1080 --depth u8`
-- `target/debug/dx --doc projects/example.dxdoc layer add --name bg --fill 245,241,232,255`
-- `target/debug/dx --doc projects/example.dxdoc layer add --name bg --image design-assets/card-news/01-warm-paper.png`
-- `target/debug/dx --doc projects/example.dxdoc draw rounded-rect 84 86 912 908 --radius 44 --color 255,252,245,255 --name card`
-- `target/debug/dx --doc projects/example.dxdoc draw text 120 220 "카드뉴스 제목" --size 78 --color 24,28,32,255 --name title`
-- `target/debug/dx --doc projects/example.dxdoc frame add square-card 0 0 1080 1080`
-- `target/debug/dx --doc projects/example.dxdoc export png projects/example.png --frame square-card`
+- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc doc create --w 1080 --h 1080 --depth u8`
+- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc layer add --name bg --fill 245,241,232,255`
+- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc layer add --name bg --image design-assets/card-news/01-warm-paper.png`
+- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc draw rounded-rect 84 86 912 908 --radius 44 --color 255,252,245,255 --name card`
+- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc draw text 120 220 "카드뉴스 제목" --size 78 --color 24,28,32,255 --name title`
+- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc frame add square-card 0 0 1080 1080`
+- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc export png projects/example.png --frame square-card`
 
 When designing card news:
 - Build one strong message per card.

@@ -69,25 +69,44 @@ pub enum PixelSource {
     Shapes { items: Vec<Shape> },
 }
 
+/// 도형 채움 그라데이션 — 좌표는 도형 bbox 기준 상대(0~1). 스케일/줌 무관.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GradFill {
+    /// 시작점 (bbox 상대 0~1).
+    pub x0: f32,
+    pub y0: f32,
+    /// 끝점 (bbox 상대 0~1). radial이면 (x0,y0)=중심, (x1,y1)까지 거리가 반지름.
+    pub x1: f32,
+    pub y1: f32,
+    #[serde(default)]
+    pub radial: bool,
+    /// at 오름차순 색 정지점.
+    pub stops: Vec<GradientStop>,
+}
+
 /// 그릴 도형 하나(좌표는 픽셀 단위 f32).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 pub enum Shape {
-    /// 채워진 사각형: 좌상단 (x,y), 크기 (w,h).
+    /// 채워진 사각형: 좌상단 (x,y), 크기 (w,h). gradient가 있으면 rgba 대신 그라데이션.
     Rect {
         x: f32,
         y: f32,
         w: f32,
         h: f32,
         rgba: [u8; 4],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gradient: Option<GradFill>,
     },
-    /// 채워진 타원: 중심 (cx,cy), 반지름 (rx,ry).
+    /// 채워진 타원: 중심 (cx,cy), 반지름 (rx,ry). gradient가 있으면 rgba 대신 그라데이션.
     Ellipse {
         cx: f32,
         cy: f32,
         rx: f32,
         ry: f32,
         rgba: [u8; 4],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gradient: Option<GradFill>,
     },
     /// 선분: (x0,y0)→(x1,y1), 두께 width.
     Line {
@@ -116,13 +135,36 @@ pub enum Shape {
         width: f32,
         rgba: [u8; 4],
     },
-    /// 모서리 둥근 채움 사각형: 코너 반지름 radius.
+    /// 모서리 둥근 채움 사각형: 코너 반지름 radius. gradient가 있으면 rgba 대신 그라데이션.
     RoundedRect {
         x: f32,
         y: f32,
         w: f32,
         h: f32,
         radius: f32,
+        rgba: [u8; 4],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gradient: Option<GradFill>,
+    },
+    /// 둥근 사각형 테두리: 외곽선만, 코너 반지름 radius, 두께 width(안쪽으로).
+    StrokeRoundedRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        width: f32,
+        rgba: [u8; 4],
+    },
+    /// 부드러운 그림자 — rounded-box SDF를 feather 폭으로 풀어낸다(blur 근사).
+    /// 타원 그림자는 radius=min(w,h)/2로 근사. 항상 다른 도형 "아래"에 먼저 그린다.
+    Shadow {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        feather: f32,
         rgba: [u8; 4],
     },
     /// 텍스트(번들 폰트 Pretendard — 한글/라틴). (x,y)=첫 줄 좌상단, size=px, '\n' 줄바꿈.
@@ -201,6 +243,11 @@ pub enum Action {
     },
     /// 레이어 삭제.
     DeleteLayer { id: NodeRef },
+    /// 페인트 노드의 픽셀 소스를 교체한다 — 노드 id·그룹 소속·z순서·선택이 보존된다
+    /// (재스타일/재래스터 전용; delete+add 대체). 엔진이 offset을 materialize origin으로
+    /// 두므로, 호출자는 보정 offset을 같은 batch의 후속 set_props로 적용한다.
+    /// 그룹 자식 노드에도 동작한다(delete_layer는 루트 전용).
+    ReplacePaintSource { id: NodeRef, source: PixelSource },
     /// 레이어 복제: 표면 픽셀 + 속성 전체 복사, offset (+12,+12) 이동. bind로 새 노드 참조.
     DuplicateLayer {
         id: NodeRef,
@@ -479,6 +526,120 @@ fn materialize(source: &PixelSource, w: u32, h: u32) -> Result<(Surface, (i32, i
     }
 }
 
+/// meta JSON(웹 재스타일 규약) → 그릴 아이템 목록. wasm 뷰 벡터 경로와 CLI `layer style`이
+/// 공유하는 단일 출처다(웹 _styledShapeItems와 같은 규약).
+///
+/// 규약: meta.type ∈ {"shape","brush","text"}.
+/// - shape/brush: item(Shape JSON) 필수. fill 순서 = [shadow?, fill?, stroke?].
+///   noFill=true면 fill 생략. stroke/strokeWidth가 있으면 외곽 아이템 생성.
+///   shadow = {dx, dy, blur, rgba} — fill 지오메트리에서 유도(맨 아래).
+/// - text: {x,y,text,size,rgba} (+bg = {rgba, padX, padY, radius} 배경 박스).
+pub fn items_from_meta(m: &serde_json::Value) -> Option<Vec<Shape>> {
+    let rgba_of = |v: &serde_json::Value| -> Option<[u8; 4]> {
+        let a = v.as_array()?;
+        if a.len() != 4 {
+            return None;
+        }
+        let mut out = [0u8; 4];
+        for (i, x) in a.iter().enumerate() {
+            out[i] = x.as_f64()?.clamp(0.0, 255.0) as u8;
+        }
+        Some(out)
+    };
+    let num = |v: &serde_json::Value, k: &str, d: f64| v.get(k).and_then(|x| x.as_f64()).unwrap_or(d) as f32;
+    match m.get("type")?.as_str()? {
+        "text" => {
+            let x = num(m, "x", 0.0);
+            let y = num(m, "y", 0.0);
+            let size = num(m, "size", 32.0);
+            let text = m.get("text")?.as_str()?.to_string();
+            let rgba = rgba_of(m.get("rgba")?)?;
+            let mut v = Vec::new();
+            if let Some(bg) = m.get("bg").filter(|b| !b.is_null()) {
+                if let Some(brgba) = bg.get("rgba").and_then(|c| rgba_of(c)) {
+                    let (tw, th) = dcli_raster::text::measure_text(&text, size);
+                    let px = num(bg, "padX", (size * 0.35) as f64);
+                    let py = num(bg, "padY", (size * 0.22) as f64);
+                    v.push(Shape::RoundedRect {
+                        x: x - px,
+                        y: y - py,
+                        w: tw + px * 2.0,
+                        h: th + py * 2.0,
+                        radius: num(bg, "radius", (size * 0.18) as f64),
+                        rgba: brgba,
+                        gradient: bg
+                            .get("gradient")
+                            .filter(|g| !g.is_null())
+                            .and_then(|g| serde_json::from_value(g.clone()).ok()),
+                    });
+                }
+            }
+            v.push(Shape::Text { x, y, text, size, rgba });
+            Some(v)
+        }
+        "shape" | "brush" => {
+            let item: Shape = serde_json::from_value(m.get("item")?.clone()).ok()?;
+            let no_fill = m.get("noFill").and_then(|x| x.as_bool()).unwrap_or(false);
+            let mut v: Vec<Shape> = Vec::new();
+            // 그림자: fill 지오메트리에서 유도, 맨 아래.
+            if let Some(sh) = m.get("shadow").filter(|x| !x.is_null()) {
+                let (gx, gy, gw, gh, gr) = match &item {
+                    Shape::Rect { x, y, w, h, .. } => (*x, *y, *w, *h, 0.0),
+                    Shape::RoundedRect { x, y, w, h, radius, .. } => (*x, *y, *w, *h, *radius),
+                    Shape::Ellipse { cx, cy, rx, ry, .. } => (cx - rx, cy - ry, rx * 2.0, ry * 2.0, rx.min(*ry)),
+                    _ => (0.0, 0.0, -1.0, -1.0, 0.0),
+                };
+                if gw > 0.0 && gh > 0.0 {
+                    if let Some(srgba) = sh.get("rgba").and_then(|c| rgba_of(c)) {
+                        v.push(Shape::Shadow {
+                            x: gx + num(sh, "dx", 0.0),
+                            y: gy + num(sh, "dy", 6.0),
+                            w: gw,
+                            h: gh,
+                            radius: gr,
+                            feather: num(sh, "blur", 16.0).max(0.5),
+                            rgba: srgba,
+                        });
+                    }
+                }
+            }
+            if !no_fill {
+                v.push(item.clone());
+            }
+            let sw = num(m, "strokeWidth", 0.0);
+            if sw > 0.0 {
+                if let Some(srgba) = m.get("stroke").filter(|x| !x.is_null()).and_then(|c| rgba_of(c)) {
+                    if srgba[3] > 0 {
+                        match &item {
+                            Shape::Rect { x, y, w, h, .. } => v.push(Shape::StrokeRect {
+                                x: *x, y: *y, w: *w, h: *h, width: sw, rgba: srgba,
+                            }),
+                            Shape::RoundedRect { x, y, w, h, radius, .. } => v.push(Shape::StrokeRoundedRect {
+                                x: *x, y: *y, w: *w, h: *h, radius: *radius, width: sw, rgba: srgba,
+                            }),
+                            Shape::Ellipse { cx, cy, rx, ry, .. } => v.push(Shape::StrokeEllipse {
+                                cx: *cx, cy: *cy, rx: *rx, ry: *ry, width: sw, rgba: srgba,
+                            }),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if v.is_empty() {
+                return None; // 그릴 것 없음 — 호출자는 래스터 폴백.
+            }
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
+/// materialize가 표면 원점으로 삼는 floor(min corner) — 뷰 벡터 경로가
+/// `월드 = 아이템 좌표 + (offset − origin)` 복원에 쓴다(웹 _itemsOrigin과 동일 수식).
+pub fn shapes_origin(items: &[Shape]) -> Option<(i32, i32)> {
+    shape_bounds(items).map(|(x0, y0, _, _)| (x0.floor() as i32, y0.floor() as i32))
+}
+
 fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
     let mut b: Option<(f32, f32, f32, f32)> = None;
     let mut add = |x0: f32, y0: f32, x1: f32, y1: f32| {
@@ -492,6 +653,14 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
             Shape::Rect { x, y, w, h, .. } | Shape::RoundedRect { x, y, w, h, .. } => {
                 if *w > 0.0 && *h > 0.0 {
                     add(*x - 1.0, *y - 1.0, *x + *w + 1.0, *y + *h + 1.0);
+                }
+            }
+            Shape::StrokeRoundedRect {
+                x, y, w, h, width, ..
+            } => {
+                if *w > 0.0 && *h > 0.0 && *width > 0.0 {
+                    let m = width.max(1.0);
+                    add(*x - m, *y - m, *x + *w + m, *y + *h + m);
                 }
             }
             Shape::StrokeRect {
@@ -563,6 +732,19 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
                     add(minx - m, miny - m, maxx + m, maxy + m);
                 }
             }
+            Shape::Shadow {
+                x,
+                y,
+                w,
+                h,
+                feather,
+                ..
+            } => {
+                if *w > 0.0 && *h > 0.0 {
+                    let m = feather.max(0.0) + 1.0;
+                    add(*x - m, *y - m, *x + *w + m, *y + *h + m);
+                }
+            }
             Shape::Text {
                 x, y, text, size, ..
             } => {
@@ -579,12 +761,13 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
 
 fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
     match shape {
-        Shape::Rect { x, y, w, h, rgba } => Shape::Rect {
+        Shape::Rect { x, y, w, h, rgba, gradient } => Shape::Rect {
             x: x + dx,
             y: y + dy,
             w: *w,
             h: *h,
             rgba: *rgba,
+            gradient: gradient.clone(),
         },
         Shape::Ellipse {
             cx,
@@ -592,12 +775,14 @@ fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
             rx,
             ry,
             rgba,
+            gradient,
         } => Shape::Ellipse {
             cx: cx + dx,
             cy: cy + dy,
             rx: *rx,
             ry: *ry,
             rgba: *rgba,
+            gradient: gradient.clone(),
         },
         Shape::Line {
             x0,
@@ -651,12 +836,48 @@ fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
             h,
             radius,
             rgba,
+            gradient,
         } => Shape::RoundedRect {
             x: x + dx,
             y: y + dy,
             w: *w,
             h: *h,
             radius: *radius,
+            rgba: *rgba,
+            gradient: gradient.clone(),
+        },
+        Shape::StrokeRoundedRect {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            width,
+            rgba,
+        } => Shape::StrokeRoundedRect {
+            x: x + dx,
+            y: y + dy,
+            w: *w,
+            h: *h,
+            radius: *radius,
+            width: *width,
+            rgba: *rgba,
+        },
+        Shape::Shadow {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            feather,
+            rgba,
+        } => Shape::Shadow {
+            x: x + dx,
+            y: y + dy,
+            w: *w,
+            h: *h,
+            radius: *radius,
+            feather: *feather,
             rgba: *rgba,
         },
         Shape::Text {
@@ -694,17 +915,59 @@ fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
 }
 
 /// 한 도형을 표면에 그린다(dcli-raster::shapes/text 위임).
+/// GradFill(bbox 상대 0~1) → 절대 px 콜백. 도형의 bbox(x,y,w,h)에 앵커.
+fn grad_color_fn(
+    g: &GradFill,
+    bx: f32,
+    by: f32,
+    bw: f32,
+    bh: f32,
+) -> impl Fn(f32, f32) -> LinearPremul {
+    let lin = dcli_raster::shapes::stops_to_linear(
+        &g.stops.iter().map(|st| (st.at, st.rgba)).collect::<Vec<_>>(),
+    );
+    let (ax, ay) = (bx + g.x0 * bw, by + g.y0 * bh);
+    let (ex, ey) = (bx + g.x1 * bw, by + g.y1 * bh);
+    let radial = g.radial;
+    let dx = ex - ax;
+    let dy = ey - ay;
+    let len2 = (dx * dx + dy * dy).max(f32::EPSILON);
+    let rad = len2.sqrt();
+    move |px: f32, py: f32| {
+        let t = if radial {
+            (((px - ax).powi(2) + (py - ay).powi(2)).sqrt() / rad).clamp(0.0, 1.0)
+        } else {
+            (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+        };
+        dcli_raster::shapes::gradient_color_at(&lin, t)
+    }
+}
+
 fn draw_shape(s: &mut Surface, shape: &Shape) {
     use dcli_raster::shapes;
     match shape {
-        Shape::Rect { x, y, w, h, rgba } => shapes::fill_rect(s, *x, *y, *w, *h, *rgba),
+        Shape::Rect { x, y, w, h, rgba, gradient } => match gradient {
+            Some(g) => shapes::fill_rect_with(s, *x, *y, *w, *h, &grad_color_fn(g, *x, *y, *w, *h)),
+            None => shapes::fill_rect(s, *x, *y, *w, *h, *rgba),
+        },
         Shape::Ellipse {
             cx,
             cy,
             rx,
             ry,
             rgba,
-        } => shapes::fill_ellipse(s, *cx, *cy, *rx, *ry, *rgba),
+            gradient,
+        } => match gradient {
+            Some(g) => shapes::fill_ellipse_with(
+                s,
+                *cx,
+                *cy,
+                *rx,
+                *ry,
+                &grad_color_fn(g, cx - rx, cy - ry, rx * 2.0, ry * 2.0),
+            ),
+            None => shapes::fill_ellipse(s, *cx, *cy, *rx, *ry, *rgba),
+        },
         Shape::Line {
             x0,
             y0,
@@ -736,7 +999,37 @@ fn draw_shape(s: &mut Surface, shape: &Shape) {
             h,
             radius,
             rgba,
-        } => shapes::fill_rounded_rect(s, *x, *y, *w, *h, *radius, *rgba),
+            gradient,
+        } => match gradient {
+            Some(g) => shapes::fill_rounded_rect_with(
+                s,
+                *x,
+                *y,
+                *w,
+                *h,
+                *radius,
+                &grad_color_fn(g, *x, *y, *w, *h),
+            ),
+            None => shapes::fill_rounded_rect(s, *x, *y, *w, *h, *radius, *rgba),
+        },
+        Shape::StrokeRoundedRect {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            width,
+            rgba,
+        } => shapes::stroke_rounded_rect(s, *x, *y, *w, *h, *radius, *width, *rgba),
+        Shape::Shadow {
+            x,
+            y,
+            w,
+            h,
+            radius,
+            feather,
+            rgba,
+        } => shapes::fill_shadow(s, *x, *y, *w, *h, *radius, *feather, *rgba),
         Shape::Text {
             x,
             y,
@@ -780,6 +1073,7 @@ fn action_kind(a: &Action) -> &'static str {
     match a {
         Action::AddPaintLayer { .. } => "add_paint_layer",
         Action::DeleteLayer { .. } => "delete_layer",
+        Action::ReplacePaintSource { .. } => "replace_paint_source",
         Action::DuplicateLayer { .. } => "duplicate_layer",
         Action::MoveLayer { .. } => "move_layer",
         Action::SetProps { .. } => "set_props",
@@ -924,6 +1218,19 @@ fn try_one(
         Action::DeleteLayer { id } => {
             let nid = resolve_ref(id, binder)?;
             h.stage(Op::DeleteLayer { id: nid }).map_err(op_err)
+        }
+        Action::ReplacePaintSource { id, source } => {
+            let nid = resolve_ref(id, binder)?;
+            let (surface, offset) =
+                materialize(source, w, hh).map_err(|m| ("bad_surface_source".to_string(), m))?;
+            let sid = h.doc.add_surface(surface);
+            owned.push(sid); // 롤백 시 회수.
+            h.stage(Op::ReplacePaintSurface {
+                id: nid,
+                surface: sid,
+                offset,
+            })
+            .map_err(op_err)
         }
         Action::DuplicateLayer { id, bind } => {
             use dcli_model::NodeKind;
@@ -1215,6 +1522,7 @@ mod tests {
                     w: 8.0,
                     h: 8.0,
                     rgba: [255, 0, 0, 255],
+                    gradient: None,
                 }],
             },
             index: None,
@@ -1242,6 +1550,7 @@ mod tests {
                     w: 6.0,
                     h: 6.0,
                     rgba: [255, 0, 0, 255],
+                    gradient: None,
                 }],
             },
             index: None,
@@ -1323,6 +1632,7 @@ mod tests {
                         w: 8.0,
                         h: 8.0,
                         rgba: [255, 0, 0, 255],
+                        gradient: None,
                     }],
                 },
                 index: None,
@@ -1337,6 +1647,7 @@ mod tests {
                         w: 8.0,
                         h: 8.0,
                         rgba: [0, 0, 255, 255],
+                        gradient: None,
                     }],
                 },
                 index: None,
@@ -1370,7 +1681,13 @@ mod tests {
         assert_eq!(h.doc.order()[1], text_id);
         assert_eq!(h.doc.get(text_id).unwrap().name, "edited text");
         assert!(
-            h.doc.get(text_id).unwrap().meta.as_deref().unwrap().contains("\"type\":\"text\""),
+            h.doc
+                .get(text_id)
+                .unwrap()
+                .meta
+                .as_deref()
+                .unwrap()
+                .contains("\"type\":\"text\""),
             "text meta must be applied to the inserted node"
         );
         assert_eq!(h.doc.get(h.doc.order()[2]).unwrap().name, "top");

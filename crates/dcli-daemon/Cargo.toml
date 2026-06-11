@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 # 엔진은 CLI/wasm과 동일 코드경로 — fs-sources 켜서 native(PngPath 등도 가능).
 dcli-cli = { workspace = true, features = ["fs-sources"] }
+dcli-psd = { workspace = true }
 dcli-color.workspace = true
 dcli-model.workspace = true
 dcli-tile.workspace = true
@@ -25,6 +26,8 @@ png.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 base64.workspace = true
+futures-util.workspace = true
+libc.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

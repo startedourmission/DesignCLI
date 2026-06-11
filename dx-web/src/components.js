@@ -53,6 +53,14 @@ const P = {
   download: svg`<path d="M8 2.5V10M5 7.5l3 3 3-3M3 13h10"/>`,
   play: svg`<path d="M5 3.5l7 4.5-7 4.5z" fill="currentColor" stroke="none"/>`,
   share: svg`<circle cx="4" cy="8" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.8 7.1l4.4-2.2M5.8 8.9l4.4 2.2"/>`,
+  terminal: svg`<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M4.5 6l2 2-2 2M8 10h3.5"/>`,
+  close: svg`<path d="M4 4l8 8M12 4l-8 8"/>`,
+  rot90: svg`<path d="M12.5 6.5a5 5 0 10.5 3"/><path d="M12.5 2.5v4h-4"/>`,
+  flipH: svg`<path d="M8 2v12"/><path d="M5.5 5L2.5 8l3 3z" fill="currentColor" stroke="none"/><path d="M10.5 5l3 3-3 3"/>`,
+  flipV: svg`<path d="M2 8h12"/><path d="M5 5.5L8 2.5l3 3z" fill="currentColor" stroke="none"/><path d="M5 10.5l3 3 3-3"/>`,
+  lock: svg`<rect x="4" y="7" width="8" height="6" rx="1"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7"/>`,
+  unlock: svg`<rect x="4" y="7" width="8" height="6" rx="1"/><path d="M5.5 7V5.5a2.5 2.5 0 015-.8"/>`,
+  minus: svg`<path d="M3.5 8h9"/>`,
 };
 const icon = (name, size = 15) => svg`
   <svg viewBox="0 0 16 16" width=${size} height=${size} fill="none"
@@ -62,12 +70,9 @@ const icon = (name, size = 15) => svg`
 const SHAPES = [
   { id: "rect", ic: "squareFill", label: "사각형", key: "R" },
   { id: "ellipse", ic: "circleFill", label: "타원", key: "E" },
-  { id: "stroke-rect", ic: "square", label: "테두리 사각형" },
-  { id: "stroke-ellipse", ic: "circle", label: "테두리 타원" },
-  { id: "rounded-rect", ic: "rounded", label: "둥근 사각형" },
 ];
 const isShapeTool = (t) => SHAPES.some((s) => s.id === t);
-const needsWidth = (t) => t === "line" || t === "stroke-rect" || t === "stroke-ellipse" || t === "brush";
+const needsWidth = (t) => t === "line" || t === "brush";
 const MAX_VIEWPORT_SIDE = 4096;
 const MAX_VIEWPORT_PIXELS = 12_000_000;
 
@@ -240,7 +245,6 @@ class DxTopbar extends LitElement {
           </div>` : nothing}
       </div>
       ${isDraw ? html`
-        <span class="sep"></span>
         <div class="opts">
           <span class="swatch" style="background:${this.color}">
             <input type="color" .value=${this.color} @input=${(e) => { this.color = e.target.value; this._emit(); }} /></span>
@@ -249,8 +253,6 @@ class DxTopbar extends LitElement {
             @input=${(e) => { this.alpha = +e.target.value; this._emit(); }} /></label>
           ${needsWidth(this.tool) ? html`<label>W<input class="num" type="number" min="1" max="100" .value=${String(this.width)}
             @change=${(e) => { this.width = +e.target.value || 1; this._emit(); }} /></label>` : nothing}
-          ${this.tool === "rounded-rect" ? html`<label>R<input class="num" type="number" min="0" max="200" .value=${String(this.radius)}
-            @change=${(e) => { this.radius = +e.target.value || 0; this._emit(); }} /></label>` : nothing}
           ${this.tool === "text" ? html`<label>크기<input class="num" type="number" min="6" max="400" .value=${String(this.fontSize)}
             @change=${(e) => { this.fontSize = +e.target.value || 12; this._emit(); }} /></label>` : nothing}
         </div>` : nothing}
@@ -260,8 +262,8 @@ class DxTopbar extends LitElement {
         <span class="sep"></span>
         <div class="zoom">
           <button class="ico" title="축소" @click=${() => this._zoomCmd("out")}>−</button>
-          <span class="pct" title="100% (Shift+0) / 맞춤 (Shift+1)"
-            @click=${() => this._zoomCmd("reset")}>${Math.round(this.zoom * 100)}%</span>
+          <span class="pct" title="100%: 디바이스 픽셀 1:1 (Shift+0) / 맞춤 (Shift+1)"
+            @click=${() => this._zoomCmd("reset")}>${Math.round(this.zoom * (window.devicePixelRatio || 1) * 100)}%</span>
           <button class="ico" title="확대" @click=${() => this._zoomCmd("in")}>+</button>
         </div>
         <span class="sep"></span>
@@ -362,9 +364,11 @@ class DxCanvas extends LitElement {
       if (e?.detail?.layoutChanged) {
         clearTimeout(this._viewportTimer);
         this._viewportTimer = 0;
-        this._applyZoom(true);
+        // force 아님: 이미 뷰포트가 덮고 있으면 캔버스 재할당·재합성 강제하지 않는다
+        // (편집마다 강제하면 12MP 백킹 재할당 + 전체 재합성으로 스터터).
+        this._applyZoom();
       }
-      this._drawOverlay();
+      // 오버레이는 Lit updated()에서 한 번 그린다(여기서 또 그리면 편집당 2회 풀 리페인트).
     };
     this.app?.addEventListener("changed", this._onChange);
     this._mv = (e) => this._move(e); this._up = (e) => this._end(e);
@@ -436,10 +440,13 @@ class DxCanvas extends LitElement {
       this.app.renderer.excludeId = state.editId;
       this.app.renderer.markDirty();
     }
-    this._drawOverlay(); // 편집 중엔 셀렉션 크롬 숨김.
+    this._drawOverlay(); // 기존 편집이면 셀렉션 크롬 유지, 새 입력만 숨김(_drawOverlay 참조).
     this.updateComplete.then(() => {
       const ta = this.renderRoot.querySelector("textarea.txt");
       if (!ta) return;
+      // 열리자마자 내용 크기에 맞춤 — 40px 미니박스로 보이는 문제(이상한 핸들로 오인) 방지.
+      ta.style.width = "auto"; ta.style.width = ta.scrollWidth + "px";
+      ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px";
       // pointerup/click 시퀀스가 끝난 뒤 포커스(즉시 blur 방지).
       setTimeout(() => { ta.focus(); ta.select?.(); }, 0);
     });
@@ -465,8 +472,7 @@ class DxCanvas extends LitElement {
       const hit = this.app.hitTest(p.x, p.y);
       if (hit == null) return;
       const layer = this.app.layers().find((l) => l.id === hit);
-      let meta = null;
-      try { meta = layer?.meta ? JSON.parse(layer.meta) : null; } catch { /* meta 없음 */ }
+      const meta = this.app.metaOf(layer);
       if (meta?.type !== "text") {
         console.info("[text] 더블클릭한 레이어에 텍스트 meta 없음(이 빌드 이전에 만든 텍스트는 편집 불가):", layer?.name);
         return;
@@ -484,6 +490,7 @@ class DxCanvas extends LitElement {
       this._openText({
         x: meta.x, y: meta.y, value: meta.text,
         size: meta.size, rgba: meta.rgba,
+        origText: meta.text, origSize: meta.size, bg: meta.bg ?? null,
         editId: hit, xf, box: this.app.textBoxBounds(layer, meta),
       });
     } catch (err) {
@@ -521,13 +528,48 @@ class DxCanvas extends LitElement {
     const z = this._zoom;
     const cw = Math.max(1, this.clientWidth);
     const ch = Math.max(1, this.clientHeight);
+    if (this.app.renderer.hasViewComposite?.()) {
+      // ── 화면 공간 렌더(Figma식) ──
+      // 보이는 영역(+팬 여유 패드)만, 가능하면 디바이스 해상도로 직접 합성한다.
+      // 합성 비용이 장면 크기와 무관해지고, 줌아웃에서 화면이 잘리는 상한도 없다.
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const padCss = 128;
+      const bw = cw + padCss * 2;
+      const bh = ch + padCss * 2;
+      // 디바이스 픽셀 예산 내 최대 해상도. 초과 시 1.0으로 "추락"시키지 않고 연속 강등 —
+      // 큰 창(레티나)에서 rs=1이 되면 화면 전체가 2x 업스케일로 흐려진다.
+      const budget = 12_000_000;
+      const rs = Math.min(dpr, Math.max(1, Math.sqrt(budget / (bw * bh))));
+      const v = this.app.renderer.view;
+      const covered = !force && v && v.zoom === z && v.renderScale === rs
+        && v.x <= this._origin.x && v.y <= this._origin.y
+        && v.x + v.cssW / v.zoom >= this._origin.x + cw / z
+        && v.y + v.cssH / v.zoom >= this._origin.y + ch / z;
+      if (!covered && render) {
+        this.app.renderer.setView(this._origin.x - padCss / z, this._origin.y - padCss / z, z, bw, bh, rs);
+      }
+      const cur = this.app.renderer.view;
+      if (cur) {
+        // 줌 제스처 중(리컴포지트 전)에는 기존 버퍼를 CSS로 늘려/줄여 보여준다.
+        this._setStylePx(this.base, "width", cur.cssW * (z / cur.zoom));
+        this._setStylePx(this.base, "height", cur.cssH * (z / cur.zoom));
+        // translate를 디바이스 픽셀 그리드에 스냅 — 분수 위치는 브라우저 리샘플로
+        // 전체가 미세하게 블러된다(버퍼=디바이스 해상도인 의미가 사라짐).
+        const snap = (v) => Math.round(v * dpr) / dpr;
+        this.base.style.transform = `translate3d(${snap((cur.x - this._origin.x) * z)}px, ${snap((cur.y - this._origin.y) * z)}px, 0)`;
+      }
+      this.base.style.imageRendering = "auto"; // 버퍼≈디바이스 해상도 — CSS 스케일 거의 없음.
+      this._sizeOverlay(cw, ch);
+      return;
+    }
+    // ── 폴백: 종전 문서 해상도 영역 렌더(구버전 wasm 캐시) ──
     const visible = {
       x0: Math.floor(this._origin.x),
       y0: Math.floor(this._origin.y),
       x1: Math.ceil(this._origin.x + cw / z),
       y1: Math.ceil(this._origin.y + ch / z),
     };
-    const pad = Math.max(32, Math.ceil(Math.max(cw, ch) / z));
+    const pad = Math.min(2048, Math.max(64, Math.ceil(Math.max(cw, ch) / z / 4)));
     const target = this._viewportTarget(visible, pad);
     const vp = this.app.renderer.viewport;
     const covered = !force && vp
@@ -540,8 +582,13 @@ class DxCanvas extends LitElement {
     this._setStylePx(this.base, "width", rv.w * z);
     this._setStylePx(this.base, "height", rv.h * z);
     this.base.style.transform = `translate3d(${(rv.x - this._origin.x) * z}px, ${(rv.y - this._origin.y) * z}px, 0)`;
-    this.base.style.imageRendering = z >= 1 ? "pixelated" : "auto";
-    const ow = cw, oh = ch;
+    const ddpr = Math.max(1, window.devicePixelRatio || 1);
+    this.base.style.imageRendering = z * ddpr >= 3 ? "pixelated" : "auto";
+    this._sizeOverlay(cw, ch);
+  }
+
+  /** 오버레이 캔버스를 호스트 크기 × dpr로 유지(셀렉션 크롬은 항상 디바이스 해상도). */
+  _sizeOverlay(ow, oh) {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const bw = Math.max(1, Math.round(ow * dpr));
     const bh = Math.max(1, Math.round(oh * dpr));
@@ -587,7 +634,39 @@ class DxCanvas extends LitElement {
   zoomCmd(action) {
     if (action === "in") this._setZoom(this._zoom * 1.25);
     else if (action === "out") this._setZoom(this._zoom / 1.25);
-    else if (action === "reset") this._setZoom(1, undefined, undefined, true);
+    // 100% = 문서 1px : 디바이스 1px (Photoshop 방식). 레티나에서 CSS 1:1(=디바이스 2x)은
+    // 래스터 업스케일이라 텍스트가 흐릿하다 — 진짜 1:1 지점으로 리셋.
+    else if (action === "reset") this._setZoom(1 / Math.max(1, window.devicePixelRatio || 1), undefined, undefined, true);
+    else if (action === "selection") {
+      // 선택(레이어들/프레임)에 맞춰 줌 — Figma Shift+2.
+      const boxes = [];
+      const f = this.app.getSelectedFrame?.();
+      if (f) boxes.push({ x: f.x, y: f.y, w: f.w, h: f.h });
+      for (const l of this.app.selectedLayers?.() ?? []) {
+        const b = this.app.displayAABB(l);
+        if (b) boxes.push(b);
+      }
+      if (!boxes.length) return;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const b of boxes) {
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+        x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+      }
+      const margin = 80;
+      const z = Math.min((this.clientWidth - margin * 2) / (x1 - x0 || 1), (this.clientHeight - margin * 2) / (y1 - y0 || 1));
+      const zc = Math.min(8, Math.max(0.05, z));
+      this._origin = {
+        x: (x0 + x1) / 2 - this.clientWidth / 2 / zc,
+        y: (y0 + y1) / 2 - this.clientHeight / 2 / zc,
+      };
+      const old = this._zoom;
+      this._zoom = zc;
+      clearTimeout(this._viewportTimer);
+      this._viewportTimer = 0;
+      this._applyZoom(true);
+      this._drawOverlay();
+      if (old !== zc) this.dispatchEvent(new CustomEvent("zoom-changed", { detail: zc, bubbles: true, composed: true }));
+    }
     else if (action === "fit") {
       const W = this.app.editor.width(), H = this.app.editor.height();
       const z = Math.min((this.clientWidth - 96) / W, (this.clientHeight - 96) / H);
@@ -759,12 +838,10 @@ class DxCanvas extends LitElement {
   _selGeomFor(sel) {
     let b = this.app.layerBounds(sel.id);
     if (!b) return null;
-    try {
-      const meta = sel.meta ? JSON.parse(sel.meta) : null;
-      const tb = meta?.type === "text" ? this.app.textBoxBounds(sel, meta) : null;
-      if (tb) b = [tb.x, tb.y, tb.w, tb.h];
-      sel.__isText = meta?.type === "text";
-    } catch { /* non-text layer */ }
+    const meta = this.app.metaOf(sel);
+    const isText = meta?.type === "text";
+    const tb = isText ? this.app.textBoxBounds(sel, meta) : null;
+    if (tb) b = [tb.x, tb.y, tb.w, tb.h];
     const t = this.app.xformOf(sel);
     const d = this._drag;
     // 드래그 중 임시값 반영(미리보기). resize/rotate는 anchor 보정 offset도 함께.
@@ -797,7 +874,7 @@ class DxCanvas extends LitElement {
     const tmS = mid(c4[0], c4[1]);
     const dir = Math.hypot(tmS.x - ctrS.x, tmS.y - ctrS.y) || 1;
     const rot = { x: tmS.x + ((tmS.x - ctrS.x) / dir) * 20, y: tmS.y + ((tmS.y - ctrS.y) / dir) * 20 };
-    return { sel, b, t, tp, c4, handles, rot, ctrS, z, isText: !!sel.__isText };
+    return { sel, b, t, tp, c4, handles, rot, ctrS, z, isText };
   }
   /** 핸들용 지오메트리 — 정확히 1개 선택일 때만(다중 선택은 핸들 비활성). */
   _selGeom() {
@@ -840,9 +917,10 @@ class DxCanvas extends LitElement {
     }
   }
 
-  _previewFrame() {
-    const d = this._drag;
-    if (d?.mode !== "frame-resize") return null;
+  /** 프레임 리사이즈 결과 사각형 — 미리보기와 커밋이 같은 수식을 쓴다.
+   *  최소 1px 클램프 시 잡은 핸들의 "반대쪽" 변이 고정돼야 한다(좌 핸들이면 우변 고정,
+   *  우 핸들이면 좌변 고정 — 이전엔 우/하 핸들에서 프레임이 커서를 따라 미끄러졌다). */
+  _frameResizeRect(d) {
     const b = d.base;
     const dx = Math.round((d.cur?.x ?? d.start.x) - d.start.x);
     const dy = Math.round((d.cur?.y ?? d.start.y) - d.start.y);
@@ -851,9 +929,15 @@ class DxCanvas extends LitElement {
     if (d.h.includes("r")) w = b.w + dx;
     if (d.h.startsWith("t")) { y = b.y + dy; h = b.h - dy; }
     if (d.h.startsWith("b")) h = b.h + dy;
-    if (w < 1) { x = x + w - 1; w = 1; }
-    if (h < 1) { y = y + h - 1; h = 1; }
+    if (w < 1) { x = d.h.includes("l") ? b.x + b.w - 1 : b.x; w = 1; }
+    if (h < 1) { y = d.h.startsWith("t") ? b.y + b.h - 1 : b.y; h = 1; }
     return { ...b, x, y, w, h };
+  }
+
+  _previewFrame() {
+    const d = this._drag;
+    if (d?.mode !== "frame-resize") return null;
+    return this._frameResizeRect(d);
   }
 
   _hitHandle(e) {
@@ -898,7 +982,16 @@ class DxCanvas extends LitElement {
   // ---- 포인터 ----
   _down(e) {
     if (e.button != null && e.button !== 0) return;
-    if (e.composedPath?.().some((el) => el?.classList?.contains?.("ctx") || el?.classList?.contains?.("menu"))) return;
+    const path = e.composedPath?.() ?? [];
+    // 텍스트 편집 textarea 안 클릭은 브라우저 기본(캐럿/드래그 선택)에 맡긴다.
+    if (path.some((el) => el?.classList?.contains?.("ctx") || el?.classList?.contains?.("menu") || el?.classList?.contains?.("txt"))) return;
+    // 편집 중 바깥 클릭 = 커밋하고 클릭 소비(Figma 동작).
+    // blur보다 pointerdown이 먼저라 여기서 커밋하지 않으면 같은 클릭이 새 입력박스를
+    // 열어 "편집창이 클릭 위치로 이동"하는 버그가 된다.
+    if (this._text) {
+      this._commitText();
+      return;
+    }
     if (this._ctx) this._ctx = null;
     if (this._space) {
       this._drag = { mode: "pan", sx: e.clientX, sy: e.clientY, ox: this._origin.x, oy: this._origin.y };
@@ -1151,9 +1244,10 @@ class DxCanvas extends LitElement {
       this._drag = null;
       const s = this.toolState;
       if (d.pts.length >= 2) {
+        const item = B.path(d.pts, s.width, s.rgba);
         this.app.apply([
-          B.addPaintLayer("brush", B.shapes([B.path(d.pts, s.width, s.rgba)]), { bind: "drawn" }),
-          B.setProps("drawn", { meta: JSON.stringify({ type: "brush" }) }),
+          B.addPaintLayer("brush", B.shapes([item]), { bind: "drawn" }),
+          B.setProps("drawn", { meta: JSON.stringify({ type: "brush", item, rgba: s.rgba }) }),
         ]);
       }
       this._drawOverlay();
@@ -1172,17 +1266,14 @@ class DxCanvas extends LitElement {
     }
     if (d.mode === "frame-resize") {
       this._drag = null;
+      const { x, y, w, h } = this._frameResizeRect(d);
       const b = d.base;
-      const dx = Math.round((d.cur?.x ?? d.start.x) - d.start.x);
-      const dy = Math.round((d.cur?.y ?? d.start.y) - d.start.y);
-      let x = b.x, y = b.y, w = b.w, h = b.h;
-      if (d.h.includes("l")) { x = b.x + dx; w = b.w - dx; }
-      if (d.h.includes("r")) w = b.w + dx;
-      if (d.h.startsWith("t")) { y = b.y + dy; h = b.h - dy; }
-      if (d.h.startsWith("b")) h = b.h + dy;
-      if (w < 1) { x = x + w - 1; w = 1; }
-      if (h < 1) { y = y + h - 1; h = 1; }
-      this.app.updateFrame(d.id, { x, y, w, h });
+      // 클릭만 하고 안 움직였으면 no-op SetFrames를 undo 히스토리에 남기지 않는다.
+      if (x !== b.x || y !== b.y || w !== b.w || h !== b.h) {
+        this.app.updateFrame(d.id, { x, y, w, h });
+      } else {
+        this._drawOverlay();
+      }
       return;
     }
     if (d.mode === "move") {
@@ -1236,9 +1327,11 @@ class DxCanvas extends LitElement {
     }
     if (d.mode === "resize") {
       this._drag = null;
-      if (d.provScale[0] !== d.scale0[0] || d.provScale[1] !== d.scale0[1])
-        this.app.apply([B.setProps(d.id, { scale: d.provScale, offset: d.provOffset ?? undefined })]);
-      else this._drawOverlay();
+      if (d.provScale[0] !== d.scale0[0] || d.provScale[1] !== d.scale0[1]) {
+        // 도형/브러시는 scale 보간(저해상도·형태 붕괴) 대신 새 크기로 벡터 재래스터.
+        if (!this.app.bakeShapeScale(d.id, d.provScale, d.provOffset ?? undefined))
+          this.app.apply([B.setProps(d.id, { scale: d.provScale, offset: d.provOffset ?? undefined })]);
+      } else this._drawOverlay();
       return;
     }
     this._drag = null;
@@ -1263,7 +1356,7 @@ class DxCanvas extends LitElement {
     }
     this.app.apply([
       B.addPaintLayer(name, B.shapes([shape]), { bind: "drawn" }),
-      B.setProps("drawn", { meta: JSON.stringify({ type: "shape", shape: s.tool }) }),
+      B.setProps("drawn", { meta: JSON.stringify({ type: "shape", shape: s.tool, item: shape, fill: rgba, rgba, stroke: null, strokeWidth: 0 }) }),
     ]);
   }
 
@@ -1285,16 +1378,21 @@ class DxCanvas extends LitElement {
     const meta = JSON.stringify({ type: "text", x: t.x, y: t.y, text: v, size, rgba });
     const name = v.split("\n")[0].slice(0, 20);
     if (t.editId != null) {
-      // 기존 텍스트 편집: 같은 z-순서에 재래스터(삭제 후 그 인덱스로 추가) + meta 갱신.
-      // ★원본 트랜스폼(offset/scale/rotation) 이어받기 — 이동해 둔 위치 보존★
-      const idx = this.app.orderBottomToTop().indexOf(t.editId);
+      // 기존 텍스트 편집: 노드 보존 재래스터(replace_paint_source) — 그룹 소속·z순서·
+      // 선택이 그대로 유지된다. offset은 새 표면 origin 기준으로 리베이스
+      // (레거시/이동 레이어 좌상단 점프 방지).
       const xf = t.xf ?? { offset: [0, 0], scale: [1, 1], rotation: 0 };
-      this.app.apply([
-        B.deleteLayer(t.editId),
-        B.addPaintLayer(name, B.shapes([B.text(t.x, t.y, v, size, rgba)]), { index: idx >= 0 ? idx : undefined, bind: "t" }),
-        B.setProps("t", { meta, offset: xf.offset, scale: xf.scale, rotation: xf.rotation }),
+      const metaObj = { type: "text", x: t.x, y: t.y, text: v, size, rgba, ...(t.bg ? { bg: t.bg } : {}) };
+      const items = this.app.itemsFromMeta(metaObj);
+      const pseudo = { offset: xf.offset, surface_size: xf.surface_size };
+      const oldItems = this.app.itemsFromMeta({ ...metaObj, text: t.origText ?? v, size: t.origSize ?? size });
+      const offset = this.app._rebasedOffset(pseudo, oldItems, items);
+      const res = this.app.apply([
+        B.replacePaintSource(t.editId, B.shapes(items)),
+        B.setProps(t.editId, { name, meta: JSON.stringify(metaObj), offset, scale: xf.scale, rotation: xf.rotation }),
       ]);
-      this.app.select(null);
+      if (res?.ok === false) console.error("텍스트 편집 실패:", res.issues);
+      this.app.select(t.editId);
     } else {
       this.app.apply([
         B.addPaintLayer(name, B.shapes([B.text(t.x, t.y, v, size, rgba)]), { bind: "t" }),
@@ -1349,13 +1447,27 @@ class DxCanvas extends LitElement {
     o.stroke();
   }
 
+  /** 테마 색 캐시 — getComputedStyle은 강제 스타일 재계산이라 드로우 루프에서 반복 금지. */
+  _themeColors() {
+    const key = document.documentElement.dataset.theme || "";
+    if (this._themeCacheKey !== key || !this._themeCache) {
+      const cs = getComputedStyle(this);
+      const acc = cs.getPropertyValue("--accent").trim() || "#87b9cf";
+      this._themeCache = {
+        fg: cs.getPropertyValue("--fg-2").trim() || "#555",
+        acc,
+        accStrong: cs.getPropertyValue("--accent-strong").trim() || acc,
+      };
+      this._themeCacheKey = key;
+    }
+    return this._themeCache;
+  }
+
   /** Frame 외곽선 + 이름 라벨(항상 표시 — Figma의 캔버스). */
   _drawFrames(o, z) {
     const preview = this._previewFrame();
     const frames = (this.app.frames?.() ?? []).map((f) => preview && f.id === preview.id ? preview : f);
-    const fg = getComputedStyle(this).getPropertyValue("--fg-2").trim() || "#555";
-    const acc = getComputedStyle(this).getPropertyValue("--accent").trim() || "#87b9cf";
-    const accStrong = getComputedStyle(this).getPropertyValue("--accent-strong").trim() || acc;
+    const { fg, acc, accStrong } = this._themeColors();
     o.save();
     o.font = "600 11px Inter, sans-serif";
     o.textBaseline = "alphabetic";
@@ -1403,11 +1515,12 @@ class DxCanvas extends LitElement {
     if (!this.overlay) return;
     const o = this._overlayCtx(true);
     this._drawFrames(o, this._zoom);
-    if (this._text) return; // 텍스트 편집 중엔 셀렉션 크롬 숨김(입력에 집중).
+    // 새 텍스트 입력 중에만 크롬 숨김. 기존 텍스트 편집은 원래 보이던 선택 박스를
+    // 그대로 유지한 채 내용만 고친다(더블클릭 시 "다른 핸들로 바뀜" 방지).
+    if (this._text && this._text.editId == null) return;
     if (this._drag?.mode === "draw") { this._drawGhost(); return; }
     if (this._drag?.mode === "brush") { this._drawBrushGhost(); return; }
-    const cs = getComputedStyle(this);
-    const acc = cs.getPropertyValue("--accent-strong").trim() || cs.getPropertyValue("--accent").trim() || "#0b87e0";
+    const acc = this._themeColors().accStrong;
     // 마퀴(점선 사각형, --accent 색).
     if (this._drag?.mode === "marquee") {
       const d = this._drag, z = this._zoom;
@@ -1610,7 +1723,17 @@ class DxLayerPanel extends LitElement {
   }
   _addLayer(color) {
     this._menu = false;
-    this.app.apply([B.addPaintLayer(color ? "fill" : "layer", color ? B.fill(color) : B.transparent())]);
+    if (!color) {
+      this.app.apply([B.addPaintLayer("layer", B.transparent())]);
+      return;
+    }
+    // 단색 레이어는 벡터 rect로 — 뷰 합성이 전 배율에서 재래스터(샘플링 비용·계단 제거).
+    const W = this.app.editor.width(), H = this.app.editor.height();
+    const item = B.rect(0, 0, W, H, color);
+    this.app.apply([
+      B.addPaintLayer("fill", B.shapes([item]), { bind: "fill" }),
+      B.setProps("fill", { meta: JSON.stringify({ type: "shape", shape: "rect", item, fill: color, rgba: color, stroke: null, strokeWidth: 0 }) }),
+    ]);
   }
   _addPng(e) {
     this._menu = false;
@@ -1731,8 +1854,7 @@ class DxLayerPanel extends LitElement {
   _layerIcon(l) {
     if (l.itemType === "frame") return "frame";
     if (l.kind === "group") return "folder";
-    let meta = null;
-    try { meta = l.meta ? JSON.parse(l.meta) : null; } catch { /* ignore */ }
+    const meta = this.app.metaOf(l);
     if (meta?.type === "text") return "text";
     if (meta?.type === "image") return "image";
     if (meta?.type === "brush") return "pencil";
@@ -1855,7 +1977,7 @@ customElements.define("dx-layer-panel", DxLayerPanel);
 
 // ───────── Design 패널 (우측) ─────────
 class DxProps extends LitElement {
-  static properties = { app: { attribute: false }, _v: { state: true } };
+  static properties = { app: { attribute: false }, _v: { state: true }, _lock: { state: true } };
   static styles = [controls, css`
     :host {
       display: block; position: fixed; right: 24px; top: 108px; z-index: 70;
@@ -1871,7 +1993,11 @@ class DxProps extends LitElement {
     .head .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); font-weight: 400; }
     .head .b { width: 26px; height: 26px; padding: 0; justify-content: center; }
     .sec { padding: 12px; border-bottom: 1px solid var(--line-soft); }
-    .sec-t { font-size: 10.5px; font-weight: 600; color: var(--fg); margin-bottom: 10px; }
+    .sec-t { font-size: 10.5px; font-weight: 600; color: var(--fg); margin-bottom: 10px;
+             display: flex; align-items: center; gap: 6px; }
+    .sec-t .sp { flex: 1; }
+    .sec-t .b, .rowbtns .b { width: 24px; height: 24px; padding: 0; justify-content: center; }
+    .rowbtns { display: flex; gap: 2px; align-items: center; justify-content: flex-end; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
     .cell { display: flex; align-items: center; gap: 0; background: var(--bg-elev); border-radius: var(--radius); border: 1px solid transparent; }
     .cell:focus-within { border-color: var(--accent); }
@@ -1884,10 +2010,12 @@ class DxProps extends LitElement {
     .field > label { display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; color: var(--fg-2); margin-bottom: 6px; }
     .field .v { color: var(--fg); }
     .field input[type="range"], .field select { width: 100%; }
+    .colorrow { display: grid; grid-template-columns: 34px 1fr; gap: 7px; align-items: center; }
+    .colorrow input[type="color"] { width: 34px; padding: 0; overflow: hidden; }
     .chk { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-2); cursor: pointer; }
     .empty { padding: 22px 14px; font-size: 11px; color: var(--fg-3); line-height: 1.8; }
   `];
-  constructor() { super(); this._v = 0; }
+  constructor() { super(); this._v = 0; this._lock = false; }
   connectedCallback() { super.connectedCallback(); this._onChange = () => { this._v++; }; this.app?.addEventListener("changed", this._onChange); }
   disconnectedCallback() { this.app?.removeEventListener("changed", this._onChange); super.disconnectedCallback(); }
   _set(patch) { this.app.apply([B.setProps(this.app.selectedId, patch)]); }
@@ -1942,9 +2070,18 @@ class DxProps extends LitElement {
     }
     const l = this.app?.getSelected?.();
     if (!l) return html``;
-    let meta = null;
-    try { meta = l.meta ? JSON.parse(l.meta) : null; } catch { /* ignore */ }
+    const meta = this.app.metaOf(l);
     const isText = meta?.type === "text";
+    const isShape = meta?.type === "shape";
+    const isBrush = meta?.type === "brush";
+    const canStyleColor = (meta?.type === "text") || ((meta?.type === "shape" || meta?.type === "brush") && meta?.item);
+    const styleRgba = isShape ? (meta?.fill ?? meta?.rgba ?? meta?.item?.rgba ?? [13, 153, 255, 255]) : (meta?.rgba ?? meta?.item?.rgba ?? [13, 153, 255, 255]);
+    const styleHex = HEX(styleRgba);
+    const strokeRgba = meta?.stroke ?? [20, 24, 28, 255];
+    const strokeHex = HEX(strokeRgba);
+    const strokeWidth = Math.round(meta?.strokeWidth ?? 0);
+    const shapeKind = String(meta?.shape ?? meta?.item?.shape ?? l.name ?? "").toLowerCase();
+    const canRadius = isShape && !shapeKind.includes("ellipse") && !shapeKind.includes("line");
     const [ox, oy] = l.offset ?? [0, 0];
     const [sx, sy] = l.scale ?? [1, 1];
     const b = this.app.layerBounds(l.id);
@@ -1955,6 +2092,8 @@ class DxProps extends LitElement {
     const ctrAnchor = b ? { x: b[0] + b[2] / 2, y: b[1] + b[3] / 2 } : null;
     const setScaleAnchored = (ns, anchor) => {
       const off = this.app.computeAnchoredOffset(l, ns, null, anchor);
+      // 도형/브러시는 벡터 재래스터(bake)로 — scale 보간 화질 저하 방지.
+      if (this.app.bakeShapeScale(l.id, ns, off)) return;
       this.app.apply([B.setProps(l.id, { scale: ns, offset: off })]);
     };
     const setW = (v) => { if (!isText && b && b[2] > 0 && v > 0) setScaleAnchored([(v / b[2]) * Math.sign(sx || 1), sy], tlAnchor); };
@@ -1984,14 +2123,45 @@ class DxProps extends LitElement {
         <button class="b" title="삭제 (Del)" @click=${() => this.app.apply([B.deleteLayer(l.id)])}>${icon("trash", 13)}</button>
       </div>
       <div class="sec">
-        <div class="sec-t">위치 · 크기</div>
-        <div class="grid2">
+        <div class="sec-t">위치</div>
+        <div class="alignr">
+          ${["left", "center-h", "right", "top", "center-v", "bottom"].map((m, i) => html`
+            <button title=${m} @click=${() => this.app.align(l.id, m)}>
+              ${icon(["alignL", "alignCH", "alignR", "alignT", "alignCV", "alignB"][i], 14)}</button>`)}
+        </div>
+        <div class="grid2" style="margin-top:8px">
           ${num("X", absX, (v) => commitXY("x", v))}
           ${num("Y", absY, (v) => commitXY("y", v))}
-          ${num("W", wPx, (v) => setW(+v), isText)}
-          ${num("H", hPx, (v) => setH(+v), isText)}
           ${num("R°", Math.round((l.rotation ?? 0) * 10) / 10, (v) => setRotAnchored(+v || 0))}
-          <div class="cell"><span>S</span>
+          <div class="rowbtns">
+            <button class="b" title="90° 회전" @click=${() => setRotAnchored((((l.rotation ?? 0) + 90) % 360 + 360) % 360)}>${icon("rot90", 13)}</button>
+            <button class="b" title="좌우 반전 (Shift+H)" @click=${() => this.app.flipMany([l.id], "x")}>${icon("flipH", 13)}</button>
+            <button class="b" title="상하 반전 (Shift+V)" @click=${() => this.app.flipMany([l.id], "y")}>${icon("flipV", 13)}</button>
+          </div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-t">레이아웃
+          <span class="sp"></span>
+          <button class="b ${this._lock ? "active" : ""}" title="비율 잠금"
+            @click=${() => { this._lock = !this._lock; }}>${icon(this._lock ? "lock" : "unlock", 12)}</button>
+        </div>
+        <div class="grid2">
+          ${num("W", wPx, (v) => {
+            const nv = +v;
+            if (this._lock && !isText && b && wPx > 0 && nv > 0) {
+              const r = nv / wPx;
+              setScaleAnchored([sx * r, sy * r], tlAnchor);
+            } else setW(nv);
+          }, isText)}
+          ${num("H", hPx, (v) => {
+            const nv = +v;
+            if (this._lock && !isText && b && hPx > 0 && nv > 0) {
+              const r = nv / hPx;
+              setScaleAnchored([sx * r, sy * r], tlAnchor);
+            } else setH(nv);
+          }, isText)}
+          <div class="cell" style="grid-column:1/3"><span>S</span>
             <input type="text" .value=${`${fmt3(sx)} , ${fmt3(sy)}`} title=${isText ? "텍스트는 폰트 변형 방지를 위해 scale 편집이 비활성화됨" : "scale (x , y)"}
               ?disabled=${isText}
               @change=${(e) => {
@@ -2002,22 +2172,21 @@ class DxProps extends LitElement {
         </div>
       </div>
       <div class="sec">
-        <div class="sec-t">정렬</div>
-        <div class="alignr">
-          ${["left", "center-h", "right", "top", "center-v", "bottom"].map((m, i) => html`
-            <button title=${m} @click=${() => this.app.align(l.id, m)}>
-              ${icon(["alignL", "alignCH", "alignR", "alignT", "alignCV", "alignB"][i], 14)}</button>`)}
+        <div class="sec-t">모양
+          <span class="sp"></span>
+          <button class="b" title=${l.visible ? "숨기기" : "표시"}
+            @click=${() => this._set({ visible: !l.visible })}>${icon(l.visible ? "eye" : "eyeOff", 13)}</button>
         </div>
-      </div>
-      <div class="sec">
-        <div class="sec-t">속성</div>
-        <div class="field">
-          <label>불투명도 <span class="v">${Math.round(l.opacity * 100)}%</span></label>
-          <input type="range" min="0" max="1" step="0.01" .value=${String(l.opacity)}
-            @input=${(e) => this._set({ opacity: +e.target.value })} />
+        <div class="grid2">
+          <div class="cell"><span>불투명</span>
+            <input type="number" min="0" max="100" step="1" .value=${String(Math.round(l.opacity * 100))}
+              @change=${(e) => this._set({ opacity: Math.max(0, Math.min(100, +e.target.value || 0)) / 100 })} /></div>
+          ${canRadius ? html`
+            <div class="cell"><span>반경</span>
+              <input type="number" min="0" max="400" step="1" .value=${String(Math.round(meta.radius ?? meta.item?.radius ?? 0))}
+                @change=${(e) => this.app.setShapeRadius(l.id, +e.target.value)} /></div>` : nothing}
         </div>
         <div class="field">
-          <label>블렌드</label>
           <select .value=${l.blend} @change=${(e) => this.app.apply([B.setBlend(l.id, e.target.value)])}>
             <option value="normal">Normal</option>
             <option value="multiply">Multiply</option>
@@ -2028,15 +2197,415 @@ class DxProps extends LitElement {
             <option value="difference">Difference</option>
           </select>
         </div>
-        <div class="field">
-          <label class="chk"><input type="checkbox" .checked=${l.visible}
-            @change=${(e) => this._set({ visible: e.target.checked })} /> 표시</label>
+      </div>
+      ${(() => {
+        // ── 공용 색+알파 한 줄 컨트롤 ──
+        const colorAlpha = (rgba, onChange) => html`
+          <div class="colorrow">
+            <input type="color" .value=${HEX(rgba)}
+              @change=${(e) => onChange(RGBA(e.target.value, (rgba[3] ?? 255) / 255))} />
+            <input type="number" min="0" max="100" step="1" title="불투명도 %"
+              .value=${String(Math.round(((rgba[3] ?? 255) / 255) * 100))}
+              @change=${(e) => { const a = Math.max(0, Math.min(100, +e.target.value || 0)) / 100; onChange([rgba[0], rgba[1], rgba[2], Math.round(a * 255)]); }} />
+          </div>`;
+        // ── 그라데이션 헬퍼(bbox 상대 0~1, 2-stop) ──
+        const mkGrad = (deg, radial, c1, c2) => {
+          const r = (deg * Math.PI) / 180;
+          const dx = Math.cos(r) / 2, dy = Math.sin(r) / 2;
+          return { x0: 0.5 - dx, y0: 0.5 - dy, x1: 0.5 + dx, y1: 0.5 + dy, radial, stops: [{ at: 0, rgba: c1 }, { at: 1, rgba: c2 }] };
+        };
+        const gradAngle = (g) => Math.round(Math.atan2((g?.y1 ?? 1) - (g?.y0 ?? 0), (g?.x1 ?? 0) - (g?.x0 ?? 0)) * 180 / Math.PI);
+        const fillEditor = (cur, onApply) => {
+          const grad = cur.gradient ?? null;
+          const mode = cur.none ? "none" : grad ? (grad.radial ? "radial" : "linear") : "solid";
+          const c1 = grad?.stops?.[0]?.rgba ?? cur.rgba ?? [13, 153, 255, 255];
+          const c2 = grad?.stops?.[1]?.rgba ?? [255, 255, 255, 255];
+          const ang = grad ? gradAngle(grad) : 90;
+          const apply = (m, a = ang, k1 = c1, k2 = c2) => {
+            if (m === "none") onApply({ kind: "none" });
+            else if (m === "solid") onApply({ kind: "solid", rgba: k1 });
+            else onApply({ kind: "gradient", gradient: mkGrad(a, m === "radial", k1, k2) });
+          };
+          return html`
+            <select .value=${mode} @change=${(e) => apply(e.target.value)}>
+              <option value="solid">단색</option>
+              <option value="linear">선형 그라데이션</option>
+              <option value="radial">방사형 그라데이션</option>
+              ${cur.allowNone ? html`<option value="none">없음</option>` : nothing}
+            </select>
+            ${mode !== "none" ? colorAlpha(c1, (c) => apply(mode, ang, c, c2)) : nothing}
+            ${mode === "linear" || mode === "radial" ? html`
+              ${colorAlpha(c2, (c) => apply(mode, ang, c1, c))}
+              ${mode === "linear" ? html`
+                <div class="cell" style="margin-top:6px"><span>각도</span>
+                  <input type="number" step="15" .value=${String(ang)}
+                    @change=${(e) => apply(mode, +e.target.value || 0)} /></div>` : nothing}
+            ` : nothing}`;
+        };
+        if (isShape) {
+          const shadow = meta?.shadow ?? null;
+          const hasStroke = strokeWidth > 0 && meta?.stroke;
+          return html`
+            <div class="sec">
+              <div class="sec-t">채움</div>
+              ${fillEditor(
+                { rgba: styleRgba, gradient: meta?.item?.gradient ?? null, none: !!meta?.noFill, allowNone: true },
+                (spec) => spec.kind === "solid" ? this.app.setLayerColor(l.id, spec.rgba) : this.app.setShapeFill(l.id, spec),
+              )}
+            </div>
+            <div class="sec">
+              <div class="sec-t">테두리
+                <span class="sp"></span>
+                ${hasStroke
+                  ? html`<button class="b" title="테두리 제거" @click=${() => this.app.setShapeStroke(l.id, null, 0)}>${icon("minus", 12)}</button>`
+                  : html`<button class="b" title="테두리 추가" @click=${() => this.app.setShapeStroke(l.id, [20, 24, 28, 255], 3)}>${icon("plus", 12)}</button>`}
+              </div>
+              ${hasStroke ? html`
+                ${colorAlpha(strokeRgba, (c) => this.app.setShapeStroke(l.id, c, Math.max(1, strokeWidth || 1)))}
+                <div class="cell" style="margin-top:6px"><span>두께</span>
+                  <input type="number" min="0" max="400" step="1" .value=${String(strokeWidth)}
+                    @change=${(e) => this.app.setShapeStroke(l.id, strokeRgba, +e.target.value)} /></div>
+              ` : nothing}
+            </div>
+            <div class="sec">
+              <div class="sec-t">효과
+                <span class="sp"></span>
+                ${shadow
+                  ? html`<button class="b" title="그림자 제거" @click=${() => this.app.setShapeShadow(l.id, null)}>${icon("minus", 12)}</button>`
+                  : html`<button class="b" title="그림자 추가" @click=${() => this.app.setShapeShadow(l.id, { dx: 0, dy: 8, blur: 24, rgba: [10, 14, 20, 110] })}>${icon("plus", 12)}</button>`}
+              </div>
+              ${shadow ? html`
+                <div class="grid2">
+                  <div class="cell"><span>X</span><input type="number" .value=${String(shadow.dx ?? 0)}
+                    @change=${(e) => this.app.setShapeShadow(l.id, { ...shadow, dx: +e.target.value || 0 })} /></div>
+                  <div class="cell"><span>Y</span><input type="number" .value=${String(shadow.dy ?? 8)}
+                    @change=${(e) => this.app.setShapeShadow(l.id, { ...shadow, dy: +e.target.value || 0 })} /></div>
+                  <div class="cell"><span>흐림</span><input type="number" min="0" .value=${String(shadow.blur ?? 24)}
+                    @change=${(e) => this.app.setShapeShadow(l.id, { ...shadow, blur: Math.max(0, +e.target.value || 0) })} /></div>
+                </div>
+                ${colorAlpha(shadow.rgba ?? [10, 14, 20, 110], (c) => this.app.setShapeShadow(l.id, { ...shadow, rgba: c }))}
+              ` : nothing}
+            </div>`;
+        }
+        if (isText) {
+          const bg = meta?.bg ?? null;
+          return html`
+            <div class="sec">
+              <div class="sec-t">텍스트</div>
+              <div class="grid2">
+                <div class="cell"><span>크기</span>
+                  <input type="number" min="6" max="400" step="1" .value=${String(Math.round(meta.size ?? 32))}
+                    @change=${(e) => this.app.setTextSize(l.id, +e.target.value)} /></div>
+              </div>
+              <div class="field">
+                <label>글자색</label>
+                ${colorAlpha(styleRgba, (c) => this.app.setLayerColor(l.id, c))}
+              </div>
+            </div>
+            <div class="sec">
+              <div class="sec-t">배경
+                <span class="sp"></span>
+                ${bg
+                  ? html`<button class="b" title="배경 제거" @click=${() => this.app.setTextBg(l.id, null)}>${icon("minus", 12)}</button>`
+                  : html`<button class="b" title="배경 추가" @click=${() => this.app.setTextBg(l.id, { rgba: [255, 213, 95, 255] })}>${icon("plus", 12)}</button>`}
+              </div>
+              ${bg ? html`
+                ${fillEditor(
+                  { rgba: bg.rgba ?? [255, 213, 95, 255], gradient: bg.gradient ?? null, none: false, allowNone: false },
+                  (spec) => {
+                    if (spec.kind === "solid") { const nb = { ...bg, rgba: spec.rgba }; delete nb.gradient; this.app.setTextBg(l.id, nb); }
+                    else this.app.setTextBg(l.id, { ...bg, gradient: spec.gradient });
+                  },
+                )}
+                <div class="grid2" style="margin-top:6px">
+                  <div class="cell"><span>패딩</span><input type="number" min="0" .value=${String(Math.round(bg.padX ?? (meta.size ?? 32) * 0.35))}
+                    @change=${(e) => { const v = Math.max(0, +e.target.value || 0); this.app.setTextBg(l.id, { ...bg, padX: v, padY: Math.round(v * 0.63) }); }} /></div>
+                  <div class="cell"><span>반경</span><input type="number" min="0" .value=${String(Math.round(bg.radius ?? (meta.size ?? 32) * 0.18))}
+                    @change=${(e) => this.app.setTextBg(l.id, { ...bg, radius: Math.max(0, +e.target.value || 0) })} /></div>
+                </div>
+              ` : nothing}
+            </div>`;
+        }
+        if (canStyleColor) {
+          return html`
+            <div class="sec">
+              <div class="sec-t">채움</div>
+              ${colorAlpha(styleRgba, (c) => this.app.setLayerColor(l.id, c))}
+            </div>`;
+        }
+        return nothing;
+      })()}
+      <div class="sec">
+        <div class="sec-t">Export
+          <span class="sp"></span>
+          <button class="b" title="이 레이어만 PNG로" @click=${() => this.app.exportLayerPng(l)}>${icon("download", 13)}</button>
         </div>
       </div>
     `;
   }
 }
 customElements.define("dx-props", DxProps);
+
+// ───────── 에이전트 터미널 버블 ─────────
+class DxAgentTerminal extends LitElement {
+  static properties = {
+    docId: { attribute: "doc-id" },
+    _open: { state: true },
+    _active: { state: true },
+    _status: { state: true },
+    _error: { state: true },
+  };
+  static styles = [controls, css`
+    :host { display: contents; }
+    .bubble {
+      position: fixed; right: 24px; bottom: 24px; z-index: 96;
+      width: 44px; height: 44px; padding: 0; justify-content: center;
+      border-radius: 50%; background: var(--accent-strong); color: #fff;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
+    }
+    .bubble:hover { background: var(--accent-strong); color: #fff; filter: brightness(1.08); }
+    .panel {
+      position: fixed; right: 24px; bottom: 24px; z-index: 96;
+      width: min(760px, calc(100vw - 288px)); height: min(520px, calc(100vh - 82px));
+      min-width: 420px; min-height: 300px; display: grid; grid-template-rows: auto 1fr;
+      background: #101316; color: #e9eef2; border: 1px solid var(--line);
+      border-radius: 10px; overflow: hidden; box-shadow: 0 20px 56px rgba(0, 0, 0, 0.48);
+    }
+    .head {
+      height: 44px; display: flex; align-items: center; gap: 8px;
+      padding: 0 8px 0 10px; background: var(--bg-panel); border-bottom: 1px solid var(--line);
+    }
+    .mark { color: var(--accent); display: flex; flex: none; }
+    .tabs { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; }
+    .tabs button { height: 30px; color: var(--fg-2); }
+    .tabs button.active { background: var(--accent-soft); color: var(--fg); }
+    .guide {
+      flex: none; height: 30px; display: inline-flex; align-items: center; padding: 0 8px;
+      color: var(--fg-2); text-decoration: none; border-radius: var(--radius);
+    }
+    .guide:hover { background: var(--bg-hover); color: var(--fg); }
+    .state {
+      flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--fg-3); font-size: 10.5px;
+    }
+    .close { width: 30px; height: 30px; padding: 0; justify-content: center; flex: none; }
+    .term {
+      position: relative; min-height: 0; background: #101316;
+    }
+    .term-mount { position: absolute; inset: 8px; }
+    .idle {
+      position: absolute; inset: 0; display: grid; place-content: center; gap: 10px;
+      color: var(--fg-3); text-align: center;
+    }
+    .idle-row { display: flex; gap: 6px; justify-content: center; }
+    .idle-row button { color: var(--fg); background: var(--bg-elev); border: 1px solid var(--line); }
+    .idle-row button:hover { background: var(--accent); color: #10232c; }
+    .err {
+      position: absolute; left: 10px; right: 10px; bottom: 10px;
+      padding: 7px 9px; border-radius: 7px; color: #ffd5cb;
+      background: rgba(242, 72, 34, 0.16); border: 1px solid rgba(242, 72, 34, 0.35);
+      font-size: 11px;
+    }
+    @media (max-width: 760px) {
+      .panel { left: 12px; right: 12px; bottom: 12px; width: auto; min-width: 0; height: min(520px, calc(100vh - 24px)); }
+      .bubble { right: 16px; bottom: 16px; }
+      .state { display: none; }
+    }
+  `];
+  constructor() {
+    super();
+    this.docId = "";
+    this._open = false;
+    this._active = null;
+    this._status = "idle";
+    this._error = "";
+    this._encoder = new TextEncoder();
+    this._decoder = new TextDecoder();
+    this._disposables = [];
+  }
+  disconnectedCallback() {
+    this._disconnect();
+    super.disconnectedCallback();
+  }
+  async _ensureXterm() {
+    if (!window.__dxXterm) {
+      window.__dxXterm = Promise.all([
+        import("https://esm.sh/@xterm/xterm@5.5.0"),
+        import("https://esm.sh/@xterm/addon-fit@0.10.0"),
+      ]);
+    }
+    const [{ Terminal }, { FitAddon }] = await window.__dxXterm;
+    return { Terminal, FitAddon };
+  }
+  async _start(kind) {
+    this._open = true;
+    this._active = kind;
+    this._status = "connecting";
+    this._error = "";
+    await this.updateComplete;
+    this._connect(kind);
+  }
+  async _connect(kind) {
+    this._disconnect(false);
+    const host = this.renderRoot.querySelector(".term");
+    const mount = this.renderRoot.querySelector(".term-mount");
+    if (!host || !mount) return;
+    mount.innerHTML = "";
+    try {
+      const { Terminal, FitAddon } = await this._ensureXterm();
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css";
+      mount.appendChild(link);
+
+      const cs = getComputedStyle(this);
+      const term = new Terminal({
+        cursorBlink: true,
+        convertEol: false,
+        allowProposedApi: false,
+        fontFamily: '"SFMono-Regular", Menlo, Consolas, monospace',
+        fontSize: 12,
+        lineHeight: 1.18,
+        scrollback: 6000,
+        theme: {
+          background: "#101316",
+          foreground: "#e9eef2",
+          cursor: cs.getPropertyValue("--accent").trim() || "#9fc7da",
+          selectionBackground: "rgba(159, 199, 218, 0.26)",
+        },
+      });
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+      term.open(mount);
+      fit.fit();
+      term.focus();
+      this._term = term;
+      this._fit = fit;
+
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const qs = new URLSearchParams({ cols: String(term.cols || 100), rows: String(term.rows || 28) });
+      if (this.docId) qs.set("doc", this.docId);
+      const ws = new WebSocket(`${proto}://${location.host}/terminal/${encodeURIComponent(kind)}?${qs}`);
+      ws.binaryType = "arraybuffer";
+      this._ws = ws;
+      this._disposables.push(term.onData((data) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(this._encoder.encode(data));
+      }));
+      this._disposables.push(term.onResize(({ cols, rows }) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }));
+
+      ws.onopen = () => {
+        this._status = "running";
+      };
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === "string") {
+          this._handleControl(ev.data);
+          return;
+        }
+        term.write(this._decoder.decode(ev.data, { stream: true }));
+      };
+      ws.onerror = () => {
+        this._error = "terminal connection failed";
+        this._status = "error";
+      };
+      ws.onclose = () => {
+        if (this._status !== "exited" && this._status !== "idle") this._status = "closed";
+      };
+
+      this._ro = new ResizeObserver(() => {
+        clearTimeout(this._fitTimer);
+        this._fitTimer = setTimeout(() => {
+          try {
+            fit.fit();
+            if (ws.readyState === WebSocket.OPEN)
+              ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+          } catch {
+            // Resize during teardown is harmless.
+          }
+        }, 60);
+      });
+      this._ro.observe(host);
+    } catch (e) {
+      this._status = "error";
+      this._error = `xterm load failed: ${e.message ?? e}`;
+    }
+  }
+  _handleControl(text) {
+    let msg;
+    try { msg = JSON.parse(text); } catch { return; }
+    if (msg.type === "error") {
+      this._status = "error";
+      this._error = msg.message || "terminal error";
+      this._term?.writeln(`\r\n${this._error}`);
+    } else if (msg.type === "exit") {
+      this._status = "exited";
+      this._term?.writeln(`\r\n[process exited${msg.code == null ? "" : `: ${msg.code}`}]`);
+    }
+  }
+  _disconnect(reset = true) {
+    clearTimeout(this._fitTimer);
+    this._ro?.disconnect();
+    this._ro = null;
+    for (const d of this._disposables) d.dispose?.();
+    this._disposables = [];
+    if (this._ws && this._ws.readyState < WebSocket.CLOSING) this._ws.close();
+    this._ws = null;
+    this._term?.dispose?.();
+    this._term = null;
+    this._fit = null;
+    if (reset) {
+      this._active = null;
+      this._status = "idle";
+      this._error = "";
+    }
+  }
+  _close() {
+    this._disconnect();
+    this._open = false;
+  }
+  _label(kind) {
+    return kind === "codex" ? "Codex" : kind === "claude" ? "Claude Code" : "Shell";
+  }
+  render() {
+    if (!this._open) {
+      return html`<button class="bubble" title="에이전트 터미널" @click=${() => { this._open = true; }}>
+        ${icon("terminal", 18)}
+      </button>`;
+    }
+    const agents = ["codex", "claude", "shell"];
+    return html`
+      <section class="panel" @pointerdown=${(e) => e.stopPropagation()}>
+        <div class="head">
+          <span class="mark">${icon("terminal", 15)}</span>
+          <div class="tabs">
+            ${agents.map((kind) => html`
+              <button class=${this._active === kind ? "active" : ""} @click=${() => this._start(kind)}>
+                ${kind === "shell" ? icon("terminal", 13) : icon("play", 12)}${this._label(kind)}
+              </button>`)}
+          </div>
+          <a class="guide" href=${`/terminal/guide.md${this.docId ? `?doc=${encodeURIComponent(this.docId)}` : ""}`}
+            target="_blank" rel="noreferrer">CLI guide</a>
+          <span class="state">${this._active ? `${this._label(this._active)} · ${this._status}` : this._status}</span>
+          <button class="close" title="닫기" @click=${() => this._close()}>${icon("close", 14)}</button>
+        </div>
+        <div class="term">
+          <div class="term-mount"></div>
+          ${!this._active ? html`
+            <div class="idle">
+              <div class="idle-row">
+                <button @click=${() => this._start("codex")}>${icon("play", 12)}Codex</button>
+                <button @click=${() => this._start("claude")}>${icon("play", 12)}Claude Code</button>
+                <button @click=${() => this._start("shell")}>${icon("terminal", 13)}Shell</button>
+              </div>
+            </div>` : nothing}
+          ${this._error ? html`<div class="err">${this._error}</div>` : nothing}
+        </div>
+      </section>
+    `;
+  }
+}
+customElements.define("dx-agent-terminal", DxAgentTerminal);
 
 // ───────── 앱 셸 ─────────
 class AppShell extends LitElement {
@@ -2107,6 +2676,7 @@ class AppShell extends LitElement {
     }
     if (e.shiftKey && e.key === "0") { this._canvas?.zoomCmd("reset"); return; }
     if (e.shiftKey && e.key === "1") { this._canvas?.zoomCmd("fit"); return; }
+    if (e.shiftKey && e.key === "2") { this._canvas?.zoomCmd("selection"); return; }
     if (!meta) {
       const map = { v: "select", r: "rect", e: "ellipse", l: "line", t: "text", b: "brush", f: "frame" };
       if (map[k]) { this._topbar?.setTool(map[k]); return; }
@@ -2135,6 +2705,7 @@ class AppShell extends LitElement {
         @picked-color=${(e) => { this._topbar?.setColor(e.detail); this._topbar?.finishEyedrop(); }}
         @text-finished=${() => this._topbar?.setTool("select")}></dx-canvas>
       <dx-props .app=${this.app}></dx-props>
+      <dx-agent-terminal .docId=${new URLSearchParams(location.search).get("doc") || ""}></dx-agent-terminal>
     `;
   }
 }

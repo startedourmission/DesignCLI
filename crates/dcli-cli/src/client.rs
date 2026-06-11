@@ -11,6 +11,7 @@ use std::io::Read;
 use std::path::Path;
 
 /// 데몬 접속 정보(서버 URL + 문서 id).
+#[derive(Clone)]
 pub struct Server {
     base: String,
     doc_id: String,
@@ -39,7 +40,13 @@ impl Server {
         let id = doc_path.file_stem()?.to_str()?;
         let base = default_base();
         let url = format!("{base}/projects");
-        let resp = ureq::get(&url).call().ok()?;
+        // 자동 감지 프로브는 짧은 타임아웃 — 응답 없는 데몬(소켓만 열림)이 모든 CLI 명령을
+        // 무기한 멈추게 두지 않는다. (ureq 기본값은 read timeout 없음.)
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_millis(300))
+            .timeout(std::time::Duration::from_millis(1500))
+            .build();
+        let resp = agent.get(&url).call().ok()?;
         let projects: Value = resp.into_json().ok()?;
         let is_open = projects.as_array()?.iter().any(|p| {
             p.get("name").and_then(|v| v.as_str()) == Some(id)

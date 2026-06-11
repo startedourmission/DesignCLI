@@ -170,6 +170,16 @@ impl Surface {
         out
     }
 
+    /// 디스플레이 전용 빠른 변환(LUT OETF, ±1 LSB) — 뷰 렌더 핫패스용.
+    /// export/PSD/골든은 정확한 to_srgb8_rgba를 쓴다.
+    pub fn to_srgb8_rgba_fast(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.px.len() * 4);
+        for p in &self.px {
+            out.extend_from_slice(&p.to_srgb8_straight_fast());
+        }
+        out
+    }
+
     /// 결정적 바이너리 직렬화 (픽셀 사이드카용).
     ///
     /// 포맷: magic "DXSF"(4B) + version(u8) + width(u32 LE) + height(u32 LE) +
@@ -205,7 +215,12 @@ impl Surface {
         let mut px = Vec::with_capacity(count);
         for chunk in body.chunks_exact(16) {
             let f = |o: usize| f32::from_le_bytes(chunk[o..o + 4].try_into().unwrap());
-            px.push(LinearPremul { r: f(0), g: f(4), b: f(8), a: f(12) });
+            px.push(LinearPremul {
+                r: f(0),
+                g: f(4),
+                b: f(8),
+                a: f(12),
+            });
         }
         Some(Self { width, height, px })
     }

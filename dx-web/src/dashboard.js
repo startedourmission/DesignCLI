@@ -262,6 +262,25 @@ export class DxDashboard extends LitElement {
     }
   }
 
+  // ── PSD 업로드 → 프로젝트 생성(레이어 보존) ──
+  async _importPsd(file) {
+    const name = file.name.replace(/\.psd$/i, "").trim() || "imported";
+    this._saving = true;
+    try {
+      const r = await fetch(`/projects/import-psd?name=${encodeURIComponent(name)}`, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: file,
+      });
+      if (!r.ok) throw new Error(await r.text().catch(() => String(r.status)));
+      const j = await r.json();
+      location.search = `?doc=${encodeURIComponent(j.name)}`;
+    } catch (e) {
+      alert(`PSD 가져오기 실패: ${e.message}`);
+      this._saving = false;
+    }
+  }
+
   // ── 새 프로젝트 생성 ──
   async _create() {
     const name = this._newName.trim();
@@ -324,6 +343,10 @@ export class DxDashboard extends LitElement {
             <p class="body-copy">로컬 문서와 라이브 캔버스를 한 곳에서 엽니다.</p>
           </div>
           <button class="btn-new-file" @click=${() => { this._creating = true; }}>${icon("plus", 14)}새 프로젝트</button>
+          <button class="btn-new-file" title="PSD 파일을 프로젝트로 변환(레이어 보존)"
+            @click=${() => this.renderRoot.querySelector("#psd-up").click()}>${icon("download", 14)}PSD 가져오기</button>
+          <input id="psd-up" type="file" accept=".psd" style="display:none"
+            @change=${(e) => { const f = e.target.files?.[0]; if (f) this._importPsd(f); e.target.value = ""; }} />
         </div>
         <p class="section-title">프로젝트</p>
         ${this._error
