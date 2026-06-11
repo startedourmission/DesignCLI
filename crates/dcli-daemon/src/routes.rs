@@ -344,6 +344,26 @@ pub async fn rename_project(
     (StatusCode::OK, Json(json!({ "old": old, "name": new }))).into_response()
 }
 
+/// 라이브 문서를 PSD로 export(레이어 보존) — 에이전트/브라우저 다운로드용.
+pub async fn export_psd(State(app): Shared, Path(id): Path<String>) -> Response {
+    let docs = app.docs.lock().unwrap();
+    let Some(ds) = docs.get(&id) else {
+        return (StatusCode::NOT_FOUND, format!("열린 문서 없음: {id}")).into_response();
+    };
+    let bytes = dcli_psd::export_psd(&ds.hist.doc);
+    (
+        [
+            ("content-type", "image/vnd.adobe.photoshop".to_string()),
+            (
+                "content-disposition",
+                format!("attachment; filename=\"{id}.psd\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// PSD 업로드 → 새 프로젝트 생성. body = PSD 바이너리, ?name= 프로젝트 이름(중복 시 -2).
 /// 변환은 dcli-psd(레이어/블렌드/불투명도 보존)가 하고, 디스크에 저장 후 이름을 돌려준다.
 #[derive(serde::Deserialize)]

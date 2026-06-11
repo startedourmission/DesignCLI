@@ -266,6 +266,11 @@ impl Editor {
         Ok(png)
     }
 
+    /// 문서를 PSD 바이트로 export(레이어·블렌드·불투명도 보존 — dcli-psd 인코더).
+    pub fn to_psd(&self) -> Vec<u8> {
+        dcli_psd::export_psd(&self.hist.doc)
+    }
+
     /// 텍스트 레이아웃 측정 [w, h] — 엔진과 동일 metric(텍스트 배경 박스 구성용).
     pub fn measure_text(&self, text: &str, size: f32) -> Vec<f32> {
         let (w, h) = dcli_raster::text::measure_text(text, size);

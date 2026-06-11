@@ -878,6 +878,7 @@ dependencies = [
  "dcli-cli",
  "dcli-color",
  "dcli-model",
+ "dcli-psd",
  "dcli-raster",
  "dcli-tile",
  "js-sys",

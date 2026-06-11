@@ -31,12 +31,14 @@ use storage::DocPath;
 struct Cli {
     /// 작업 대상 문서 폴더(.dxdoc). 대부분의 명령이 사용.
     /// --server 모드에서는 이 문자열(파일명 stem)이 데몬의 문서 id가 된다.
-    #[arg(long, global = true, default_value = "doc.dxdoc")]
+    /// 환경변수 DX_DOC이 기본값(에디터 내장 터미널이 주입 — 플래그 생략 가능).
+    #[arg(long, global = true, env = "DX_DOC", default_value = "doc.dxdoc")]
     doc: PathBuf,
 
     /// 라이브 데몬(dx-daemon) URL. 지정 시 디스크 대신 데몬에 편집을 보낸다
     /// (웹 UI에 실시간 반영). 예: --server http://localhost:8137
-    #[arg(long, global = true)]
+    /// 환경변수 DX_SERVER가 기본값 — 내장 터미널에선 모든 dx 명령이 자동 라이브.
+    #[arg(long, global = true, env = "DX_SERVER")]
     server: Option<String>,
 
     /// 데이터를 JSON으로 stdout에 출력(에이전트 친화).

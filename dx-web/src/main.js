@@ -40,7 +40,8 @@ if (!docId) {
           shell.app = app;
 
           // 저장(.dxpkg) / export(PNG) — 항상 현재 editor 기준(라이브면 snapshot으로 교체된 것).
-          shell.addEventListener("save-dxpkg", () => download(app.editor.to_dxpkg(), "untitled.dxpkg", "application/octet-stream"));
+          shell.addEventListener("save-dxpkg", () => download(app.editor.to_dxpkg(), `${docId || "untitled"}.dxpkg`, "application/octet-stream"));
+          shell.addEventListener("save-psd", () => download(app.editor.to_psd(), `${docId || "export"}.psd`, "image/vnd.adobe.photoshop"));
           shell.addEventListener("export-png", () => download(app.editor.export_png(), "export.png", "image/png"));
 
           // 라이브 모드: 데몬 snapshot 로드 + WS 구독. 쓰기는 데몬 경유.

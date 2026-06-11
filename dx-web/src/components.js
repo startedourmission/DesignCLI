@@ -284,6 +284,9 @@ class DxTopbar extends LitElement {
               </button>`)}
           ` : nothing}
           <div class="hr"></div>
+          <button @click=${() => { this._exportMenu = false; this.dispatchEvent(new CustomEvent("save-psd", { bubbles: true, composed: true })); }}>
+            ${icon("export", 13)}PSD 내보내기
+          </button>
           <button @click=${() => { this._exportMenu = false; this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true, composed: true })); }}>
             ${icon("save", 13)}.dxpkg 저장
           </button>
@@ -1975,6 +1978,7 @@ class DxLayerPanel extends LitElement {
             <button @click=${() => this._projectAction(() => this._renameProject(projectName))}>${icon("text", 13)}이름 변경</button>
             <div class="hr"></div>
             <button @click=${() => this._projectAction(() => this.dispatchEvent(new CustomEvent("export-png", { bubbles: true, composed: true })))}>${icon("export", 13)}전체 PNG</button>
+            <button @click=${() => this._projectAction(() => this.dispatchEvent(new CustomEvent("save-psd", { bubbles: true, composed: true })))}>${icon("export", 13)}PSD 내보내기</button>
             <button @click=${() => this._projectAction(() => this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true, composed: true })))}>${icon("save", 13)}.dxpkg 저장</button>
           </div>` : nothing}
       </div>
@@ -2741,9 +2745,11 @@ class AppShell extends LitElement {
         @zoom-cmd=${(e) => this._canvas?.zoomCmd(e.detail)}
         @theme-toggle=${() => this._toggleTheme()}
         @export-png=${() => this.dispatchEvent(new CustomEvent("export-png", { bubbles: true }))}
+        @save-psd=${() => this.dispatchEvent(new CustomEvent("save-psd", { bubbles: true }))}
         @save-dxpkg=${() => this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true }))}></dx-topbar>
       <dx-layer-panel .app=${this.app}
         @export-png=${() => this.dispatchEvent(new CustomEvent("export-png", { bubbles: true }))}
+        @save-psd=${() => this.dispatchEvent(new CustomEvent("save-psd", { bubbles: true }))}
         @save-dxpkg=${() => this.dispatchEvent(new CustomEvent("save-dxpkg", { bubbles: true }))}></dx-layer-panel>
       <dx-canvas .app=${this.app} .toolState=${this._tool}
         @zoom-changed=${(e) => { this._zoom = e.detail; }}

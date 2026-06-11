@@ -14,23 +14,30 @@ sets these variables:
 - `DX_PROJECT_DIR`: the absolute project folder.
 - `DX_CLI_GUIDE`: this guide file.
 
-For browser-visible edits, run the CLI through the daemon:
+- `DX_SERVER`: the live daemon URL (preset).
+- `dx` is on `PATH` (next to the daemon binary).
+
+**Every `dx` command in this terminal is live by default** — `--server`/`--doc`
+fall back to `DX_SERVER`/`DX_DOC` env vars, so plain commands reflect instantly
+in the open editor:
 
 ```bash
-cd ../..
-target/debug/dx --server http://localhost:8137 --doc "$DX_DOC" <command>
+dx layer list
+dx draw text 120 220 "제목" --size 64 --color 24,28,32,255
+dx layer style 3 --shadow "0,8,24,10,14,20,110"
 ```
 
 Expected write output is `(라이브 적용)`. Treat `(디스크 저장)` as a problem for
-live work because the web UI did not receive the edit.
+live work because the web UI did not receive the edit (env was overridden).
 
 ## Useful Commands
 
 ```bash
-cd ../..
-target/debug/dx --server http://localhost:8137 --doc "$DX_DOC" layer list
-target/debug/dx --server http://localhost:8137 --doc "$DX_DOC" doc info
-target/debug/dx --server http://localhost:8137 --doc "$DX_DOC" export png /tmp/designcli-export.png
+dx doc info
+dx layer list
+dx layer style <id> --fill 255,255,255,255 --radius 24
+dx layer text <id> --text "새 내용" --bg 255,213,95,255
+dx export png /tmp/designcli-export.png
 ```
 
 For engine or web code changes, work from the repository root and run:

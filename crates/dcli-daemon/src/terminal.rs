@@ -278,9 +278,22 @@ fn terminal_env(doc: Option<&str>, cwd: &std::path::Path) -> Vec<(String, String
         ("DX_TERMINAL_CWD".to_string(), cwd.display().to_string()),
         ("DX_CLI_GUIDE".to_string(), "AGENTS.md".to_string()),
     ];
+    // ★실시간 반영 보장★: dx CLI가 DX_SERVER/DX_DOC을 기본값으로 읽으므로(clap env),
+    // 여기서 주입해 두면 터미널 안에서 `dx <verb>`만 쳐도 모든 편집이 데몬을 경유해
+    // 열려 있는 에디터 화면에 즉시 broadcast된다(플래그 누락 = 디스크 새기 footgun 제거).
+    let port = std::env::var("DX_PORT").unwrap_or_else(|_| "8137".into());
+    env.push(("DX_SERVER".to_string(), format!("http://127.0.0.1:{port}")));
     if let Some(doc) = doc.filter(|d| !d.trim().is_empty()) {
         env.push(("DX_DOC_ID".to_string(), doc.to_string()));
-        env.push(("DX_DOC".to_string(), format!("projects/{doc}.dxdoc")));
+        // cwd가 프로젝트 폴더 안이므로 상대경로는 깨진다 — 절대경로로.
+        env.push(("DX_DOC".to_string(), cwd.display().to_string()));
+    }
+    // dx 바이너리를 PATH에 추가(데몬 실행 파일 옆 — target/debug 또는 설치 위치).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let old_path = std::env::var("PATH").unwrap_or_default();
+            env.push(("PATH".to_string(), format!("{}:{}", dir.display(), old_path)));
+        }
     }
     env
 }

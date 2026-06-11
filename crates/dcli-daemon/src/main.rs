@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/doc/:id/snapshot", get(routes::snapshot))
         .route("/doc/:id/snapshot.bin", get(routes::snapshot_bin))
         .route("/doc/:id/export.png", get(routes::export_png))
+        .route("/doc/:id/export.psd", get(routes::export_psd))
         .route("/doc/:id/thumb.png", get(routes::thumb_png))
         .route("/doc/:id/state", get(routes::state))
         .route("/doc/:id/live", get(routes::live))

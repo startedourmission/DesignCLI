@@ -17,6 +17,7 @@ dcli-color.workspace = true
 dcli-tile.workspace = true
 dcli-model.workspace = true
 dcli-raster.workspace = true
+dcli-psd.workspace = true
 dcli-cli = { workspace = true, default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
