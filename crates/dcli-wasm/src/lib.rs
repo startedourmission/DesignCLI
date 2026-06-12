@@ -536,7 +536,17 @@ impl Editor {
     /// 뷰의 ArrayBuffer가 detach된다. 프레임이 없으면 길이 0.
     pub fn frame_pixels(&self) -> js_sys::Uint8ClampedArray {
         match &*self.frame.borrow() {
-            Some(f) => unsafe { js_sys::Uint8ClampedArray::view(&f.rgba) },
+            Some(f) => {
+                // Uint8ClampedArray::view는 wasm-bindgen cast intrinsic을 타며 실제로는
+                // Uint8Array 브랜드를 반환한다(ImageData 생성자가 거부 → 캔버스 블랭크).
+                // 같은 메모리 범위 위에 진짜 Uint8ClampedArray를 직접 생성한다(여전히 제로카피).
+                let v = unsafe { js_sys::Uint8Array::view(&f.rgba) };
+                js_sys::Uint8ClampedArray::new_with_byte_offset_and_length(
+                    &v.buffer(),
+                    v.byte_offset(),
+                    v.length(),
+                )
+            }
             None => js_sys::Uint8ClampedArray::new_with_length(0),
         }
     }

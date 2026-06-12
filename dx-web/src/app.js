@@ -94,8 +94,11 @@ export class Renderer {
         const mode = d[0];
         if (mode === 0) return; // 변화 없음 — 업로드 생략.
         // 제로카피 뷰 — 이 뒤로 putImageData까지 wasm 호출 금지(메모리 성장 시 detach).
-        const px = this.editor.frame_pixels();
+        let px = this.editor.frame_pixels();
         if (px.length !== v.w * v.h * 4) return;
+        // wasm-bindgen cast intrinsic이 view를 Uint8Array 브랜드로 만들 수 있다 —
+        // ImageData 생성자는 Uint8ClampedArray만 받으므로 같은 buffer 위에 재래핑(복사 없음).
+        if (!(px instanceof Uint8ClampedArray)) px = new Uint8ClampedArray(px.buffer, px.byteOffset, px.byteLength);
         const img = new ImageData(px, v.w, v.h);
         if (mode === 1) {
           this.ctx.putImageData(img, 0, 0);
