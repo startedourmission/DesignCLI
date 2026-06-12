@@ -255,6 +255,21 @@ impl Editor {
         -1
     }
 
+    /// hit_test의 딥 셀렉트 변형 — 그룹 안까지 내려가 실제 hit된 **말단 Paint id** 반환.
+    /// 호버 하이라이트/자식 직접 선택용(그룹 단위 선택은 hit_test 유지). 없으면 -1.
+    pub fn hit_test_leaf(&self, x: i32, y: i32) -> i32 {
+        let p = (x as f32 + 0.5, y as f32 + 0.5);
+        for &id in self.hist.doc.order().iter().rev() {
+            let Some(node) = self.hist.doc.get(id) else {
+                continue;
+            };
+            if let Some(leaf) = hit_node_leaf(&self.hist.doc, node, p, 0) {
+                return leaf.0 as i32;
+            }
+        }
+        -1
+    }
+
     /// 레이어의 불투명 픽셀 타이트 바운드 — **표면(src) 좌표, 자기 트랜스폼 미적용** [x,y,w,h].
     /// 그룹은 자식들의 (자식 트랜스폼 적용된) 바운드 합집합 — 그룹 자신의 트랜스폼은 미적용.
     /// 웹이 dto의 offset/scale/rotation으로 4코너를 변환해 회전 셀렉션 박스를 그린다.
@@ -1228,9 +1243,21 @@ fn hit_node(
     p: (f32, f32),
     depth: u32,
 ) -> bool {
+    hit_node_leaf(doc, node, p, depth).is_some()
+}
+
+/// hit_node와 같은 수학으로, 실제 hit된 **말단 Paint 노드 id**를 반환(그룹 안까지 하강).
+/// hit_test(그룹 단위 선택)와 달리 호버/직접 선택(딥 셀렉트)용 — 텍스트와 도형의
+/// 그룹 내 인식 동작을 일치시킨다.
+fn hit_node_leaf(
+    doc: &dcli_model::Document,
+    node: &dcli_model::Node,
+    p: (f32, f32),
+    depth: u32,
+) -> Option<dcli_model::NodeId> {
     use dcli_model::NodeKind;
     if !node.visible || node.opacity <= 0.0 || depth > 32 {
-        return false;
+        return None;
     }
     // 노드 자신의 트랜스폼 역적용(엔진과 동일 수학 — 중심 = 표면 중심).
     let local = if node.is_identity_transform() {
@@ -1238,7 +1265,7 @@ fn hit_node(
     } else {
         let (scx, scy) = node.scale;
         if scx.abs() < 1e-4 || scy.abs() < 1e-4 {
-            return false;
+            return None;
         }
         let (sin, cos) = node.rotation.to_radians().sin_cos();
         let (cx, cy) = transform_center(doc, node);
@@ -1251,20 +1278,18 @@ fn hit_node(
     };
     match &node.kind {
         NodeKind::Paint { surface } => {
-            let Some(surf) = doc.pixels().get(*surface) else {
-                return false;
-            };
+            let surf = doc.pixels().get(*surface)?;
             let (sx, sy) = (local.0.floor() as i32, local.1.floor() as i32);
             if sx < 0 || sy < 0 || sx >= surf.width() as i32 || sy >= surf.height() as i32 {
-                return false;
+                return None;
             }
-            surf.pixels()[(sy * surf.width() as i32 + sx) as usize].a > 0.0
+            (surf.pixels()[(sy * surf.width() as i32 + sx) as usize].a > 0.0).then_some(node.id)
         }
         NodeKind::Group { children } => children
             .iter()
             .rev()
             .filter_map(|cid| doc.get(*cid))
-            .any(|child| hit_node(doc, child, local, depth + 1)),
+            .find_map(|child| hit_node_leaf(doc, child, local, depth + 1)),
     }
 }
 

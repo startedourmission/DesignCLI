@@ -767,12 +767,41 @@ export class App extends EventTarget {
     return this.layers().filter((l) => set.has(l.id));
   }
 
-  /** 캔버스 좌표 hit-test → 최상위 레이어 id(없으면 null). */
+  /** 캔버스 좌표 hit-test → 레이어 id(없으면 null).
+   *  그룹 안 자식도 직접 인식한다(말단 hit — 텍스트와 도형 동작 일치).
+   *  단, hit된 노드의 조상이 현재 선택돼 있으면 그 조상을 반환 — 그룹을 선택해 두고
+   *  캔버스에서 끌면 그룹이 통째로 움직이는 UX를 보존한다. */
   hitTest(x, y) {
     const textId = this.textBoxHitTest(x, y);
-    if (textId != null) return textId;
-    const id = this.editor.hit_test(Math.floor(x), Math.floor(y));
-    return id < 0 ? null : id;
+    let id = textId;
+    if (id == null) {
+      const raw = typeof this.editor.hit_test_leaf === "function"
+        ? this.editor.hit_test_leaf(Math.floor(x), Math.floor(y))
+        : this.editor.hit_test(Math.floor(x), Math.floor(y));
+      id = raw < 0 ? null : raw;
+    }
+    if (id == null) return null;
+    const sel = new Set(this.selectedIds);
+    for (let cur = id, hop = 0; cur != null && hop < 33; cur = this.parentOf(cur), hop++) {
+      if (sel.has(cur)) return cur;
+    }
+    return id;
+  }
+
+  /** 노드의 부모 그룹 id(최상위면 null) — 세대 캐시. */
+  parentOf(id) {
+    const m = this._cache.parentMap ??= (() => {
+      const map = new Map();
+      const visit = (l) => {
+        for (const c of l.children ?? []) {
+          map.set(c.id, l.id);
+          visit(c);
+        }
+      };
+      for (const root of this.layerTree()) visit(root);
+      return map;
+    })();
+    return m.get(id) ?? null;
   }
 
   textBoxHitTest(x, y) {

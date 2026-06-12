@@ -12,6 +12,17 @@
   window.addEventListener("error", (e) => log(`FAIL uncaught: ${e.message} @${e.filename}:${e.lineno}`));
   window.addEventListener("unhandledrejection", (e) => log(`FAIL rejection: ${e.reason?.stack || e.reason}`));
 
+  // index.html의 테마 CSS 변수/전역 스타일 주입 — 패널이 실제 모습으로 떠야
+  // 스크린샷 검증(간격·색)이 의미 있다.
+  try {
+    const idx = await (await fetch("/index.html")).text();
+    for (const m of idx.matchAll(/<style>([\s\S]*?)<\/style>/g)) {
+      const s = document.createElement("style");
+      s.textContent = m[1];
+      document.head.appendChild(s);
+    }
+  } catch {}
+
   const { default: init, Editor } = await import("/src/wasm/pkg/dcli_wasm.js");
   const { App, Renderer } = await import("/src/app.js");
   const { connectLive } = await import("/src/live.js");

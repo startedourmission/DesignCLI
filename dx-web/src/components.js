@@ -2123,6 +2123,8 @@ class DxProps extends LitElement {
     .field input[type="range"], .field select { width: 100%; }
     .colorrow { display: grid; grid-template-columns: 34px 1fr; gap: 7px; align-items: center; }
     .colorrow input[type="color"] { width: 34px; padding: 0; overflow: hidden; }
+    /* 컨트롤이 연달아 쌓일 때 세로 간격 — 채움(단색 셀렉트↔색상행), 그라데이션 2색 등. */
+    select + .colorrow, .colorrow + .colorrow, .colorrow + select, select + select { margin-top: 7px; }
     .chk { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-2); cursor: pointer; }
     .empty { padding: 22px 14px; font-size: 11px; color: var(--fg-3); line-height: 1.8; }
   `];
