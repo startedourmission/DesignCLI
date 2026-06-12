@@ -587,7 +587,7 @@ pub async fn snapshot_bin(State(app): Shared, Path(id): Path<String>) -> impl In
     resp
 }
 
-fn snapshot_bytes(app: &AppState, id: &str) -> Option<(u64, Vec<u8>)> {
+fn snapshot_bytes(app: &AppState, id: &str) -> Option<(u64, bytes::Bytes)> {
     if ensure_doc(app, id).is_none() {
         return None;
     }
@@ -597,8 +597,16 @@ fn snapshot_bytes(app: &AppState, id: &str) -> Option<(u64, Vec<u8>)> {
     if compacted > 0 {
         tracing::info!("snapshot compacted {} text surfaces: {}", compacted, id);
         ds.mark_dirty();
+        ds.snapshot_cache = None; // 표면이 바뀌었는데 seq는 그대로 — 명시 무효.
     }
-    let bytes = dxpkg::encode(&ds.hist.doc);
+    // seq 키 캐시 — 같은 상태의 재직렬화(새로고침/재동기/멀티탭)는 즉시 반환.
+    if let Some((s, b)) = &ds.snapshot_cache {
+        if *s == ds.seq {
+            return Some((*s, b.clone()));
+        }
+    }
+    let bytes = bytes::Bytes::from(dxpkg::encode(&ds.hist.doc));
+    ds.snapshot_cache = Some((ds.seq, bytes.clone()));
     Some((ds.seq, bytes))
 }
 

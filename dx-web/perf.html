@@ -1,0 +1,115 @@
+<!doctype html>
+<!-- 클릭→속성창 경로 프로파일 — 소스 무수정(프로토타입 래핑). 헤드리스 크롬에서 실행. -->
+<meta charset="utf-8">
+<title>dx perf</title>
+<script type="importmap">
+{ "imports": { "lit": "https://esm.sh/lit@3.1.4", "lit/": "https://esm.sh/lit@3.1.4/" } }
+</script>
+<body>
+<script type="module">
+  const DOC = new URLSearchParams(location.search).get("doc") || "요즘 바이브 코딩 하네스";
+  const log = (m) => console.log(`PERF ${m}`);
+  window.addEventListener("error", (e) => log(`FAIL uncaught: ${e.message} @${e.filename}:${e.lineno}`));
+  window.addEventListener("unhandledrejection", (e) => log(`FAIL rejection: ${e.reason?.stack || e.reason}`));
+
+  const { default: init, Editor } = await import("/src/wasm/pkg/dcli_wasm.js");
+  const { App, Renderer } = await import("/src/app.js");
+  const { connectLive } = await import("/src/live.js");
+  await import("/src/components.js");
+  await init();
+
+  // ── 계측: 누적 타이머 래핑 ──
+  const acc = {};
+  const note = (key, dt) => { const a = acc[key] ??= { ms: 0, n: 0 }; a.ms += dt; a.n++; };
+  const wrap = (obj, name, key) => {
+    const f = obj[name];
+    if (typeof f !== "function") { log(`skip wrap ${key}`); return; }
+    obj[name] = function (...args) {
+      const t0 = performance.now();
+      try { return f.apply(this, args); } finally { note(key, performance.now() - t0); }
+    };
+  };
+  for (const m of ["hitTest", "layers", "layerBounds", "metaOf", "frames", "_notify", "layerTree",
+                   "displayAABB", "orderBottomToTop", "xformOf"]) {
+    wrap(App.prototype, m, `App.${m}`);
+  }
+  const LP = customElements.get("dx-layer-panel") ?? null;
+  for (const tag of ["dx-topbar", "dx-canvas", "dx-layer-panel", "dx-props", "dx-agent-terminal", "app-shell"]) {
+    const C = customElements.get(tag);
+    wrap(C.prototype, "performUpdate", `${tag}.update`);
+  }
+  {
+    const LPC = customElements.get("dx-layer-panel");
+    for (const m of ["render", "_items", "_filterItems", "_row", "_layerIcon", "_revealSelection", "_frameContains"]) {
+      wrap(LPC.prototype, m, `panel.${m}`);
+    }
+  }
+  const DxCanvasC = customElements.get("dx-canvas");
+  for (const m of ["_drawOverlay", "_applyZoom", "_down"]) wrap(DxCanvasC.prototype, m, `canvas.${m}`);
+  wrap(Renderer.prototype, "_frame", "Renderer._frame");
+
+  // ── 부팅(main.js 에디터 모드와 동일) ──
+  const editor = new Editor(800, 600, "u8");
+  const renderer = new Renderer(editor, document.createElement("canvas"));
+  const app = new App(editor, renderer);
+  document.body.innerHTML = "";
+  const shell = document.createElement("app-shell");
+  document.body.appendChild(shell);
+  shell.app = app;
+  const tBoot = performance.now();
+  await connectLive(app, DOC);
+  log(`connectLive: ${(performance.now() - tBoot).toFixed(0)}ms (doc=${app.editor.width()}x${app.editor.height()}, layers=${app.layers().length})`);
+  app._notify();
+
+  const tick = () => new Promise((r) => {
+    let done = false; const fin = () => { if (!done) { done = true; r(); } };
+    requestAnimationFrame(fin); setTimeout(fin, 30); // 헤드리스 virtual-time에서 rAF 미발화 대비.
+  });
+  const settle = async (n = 6) => { for (let i = 0; i < n; i++) await tick(); };
+  await settle(10);
+
+  const report = (label, total) => {
+    const rows = Object.entries(acc).filter(([, v]) => v.ms > 0.2).sort((a, b) => b[1].ms - a[1].ms);
+    log(`── ${label}: 합계 ${total.toFixed(1)}ms ──`);
+    for (const [k, v] of rows) log(`  ${k}: ${v.ms.toFixed(1)}ms ×${v.n}`);
+    for (const k of Object.keys(acc)) delete acc[k];
+  };
+  for (const k of Object.keys(acc)) delete acc[k];
+
+  // 합성 PointerEvent의 가짜 pointerId로 setPointerCapture가 throw하는 것 무력화.
+  for (const m of ["setPointerCapture", "releasePointerCapture"]) {
+    const orig = Element.prototype[m];
+    Element.prototype[m] = function (id) { try { return orig.call(this, id); } catch {} };
+  }
+
+  // ── 시나리오 1: 캔버스 클릭(선택) → 패널 갱신까지 ──
+  const cv = shell.shadowRoot.querySelector("dx-canvas");
+  const rect = cv.getBoundingClientRect();
+  const cx = rect.left + rect.width * 0.5, cy = rect.top + rect.height * 0.4;
+  const ev = (type, x, y) => new PointerEvent(type, { clientX: x, clientY: y, button: 0, buttons: type === "pointerup" ? 0 : 1, bubbles: true, composed: true, isPrimary: true, pointerId: 7, pointerType: "mouse" });
+  let t0 = performance.now();
+  cv.dispatchEvent(ev("pointerdown", cx, cy));
+  window.dispatchEvent(ev("pointerup", cx, cy));
+  const tSync = performance.now() - t0;
+  await settle(4);
+  log(`클릭 동기 처리: ${tSync.toFixed(1)}ms / 선택=${JSON.stringify(app.selectedIds)}`);
+  report("클릭→패널 (settle 4프레임 포함)", performance.now() - t0);
+
+  // ── 시나리오 2: 두 번째 클릭(워밍업 이후 정상 단가) ──
+  const cx2 = rect.left + rect.width * 0.55, cy2 = rect.top + rect.height * 0.6;
+  t0 = performance.now();
+  cv.dispatchEvent(ev("pointerdown", cx2, cy2));
+  window.dispatchEvent(ev("pointerup", cx2, cy2));
+  await settle(4);
+  log(`2차 클릭 선택=${JSON.stringify(app.selectedIds)}`);
+  report("2차 클릭→패널", performance.now() - t0);
+
+  // ── 시나리오 3: 속성 편집 1건(불투명도) — 슬라이더 한 틱 상당 ──
+  if (app.selectedId != null) {
+    t0 = performance.now();
+    app.apply([{ op: "set_props", id: { node: app.selectedId }, patch: { opacity: 0.9 } }]);
+    await settle(4);
+    report("편집 1건(불투명도)→반영", performance.now() - t0);
+  }
+  log("DONE");
+</script>

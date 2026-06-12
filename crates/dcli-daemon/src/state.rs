@@ -43,6 +43,9 @@ pub struct DocState {
     pub dirty: bool,
     /// 마지막 편집 시각(자동저장 1.5초 디바운스 기준).
     pub last_edit: Option<Instant>,
+    /// 마지막 스냅샷 직렬화 결과(seq 키). PSD급 문서는 encode가 수 초라
+    /// 브라우저 새로고침/재동기마다 다시 내면 안 된다. seq 불일치 시 자연 무효.
+    pub snapshot_cache: Option<(u64, bytes::Bytes)>,
 }
 
 impl DocState {
@@ -55,6 +58,7 @@ impl DocState {
             tx,
             dirty: false,
             last_edit: None,
+            snapshot_cache: None,
         }
     }
 

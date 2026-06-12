@@ -48,5 +48,14 @@ cargo run -q -p dcli-cli --bin dx -- --help    # CLI 표면
 target/debug/dx --server http://localhost:8137 --doc projects/<n>.dxdoc <verb> ...  # 라이브 편집
 ```
 
+UI 잼(클릭→패널 등) 프로파일: 데몬 켠 상태에서 `dx-web/perf.html` — 소스 무수정
+프로토타입 래핑으로 실제 클릭/편집 경로를 단계별 계측(PERF 라인으로 출력).
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu \
+  --enable-logging=stderr --v=0 --window-size=1600,1000 \
+  "http://localhost:8137/perf.html?doc=<프로젝트명>" 2>&1 | grep -o 'PERF [^"]*'
+# 백그라운드로 띄우고 ~20초 뒤 kill — PERF DONE까지 stderr로 흘러나온다.
+```
+
 디자인 작업 에이전트 규칙은 `AGENTS.md`·`docs/agent-system-prompt.md`, 아키텍처 배경은
 프로젝트 메모리(editor-coordinate-contracts, rendering-architecture) 참조.

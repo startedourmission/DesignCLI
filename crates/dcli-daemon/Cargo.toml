@@ -20,6 +20,8 @@ dcli-raster.workspace = true
 
 axum.workspace = true
 tower-http.workspace = true
+# 스냅샷 캐시(seq 키) — 24MB급 응답을 복사 없이 재사용(cheap-clone).
+bytes = "1"
 # daemon은 멀티스레드 런타임 + net 필요(workspace tokio는 feature가 좁아 여기서 직접 지정).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time", "fs"] }
 png.workspace = true

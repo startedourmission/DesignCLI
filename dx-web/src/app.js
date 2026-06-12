@@ -822,15 +822,23 @@ export class App extends EventTarget {
     const l = this.layerById(id);
     const key = l?.surface != null
       ? `${id}:${l.surface}:${l.surface_size?.[0]}x${l.surface_size?.[1]}`
-      : null; // 그룹은 자식 파생이라 캐시 불가.
+      : null; // 그룹은 자식 파생이라 영속 캐시 불가 — 아래 세대 캐시로.
     if (key) {
       const hit = this._boundsCache.get(key);
+      if (hit !== undefined) return hit;
+    } else {
+      // 그룹: 자식이 바뀌면 세대도 바뀐다 → 세대(_cache) 수명 캐시가 정확하고,
+      // 없으면 패널 렌더마다 wasm 재귀 알파 스캔(PSD급 문서에서 클릭당 ~90ms).
+      const g = this._cache.groupBounds ??= new Map();
+      const hit = g.get(id);
       if (hit !== undefined) return hit;
     }
     const bounds = JSON.parse(this.editor.layer_bounds(id));
     if (key) {
       if (this._boundsCache.size > 1024) this._boundsCache.clear();
       this._boundsCache.set(key, bounds);
+    } else {
+      this._cache.groupBounds.set(id, bounds);
     }
     return bounds;
   }
@@ -1033,8 +1041,9 @@ export class App extends EventTarget {
 
   /** bottom-to-top 순서(엔진 order). moveLayer의 to는 이 인덱스 기준. */
   orderBottomToTop() {
-    const j = JSON.parse(this.editor.layers());
-    return j.layers.map((l) => l.id); // dto layer_list_json = bottom-to-top
+    // 레이어 패널이 행마다 호출 — 매 호출 wasm 직렬화+파싱이면 클릭당 수백 ms(436행 실측 759ms).
+    // layerTree 캐시(세대당 1회 파싱)에서 파생한다. layerTree = bottom-to-top의 reverse.
+    return this._cache.order ??= this.layerTree().slice().reverse().map((l) => l.id);
   }
 
   /** 레이어를 한 칸 위(앞)로 — z-order 상승. 맨 위면 무시. */

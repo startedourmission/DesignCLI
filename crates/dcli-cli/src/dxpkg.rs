@@ -38,16 +38,40 @@ pub fn encode(doc: &Document) -> Vec<u8> {
         .filter(|(id, _)| referenced.contains(id))
         .collect();
     out.extend_from_slice(&(surfaces.len() as u32).to_le_bytes());
-    for (id, surface) in surfaces {
+    // 표면별 (원시 길이, 압축 결과) — 네이티브는 rayon 병렬(PSD급 다MB 문서에서 직렬은
+    // 수 초~십수 초; 데몬 스냅샷이 이 경로다). 순서 보존 → 출력 바이트는 직렬과 동일.
+    let packed = pack_surfaces(&surfaces);
+    for ((id, _), (raw_len, p)) in surfaces.iter().zip(packed) {
         out.extend_from_slice(&id.0.to_le_bytes());
-        let bytes = surface.to_bytes();
-        let packed = compress_surface_bytes(&bytes);
-        out.push(packed.codec);
-        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(packed.bytes.len() as u32).to_le_bytes());
-        out.extend_from_slice(&packed.bytes);
+        out.push(p.codec);
+        out.extend_from_slice(&(raw_len as u32).to_le_bytes());
+        out.extend_from_slice(&(p.bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&p.bytes);
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pack_surfaces(surfaces: &[(SurfaceId, &Surface)]) -> Vec<(usize, PackedSurface)> {
+    use rayon::prelude::*;
+    surfaces
+        .par_iter()
+        .map(|(_, s)| {
+            let bytes = s.to_bytes();
+            (bytes.len(), compress_surface_bytes(&bytes))
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pack_surfaces(surfaces: &[(SurfaceId, &Surface)]) -> Vec<(usize, PackedSurface)> {
+    surfaces
+        .iter()
+        .map(|(_, s)| {
+            let bytes = s.to_bytes();
+            (bytes.len(), compress_surface_bytes(&bytes))
+        })
+        .collect()
 }
 
 struct PackedSurface {

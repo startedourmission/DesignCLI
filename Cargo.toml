@@ -84,3 +84,14 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# 디버그 데몬에서도 픽셀 직렬화·zlib은 최적화 컴파일 — PSD급 문서 스냅샷이
+# 디버그 miniz_oxide(~20MB/s)로는 표면 하나에 수 초씩 걸린다(시맨틱 무변화).
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.adler2]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.dcli-tile]
+opt-level = 2
