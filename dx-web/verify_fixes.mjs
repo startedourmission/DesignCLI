@@ -160,5 +160,50 @@ const rebased = (offset, oldItems, newItems, docSized = false) => {
     `world=${J(world)} scale=${J(l1.scale)}`);
 }
 
+// ── 5. 보존 프레임: 스크롤 팬·damage 재합성이 신규 풀 합성과 픽셀 동일 ──
+// (깨지면 화면에 이음새·잔상이 조용히 생긴다 — render_frame의 핵심 불변식.)
+{
+  const SCENE = [
+    { op: "add_paint_layer", name: "bg", source: { from: "shapes", items: [{ shape: "rect", x: 0, y: 0, w: 400, h: 300, rgba: [240, 235, 226, 255] }] }, bind: "bg" },
+    { op: "set_props", id: { bind: "bg" }, patch: { meta: J({ type: "shape", shape: "rect", item: { shape: "rect", x: 0, y: 0, w: 400, h: 300, rgba: [240, 235, 226, 255] }, fill: [240, 235, 226, 255], rgba: [240, 235, 226, 255], stroke: null, strokeWidth: 0 }) } },
+    { op: "add_paint_layer", name: "card", source: { from: "shapes", items: [{ shape: "rounded_rect", x: 60, y: 50, w: 180, h: 120, radius: 12, rgba: [255, 255, 255, 255] }] }, bind: "c" },
+    { op: "set_props", id: { bind: "c" }, patch: { opacity: 0.9, meta: J({ type: "shape", shape: "rounded_rect", item: { shape: "rounded_rect", x: 60, y: 50, w: 180, h: 120, radius: 12, rgba: [255, 255, 255, 255] }, fill: [255, 255, 255, 255], rgba: [255, 255, 255, 255], stroke: null, strokeWidth: 0, shadow: { dx: 0, dy: 6, blur: 18, rgba: [0, 0, 0, 90] } }) } },
+    { op: "add_paint_layer", name: "img", source: { from: "shapes", items: [{ shape: "rect", x: 200, y: 140, w: 120, h: 90, rgba: [80, 120, 200, 220] }] } }, // meta 없음 = 이미지 경로
+  ];
+  const mk = () => { const e = new Editor(400, 300, "u8"); const r = apply(e, SCENE); if (!r.ok) throw new Error("scene: " + J(r.issues)); return e; };
+  const px = (ed) => Uint8ClampedArray.from(ed.frame_pixels()); // 뷰 → 복사
+  const s = 1.3, W = 320, H = 240;
+  const grid = (v) => Math.round(v * s) / s; // setView 스냅 미러
+  const v1 = [grid(10), grid(8)], v0 = [grid(10 - 24 / s), grid(8 - 16 / s)];
+
+  // (a) 팬 스크롤: v0에서 굽고 v1으로 스크롤 == v1 신규 풀 합성.
+  const edA = mk();
+  edA.render_frame(v0[0], v0[1], s, W, H, -1);
+  const dA = edA.render_frame(v1[0], v1[1], s, W, H, -1);
+  const fresh1 = mk();
+  fresh1.render_frame(v1[0], v1[1], s, W, H, -1);
+  expect("보존 프레임: 팬이 스크롤 경로(mode 2)", dA[0] === 2 && (dA[1] !== 0 || dA[2] !== 0), `mode=${dA[0]} d=(${dA[1]},${dA[2]})`);
+  {
+    const a = px(edA), b = px(fresh1);
+    let diff = -1;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { diff = i; break; }
+    expect("보존 프레임: 스크롤 == 신규 풀 합성(픽셀 동일)", diff === -1, `첫 불일치 byte ${diff} (px ${(diff / 4) | 0})`);
+  }
+
+  // (b) damage: 카드 이동 후 증분 재합성 == 같은 문서 신규 풀 합성.
+  const cardId = flat(layersOf(edA)).find((l) => l.name === "card").id;
+  apply(edA, [{ op: "set_props", id: { node: cardId }, patch: { offset: [40, 24] } }]);
+  const dB = edA.render_frame(v1[0], v1[1], s, W, H, -1);
+  const fresh2 = mk();
+  const cardId2 = flat(layersOf(fresh2)).find((l) => l.name === "card").id;
+  apply(fresh2, [{ op: "set_props", id: { node: cardId2 }, patch: { offset: [40, 24] } }]);
+  fresh2.render_frame(v1[0], v1[1], s, W, H, -1);
+  expect("보존 프레임: 편집이 증분 경로(mode 2, rect>0)", dB[0] === 2 && dB[3] > 0, `mode=${dB[0]} n=${dB[3]}`);
+  const a = px(edA), b = px(fresh2);
+  let diff = -1;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { diff = i; break; }
+  expect("보존 프레임: damage 재합성 == 신규 풀 합성(픽셀 동일)", diff === -1, `첫 불일치 byte ${diff} (px ${(diff / 4) | 0})`);
+}
+
 console.log(fails === 0 ? "\n전체 PASS" : `\n${fails}개 FAIL`);
 process.exit(fails ? 1 : 0);

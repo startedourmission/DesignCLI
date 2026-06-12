@@ -546,6 +546,20 @@ class DxCanvas extends LitElement {
 
   // ---- 줌/팬 ----
   get zoom() { return this._zoom; }
+  /** 팬 전용 즉시 뷰 갱신 — 보존 프레임의 스크롤 경로(행 memmove + 스트립 재합성)가
+   *  프레임당 수 ms라, 90ms 디바운스 없이 매 rAF 재합성해도 된다(패드 밖 빈 화면 제거).
+   *  줌이 아직 뷰에 반영 안 된 상태(제스처 직후)면 false — 종전 디바운스 경로로. */
+  _panView() {
+    const r = this.app.renderer;
+    if (!r.hasViewComposite?.() || !r.view) return false;
+    if (typeof this.app.editor.render_frame !== "function") return false;
+    const v = r.view;
+    if (v.zoom !== this._zoom) return false;
+    const padCss = 128;
+    const z = this._zoom;
+    r.setView(this._origin.x - padCss / z, this._origin.y - padCss / z, z, v.cssW, v.cssH, v.renderScale);
+    return true;
+  }
   _applyZoom(force = false, render = true) {
     if (!this.base) return;
     const z = this._zoom;
@@ -711,8 +725,12 @@ class DxCanvas extends LitElement {
       x: this._origin.x + dx / this._zoom,
       y: this._origin.y + dy / this._zoom,
     };
-    this._applyZoom(false, false);
-    this._scheduleViewportRefresh();
+    if (this._panView()) {
+      this._applyZoom(false, false);
+    } else {
+      this._applyZoom(false, false);
+      this._scheduleViewportRefresh();
+    }
     this._scheduleOverlay();
   }
 
@@ -1148,8 +1166,12 @@ class DxCanvas extends LitElement {
         x: d.ox - (e.clientX - d.sx) / this._zoom,
         y: d.oy - (e.clientY - d.sy) / this._zoom,
       };
-      this._applyZoom(false, false);
-      this._scheduleViewportRefresh();
+      if (this._panView()) {
+        this._applyZoom(false, false); // translate만 갱신(스냅 잔차 ≤1px).
+      } else {
+        this._applyZoom(false, false);
+        this._scheduleViewportRefresh();
+      }
       this._scheduleOverlay();
       return;
     }

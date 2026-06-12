@@ -154,6 +154,26 @@ pub enum ViewItem {
 pub type VectorRender<'a> =
     &'a dyn Fn(&dcli_model::Node, f32) -> Option<(std::rc::Rc<Surface>, (i32, i32))>;
 
+/// 노드의 **월드 좌표** 추가 경계 제공자(identity Paint 한정 의미) — meta 벡터 아이템이
+/// 표면보다 넓을 수 있는 경우(예: set_props로 meta만 바꿔 그림자가 표면 밖으로 뻗는
+/// 상태)를 컬링·그룹 tmp 크기 산정이 알게 한다. None = 표면 경계만 사용.
+pub type AabbProvider<'a> = &'a dyn Fn(&dcli_model::Node) -> Option<(f32, f32, f32, f32)>;
+
+/// 아이템 합집합 bbox(아이템과 같은 좌표계, 스트로크/feather 마진 포함) —
+/// meta 기반 컬링·손상영역 박스 계산용.
+pub fn view_items_bounds(items: &[ViewItem]) -> Option<(f32, f32, f32, f32)> {
+    let mut u: Option<(f32, f32, f32, f32)> = None;
+    for it in items {
+        if let Some(b) = view_item_bounds(it) {
+            u = Some(match u {
+                Some(a) => (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),
+                None => b,
+            });
+        }
+    }
+    u
+}
+
 /// 월드 좌표 벡터 아이템들을 스케일 s로 굽는다(뷰 원점 무관 — 캐시 가능).
 /// 반환 원점 = floor(min corner × s) − 1. 결과 픽셀 수가 max_px를 넘으면 None.
 pub fn render_view_items(items: &[ViewItem], s: f32, max_px: u64) -> Option<(Surface, (i32, i32))> {
@@ -198,7 +218,7 @@ pub fn composite_view_with(
     oh: u32,
     vec_render: VectorRender,
 ) -> Surface {
-    composite_view_impl(doc, vx, vy, s, ow, oh, vec_render, false)
+    composite_view_impl(doc, vx, vy, s, ow, oh, None, &|_| None, vec_render, false)
 }
 
 /// **디스플레이 전용** 뷰 합성 — 감마 블렌드의 전달함수를 LUT(±1e-3)로 돌린다.
@@ -206,6 +226,7 @@ pub fn composite_view_with(
 /// 반투명 레이어의 감마 블렌드는 픽셀당 powf ~9회로 화면 프레임의 지배 비용이다.
 /// 이 경로는 표시 프레임에만 쓰고, export/PSD/골든/materialize는 정확 경로
 /// (composite_view_with/composite/composite_region)를 유지한다 — 비트 계약 불변.
+/// exclude = 화면에서만 제외할 노드(텍스트 인라인 편집) — 문서 clone 없이 스킵.
 #[allow(clippy::too_many_arguments)]
 pub fn composite_view_display(
     doc: &Document,
@@ -214,9 +235,11 @@ pub fn composite_view_display(
     s: f32,
     ow: u32,
     oh: u32,
+    exclude: Option<dcli_model::NodeId>,
+    aabb_of: AabbProvider,
     vec_render: VectorRender,
 ) -> Surface {
-    composite_view_impl(doc, vx, vy, s, ow, oh, vec_render, true)
+    composite_view_impl(doc, vx, vy, s, ow, oh, exclude, aabb_of, vec_render, true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,6 +250,8 @@ fn composite_view_impl(
     s: f32,
     ow: u32,
     oh: u32,
+    exclude: Option<dcli_model::NodeId>,
+    aabb_of: AabbProvider,
     vec_render: VectorRender,
     fast: bool,
 ) -> Surface {
@@ -235,9 +260,109 @@ fn composite_view_impl(
         return acc;
     }
     for node in doc.iter_bottom_to_top() {
-        composite_node_view(&mut acc, doc, node, (vx, vy, s), 0, vec_render, fast);
+        composite_node_view(
+            &mut acc,
+            doc,
+            node,
+            (vx, vy, s),
+            0,
+            exclude,
+            aabb_of,
+            vec_render,
+            fast,
+        );
     }
     acc
+}
+
+/// 노드의 월드 좌표 AABB — 자기 트랜스폼 포함, **뷰 경로 의미론**(그룹 피벗 = 문서 중심).
+///
+/// 컬링·손상영역(damage) 계산용. 보수적(약간 큰) 박스는 무해하지만 작은 박스는 픽셀
+/// 누락을 만든다 — Paint는 표면 4코너, Group은 자식 합집합 박스의 4코너를 변환한다.
+/// 빈 그룹/표면 없음이면 None.
+pub fn node_world_aabb(
+    doc: &Document,
+    node: &dcli_model::Node,
+) -> Option<(f32, f32, f32, f32)> {
+    node_world_aabb_inner(doc, node, &|_| None, 0)
+}
+
+/// node_world_aabb + 추가 경계 제공자: identity Paint 노드의 meta 벡터 아이템이 표면
+/// 밖으로 뻗는 경우(그림자 등, set_props meta-only 흐름)를 박스에 합친다.
+pub fn node_world_aabb_with(
+    doc: &Document,
+    node: &dcli_model::Node,
+    extra: AabbProvider,
+) -> Option<(f32, f32, f32, f32)> {
+    node_world_aabb_inner(doc, node, extra, 0)
+}
+
+fn node_world_aabb_inner(
+    doc: &Document,
+    node: &dcli_model::Node,
+    extra: AabbProvider,
+    depth: u32,
+) -> Option<(f32, f32, f32, f32)> {
+    if depth > 32 {
+        return None;
+    }
+    use dcli_model::NodeKind;
+    let xf = |b: (f32, f32, f32, f32), c: (f32, f32)| -> (f32, f32, f32, f32) {
+        let (ox, oy) = (node.offset.0 as f32, node.offset.1 as f32);
+        if node.is_identity_transform() {
+            return (b.0 + ox, b.1 + oy, b.2 + ox, b.3 + oy);
+        }
+        let (sin, cos) = node.rotation.to_radians().sin_cos();
+        let (sx, sy) = node.scale;
+        let map = |x: f32, y: f32| -> (f32, f32) {
+            let wx = (x - c.0) * sx;
+            let wy = (y - c.1) * sy;
+            (cos * wx - sin * wy + c.0 + ox, sin * wx + cos * wy + c.1 + oy)
+        };
+        let ps = [map(b.0, b.1), map(b.2, b.1), map(b.0, b.3), map(b.2, b.3)];
+        let minx = ps.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+        let maxx = ps.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        let miny = ps.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        let maxy = ps.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+        (minx, miny, maxx, maxy)
+    };
+    match &node.kind {
+        NodeKind::Paint { surface } => {
+            let s = doc.pixels().get(*surface)?;
+            let (sw, sh) = (s.width() as f32, s.height() as f32);
+            // composite_layer_view와 동일: 피벗 = 표면 중심(src 좌표), offset은 변환 후.
+            let surf_b = xf((0.0, 0.0, sw, sh), (sw * 0.5, sh * 0.5));
+            // 벡터 재래스터는 identity 노드에서만 뛴다 — meta 경계도 그때만 의미 있다.
+            if node.is_identity_transform() {
+                if let Some(e) = extra(node) {
+                    return Some((
+                        surf_b.0.min(e.0),
+                        surf_b.1.min(e.1),
+                        surf_b.2.max(e.2),
+                        surf_b.3.max(e.3),
+                    ));
+                }
+            }
+            Some(surf_b)
+        }
+        NodeKind::Group { children } => {
+            let mut u: Option<(f32, f32, f32, f32)> = None;
+            for cid in children {
+                let Some(child) = doc.get(*cid) else { continue };
+                if !child.visible || child.opacity <= 0.0 {
+                    continue;
+                }
+                if let Some(b) = node_world_aabb_inner(doc, child, extra, depth + 1) {
+                    u = Some(match u {
+                        Some(a) => (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),
+                        None => b,
+                    });
+                }
+            }
+            // 그룹 트랜스폼 피벗 = 문서 중심(뷰 경로 cv와 동일 월드 고정 피벗).
+            u.map(|b| xf(b, (doc.width as f32 * 0.5, doc.height as f32 * 0.5)))
+        }
+    }
 }
 
 /// 월드 아이템을 뷰 공간으로 변환(시프트 + 균일 스케일). 텍스트는 size·선폭까지 스케일.
@@ -642,19 +767,38 @@ fn draw_view_item(sfc: &mut Surface, it: &ViewItem) {
 }
 
 /// 노드 하나를 뷰 공간 acc 위에 합성한다. view = (vx, vy, s).
+#[allow(clippy::too_many_arguments)]
 fn composite_node_view(
     acc: &mut Surface,
     doc: &Document,
     node: &dcli_model::Node,
     view: (f32, f32, f32),
     depth: u32,
+    exclude: Option<dcli_model::NodeId>,
+    aabb_of: AabbProvider,
     vec_render: VectorRender,
     fast: bool,
 ) {
     if !node.visible || node.opacity <= 0.0 || depth > 32 {
         return;
     }
+    if exclude == Some(node.id) {
+        return; // 화면 전용 제외(텍스트 인라인 편집) — 그룹이면 서브트리째 스킵.
+    }
     let (vx, vy, s) = view;
+    // 오프스크린 컬링: 뷰포트와 겹치지 않는 노드는 재래스터(벡터 캐시 미스)·tmp 할당·
+    // 블렌드 비용을 아예 내지 않는다 — 장면 크기 독립성의 핵심. pad는 재래스터 ±1px
+    // 마진 + AA 여유. (AABB를 못 구하는 노드는 보수적으로 통과.)
+    if let Some(b) = node_world_aabb_with(doc, node, aabb_of) {
+        let pad = 4.0;
+        if (b.2 - vx) * s < -pad
+            || (b.3 - vy) * s < -pad
+            || (b.0 - vx) * s > acc.width() as f32 + pad
+            || (b.1 - vy) * s > acc.height() as f32 + pad
+        {
+            return;
+        }
+    }
     use dcli_model::NodeKind;
     match &node.kind {
         NodeKind::Paint { surface } => {
@@ -713,26 +857,63 @@ fn composite_node_view(
             );
         }
         NodeKind::Group { children } => {
-            // 자식들을 같은 뷰 공간의 임시 표면에 먼저 합성한 뒤 그룹 props로 얹는다.
-            let mut tmp = Surface::new(acc.width(), acc.height());
-            for cid in children {
-                if let Some(child) = doc.get(*cid) {
-                    composite_node_view(&mut tmp, doc, child, view, depth + 1, vec_render, fast);
-                }
-            }
             if node.is_identity_transform() {
-                // 동일 크기 zip 빠른 경로.
+                // isolated group이지만 블렌드는 픽셀-로컬이므로, tmp를 자식 합집합
+                // bbox∩뷰포트 크기로 잘라도 결과는 풀스크린 tmp와 비트 동일하다
+                // (자식은 자기 범위 밖을 안 건드리고, 투명 src 블렌드는 no-op).
+                // 풀스크린 tmp(뷰포트당 수십 MB) 할당·제로필·전면 블렌드 제거.
+                let mut ub: Option<(f32, f32, f32, f32)> = None;
+                for cid in children {
+                    let Some(child) = doc.get(*cid) else { continue };
+                    if !child.visible || child.opacity <= 0.0 {
+                        continue;
+                    }
+                    if let Some(b) = node_world_aabb_with(doc, child, aabb_of) {
+                        ub = Some(match ub {
+                            Some(a) => (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),
+                            None => b,
+                        });
+                    }
+                }
+                let Some(ub) = ub else { return };
+                // 그룹 offset은 뷰 px로 스냅해 블렌드 시점에 적용(자식 좌표계 tmp).
+                let offdx = (node.offset.0 as f32 * s).round() as i32;
+                let offdy = (node.offset.1 as f32 * s).round() as i32;
+                let pad = 4i32;
+                let bx0 = ((((ub.0 - vx) * s).floor() as i32) - pad).max(-offdx);
+                let by0 = ((((ub.1 - vy) * s).floor() as i32) - pad).max(-offdy);
+                let bx1 = ((((ub.2 - vx) * s).ceil() as i32) + pad).min(acc.width() as i32 - offdx);
+                let by1 = ((((ub.3 - vy) * s).ceil() as i32) + pad).min(acc.height() as i32 - offdy);
+                if bx1 <= bx0 || by1 <= by0 {
+                    return;
+                }
+                let mut tmp = Surface::new((bx1 - bx0) as u32, (by1 - by0) as u32);
+                // 자식 뷰 원점을 정수 뷰 px만큼 이동 — (vx·s).round()+bx0 불변(시프트 불변성)
+                // 이라 벡터 블릿·s=1 비트 경로 모두 풀프레임과 일치한다.
+                let sub = (vx + bx0 as f32 / s, vy + by0 as f32 / s, s);
+                for cid in children {
+                    if let Some(child) = doc.get(*cid) {
+                        composite_node_view(&mut tmp, doc, child, sub, depth + 1, exclude, aabb_of, vec_render, fast);
+                    }
+                }
                 composite_layer(
                     acc,
                     tmp.pixels(),
                     (tmp.width(), tmp.height()),
-                    (0, 0),
+                    (bx0 + offdx, by0 + offdy),
                     node.blend,
                     node.opacity,
                     doc.blend_space,
                     fast,
                 );
             } else {
+                // 트랜스폼 그룹(드묾): 자식을 같은 뷰 공간 풀사이즈 tmp에 합성 후 변환.
+                let mut tmp = Surface::new(acc.width(), acc.height());
+                for cid in children {
+                    if let Some(child) = doc.get(*cid) {
+                        composite_node_view(&mut tmp, doc, child, view, depth + 1, exclude, aabb_of, vec_render, fast);
+                    }
+                }
                 // 그룹 트랜스폼을 뷰 공간으로 옮긴다: 월드 피벗 C(문서 중심)는 뷰에서
                 // Cv = (C − v)·s, offset은 F·s. (doc-res 경로의 region-center 피벗
                 // 의존성은 따르지 않는다 — 전체 문서 export와 동일한 월드 고정 피벗.)
@@ -1464,7 +1645,11 @@ mod tests {
         // 벡터 렌더 제공 시 표면 대신 뷰 배율 재래스터 — 4배 확대에서 가장자리가 선명해야
         // (업샘플이면 경계 알파가 0.25~0.75 사이로 뭉개진다. 재래스터는 1px AA 이내).
         let mut doc = Document::new(64, 48, BitDepth::U8);
-        add(&mut doc, "rect", solid(1, 1, 0, 0, 0, 0), BlendMode::Normal); // 표면은 더미
+        // 표면은 더미지만 **아이템 범위를 덮어야** 한다(프로덕션 불변식: 표면 =
+        // meta 아이템의 materialize 결과 — 오프스크린 컬링이 이 불변식에 기댄다).
+        add(&mut doc, "rect", solid(22, 22, 0, 0, 0, 0), BlendMode::Normal);
+        let id = *doc.order().last().unwrap();
+        doc.get_mut(id).unwrap().offset = (9, 9);
         let items = vec![ViewItem::Rect {
             x: 10.0,
             y: 10.0,

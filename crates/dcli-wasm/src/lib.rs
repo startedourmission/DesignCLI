@@ -26,6 +26,129 @@ pub struct Editor {
     view_cache: std::cell::RefCell<
         std::collections::HashMap<(u64, u64, u32), (std::rc::Rc<dcli_tile::Surface>, (i32, i32))>,
     >,
+    /// 보존 프레임(마지막 뷰 합성 결과) — 팬은 스크롤, 편집은 손상 rect만 재합성.
+    frame: std::cell::RefCell<Option<Retained>>,
+    /// 마지막 프레임 이후 누적 손상(월드 좌표). 기본 full(첫 프레임 전체 합성).
+    damage: std::cell::RefCell<DamageLog>,
+    /// meta 벡터 아이템의 월드 경계 캐시 — (meta+offset 해시) → bbox. 컬링·그룹 tmp·
+    /// 손상영역이 표면보다 넓은 meta(그림자 등 set_props-only 흐름)를 안 놓치게 한다.
+    bounds_cache: std::cell::RefCell<std::collections::HashMap<u64, Option<(f32, f32, f32, f32)>>>,
+}
+
+/// 화면 보존 프레임 — 마지막으로 합성한 sRGB8 버퍼와 그 뷰 파라미터.
+/// 원점은 디바이스 정수 격자로 양자화되어 저장된다(스크롤·sub-rect 합성의 전제).
+struct Retained {
+    vx: f32,
+    vy: f32,
+    s: f32,
+    w: u32,
+    h: u32,
+    exclude: i64,
+    rgba: Vec<u8>,
+}
+
+/// 다음 프레임에 다시 그릴 영역 로그. 변이(apply/undo/redo) 시 전후 스냅샷 diff가 쌓는다.
+struct DamageLog {
+    full: bool,
+    rects: Vec<(f32, f32, f32, f32)>,
+}
+
+impl Default for DamageLog {
+    fn default() -> Self {
+        Self { full: true, rects: Vec::new() }
+    }
+}
+
+/// 노드 렌더 시그니처 — 변이 전후 스냅샷을 비교해 손상영역을 만든다(액션 종류 비의존:
+/// 새 op가 추가돼도 diff가 잡는다). proxy = 비identity 조상 그룹이 있으면 그 박스
+/// (자식 월드 AABB는 조상 트랜스폼 미적용이라 화면 위치가 다르다).
+#[derive(PartialEq, Clone)]
+struct NodeSig {
+    z: u32,
+    fields: u64,
+    aabb: Option<(f32, f32, f32, f32)>,
+    proxy: Option<(f32, f32, f32, f32)>,
+}
+
+fn snapshot_sigs(
+    doc: &dcli_model::Document,
+    extra: dcli_raster::AabbProvider,
+) -> std::collections::HashMap<u64, NodeSig> {
+    use std::hash::{Hash, Hasher};
+    fn walk(
+        doc: &dcli_model::Document,
+        node: &dcli_model::Node,
+        extra: dcli_raster::AabbProvider,
+        enclosing: Option<(f32, f32, f32, f32)>,
+        z: &mut u32,
+        out: &mut std::collections::HashMap<u64, NodeSig>,
+    ) {
+        use dcli_model::NodeKind;
+        *z += 1;
+        let aabb = dcli_raster::node_world_aabb_with(doc, node, extra);
+        let proxy = enclosing.or(aabb);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        node.visible.hash(&mut h);
+        node.opacity.to_bits().hash(&mut h);
+        std::mem::discriminant(&node.blend).hash(&mut h);
+        node.offset.hash(&mut h);
+        (node.scale.0.to_bits(), node.scale.1.to_bits()).hash(&mut h);
+        node.rotation.to_bits().hash(&mut h);
+        node.meta.hash(&mut h);
+        match &node.kind {
+            NodeKind::Paint { surface } => {
+                surface.0.hash(&mut h);
+                // 표면 내용 교체는 새 sid 발급(ReplacePaintSource)이 규약이고, 동일 sid
+                // 재기록(트림 restore)은 dims/offset이 함께 변한다 — dims까지 서명에 포함.
+                if let Some(s) = doc.pixels().get(*surface) {
+                    (s.width(), s.height()).hash(&mut h);
+                }
+            }
+            NodeKind::Group { children } => children.len().hash(&mut h),
+        }
+        out.insert(
+            node.id.0,
+            NodeSig { z: *z, fields: h.finish(), aabb, proxy },
+        );
+        if let NodeKind::Group { children } = &node.kind {
+            let child_enc = if node.is_identity_transform() { enclosing } else { enclosing.or(aabb) };
+            for cid in children {
+                if let Some(c) = doc.get(*cid) {
+                    walk(doc, c, extra, child_enc, z, out);
+                }
+            }
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    let mut z = 0u32;
+    for node in doc.iter_bottom_to_top() {
+        walk(doc, node, extra, None, &mut z, &mut out);
+    }
+    out
+}
+
+/// rgba 버퍼 내용 시프트: new[x,y] = old[x+ddx, y+ddy] — 행 단위 memmove(겹침 안전).
+fn scroll_rgba(buf: &mut [u8], w: i32, h: i32, ddx: i32, ddy: i32) {
+    let xs0 = ddx.max(0); // old에서 읽기 시작하는 x
+    let xd0 = (-ddx).max(0); // new에 쓰기 시작하는 x
+    let cw = (w - ddx.abs()).max(0) as usize;
+    if cw == 0 {
+        return;
+    }
+    let rows: Vec<i32> = if ddy >= 0 {
+        (0..h).collect() // 앞쪽(아직 안 덮어쓴) 행을 읽는다
+    } else {
+        (0..h).rev().collect()
+    };
+    for y in rows {
+        let sy = y + ddy;
+        if sy < 0 || sy >= h {
+            continue;
+        }
+        let src = ((sy * w + xs0) * 4) as usize;
+        let dst = ((y * w + xd0) * 4) as usize;
+        buf.copy_within(src..src + cw * 4, dst);
+    }
 }
 
 fn parse_depth(s: &str) -> Result<BitDepth, String> {
@@ -49,6 +172,9 @@ impl Editor {
             rgba: Vec::new(),
             dirty: true,
             view_cache: Default::default(),
+            frame: Default::default(),
+            damage: Default::default(),
+            bounds_cache: Default::default(),
         })
     }
 
@@ -56,9 +182,11 @@ impl Editor {
     pub fn apply_actions(&mut self, json: &str) -> Result<String, JsError> {
         let actions: Vec<Action> = serde_json::from_str(json)
             .map_err(|e| JsError::new(&format!("Action JSON 파싱: {e}")))?;
+        let before = self.begin_mutation();
         let res = dispatch::apply_batch(&mut self.hist, &actions, false);
         if res.ok {
             self.dirty = true;
+            self.end_mutation(before);
         }
         serde_json::to_string(&res).map_err(|e| JsError::new(&e.to_string()))
     }
@@ -73,17 +201,21 @@ impl Editor {
 
     /// 마지막 논리 단위(단발 op 또는 batch 전체)를 되돌린다. 빈 스택이면 Ok(false).
     pub fn undo(&mut self) -> Result<bool, JsError> {
+        let before = self.begin_mutation();
         let r = self.hist.undo().map_err(|e| JsError::new(&e.to_string()))?;
         if r {
             self.dirty = true;
+            self.end_mutation(before);
         }
         Ok(r)
     }
 
     pub fn redo(&mut self) -> Result<bool, JsError> {
+        let before = self.begin_mutation();
         let r = self.hist.redo().map_err(|e| JsError::new(&e.to_string()))?;
         if r {
             self.dirty = true;
+            self.end_mutation(before);
         }
         Ok(r)
     }
@@ -196,7 +328,7 @@ impl Editor {
 
     /// 화면(뷰) 합성 — 보이는 영역만 출력 해상도로 직접 그린다.
     /// (vx, vy) = 출력 (0,0)의 월드 좌표, s = 줌×렌더스케일(출력 1px = 1/s 문서 px).
-    /// 벡터 meta(도형/브러시/텍스트) 레이어는 뷰 배율로 재래스터 — 확대 계단현상 없음.
+    /// 보존 프레임 파이프라인 경유(팬=스크롤, 편집=손상 rect) — 전체 버퍼 복사 반환.
     pub fn composite_view_rgba(
         &self,
         vx: f32,
@@ -205,16 +337,12 @@ impl Editor {
         w: u32,
         h: u32,
     ) -> js_sys::Uint8ClampedArray {
-        let doc = &self.hist.doc;
-        // 디스플레이 전용 LUT 감마 블렌드(±1e-3) — export/PSD는 정확 경로를 쓴다.
-        let rgba = dcli_raster::composite_view_display(doc, vx, vy, s, w, h, &|n, sc| {
-            self.vector_render(doc, n, sc)
-        })
-        .to_srgb8_rgba_fast();
-        js_sys::Uint8ClampedArray::from(rgba.as_slice())
+        let _ = self.render_frame(vx, vy, s, w, h, -1);
+        let fr = self.frame.borrow();
+        js_sys::Uint8ClampedArray::from(fr.as_ref().map(|f| f.rgba.as_slice()).unwrap_or(&[]))
     }
 
-    /// 뷰 합성 + 노드 1개 화면 제외(텍스트 인라인 편집용).
+    /// 뷰 합성 + 노드 1개 화면 제외(텍스트 인라인 편집용). 문서 clone 없이 스킵한다.
     pub fn composite_view_rgba_excluding(
         &self,
         id: u32,
@@ -224,19 +352,193 @@ impl Editor {
         w: u32,
         h: u32,
     ) -> js_sys::Uint8ClampedArray {
-        use dcli_model::NodeId;
-        let mut doc = self.hist.doc.clone();
-        if let Some(n) = doc.get_mut(NodeId(id as u64)) {
-            n.visible = false;
+        let _ = self.render_frame(vx, vy, s, w, h, id as i32);
+        let fr = self.frame.borrow();
+        js_sys::Uint8ClampedArray::from(fr.as_ref().map(|f| f.rgba.as_slice()).unwrap_or(&[]))
+    }
+
+    /// 보존 프레임 파이프라인 — 바뀐 픽셀만 다시 만들고, 무엇이 바뀌었는지 알려준다.
+    ///
+    /// 반환(Int32Array): `[mode, ddx, ddy, n, (x,y,w,h)×n]`
+    /// - mode 0 = 변화 없음(업로드 불필요)
+    /// - mode 1 = 전체 재합성(버퍼 전부 업로드)
+    /// - mode 2 = 증분: 캔버스를 (−ddx,−ddy)로 시프트(drawImage)한 뒤 rect n개만
+    ///   putImageData로 업로드(노출 스트립 + 편집 손상영역).
+    ///
+    /// 원점은 디바이스 정수 격자로 양자화(≤0.5px, **표시 전용**) — sub-rect 합성이
+    /// 풀프레임과 픽셀 동일해지는 전제다. 버퍼는 frame_pixels()로 제로카피 접근.
+    pub fn render_frame(
+        &self,
+        vx: f32,
+        vy: f32,
+        s: f32,
+        w: u32,
+        h: u32,
+        exclude: i32,
+    ) -> js_sys::Int32Array {
+        let doc = &self.hist.doc;
+        if s <= 0.0 || w == 0 || h == 0 {
+            return js_sys::Int32Array::from(&[0i32, 0, 0, 0][..]);
         }
-        let rgba = {
-            let doc_ref = &doc;
-            dcli_raster::composite_view_display(doc_ref, vx, vy, s, w, h, &|n, sc| {
-                self.vector_render(doc_ref, n, sc)
-            })
-            .to_srgb8_rgba_fast()
+        let ex_id = if exclude < 0 {
+            None
+        } else {
+            Some(dcli_model::NodeId(exclude as u64))
         };
-        js_sys::Uint8ClampedArray::from(rgba.as_slice())
+        let vxq = (vx * s).round() / s;
+        let vyq = (vy * s).round() / s;
+        let cb = |n: &dcli_model::Node, sc: f32| self.vector_render(doc, n, sc);
+        let ab = |n: &dcli_model::Node| self.meta_world_bounds(doc, n);
+        let mut dmg = self.damage.borrow_mut();
+        let mut fro = self.frame.borrow_mut();
+
+        // 재사용 가능 조건 + 정수 디바이스 델타가 아니면 전체 재합성.
+        let mut incremental: Option<(i32, i32)> = None;
+        if let Some(f) = fro.as_ref() {
+            if f.s == s && f.w == w && f.h == h && f.exclude == exclude as i64 && !dmg.full {
+                let ddxf = (vxq - f.vx) * s;
+                let ddyf = (vyq - f.vy) * s;
+                let (ddx, ddy) = (ddxf.round() as i32, ddyf.round() as i32);
+                if (ddxf - ddx as f32).abs() < 1e-2
+                    && (ddyf - ddy as f32).abs() < 1e-2
+                    && ddx.unsigned_abs() < w
+                    && ddy.unsigned_abs() < h
+                {
+                    incremental = Some((ddx, ddy));
+                }
+            }
+        }
+        let Some((ddx, ddy)) = incremental else {
+            let sfc = dcli_raster::composite_view_display(doc, vxq, vyq, s, w, h, ex_id, &ab, &cb);
+            let rgba = sfc.to_srgb8_rgba_fast();
+            *fro = Some(Retained {
+                vx: vxq,
+                vy: vyq,
+                s,
+                w,
+                h,
+                exclude: exclude as i64,
+                rgba,
+            });
+            dmg.full = false;
+            dmg.rects.clear();
+            return js_sys::Int32Array::from(&[1i32, 0, 0, 0][..]);
+        };
+
+        let f = fro.as_mut().expect("incremental은 frame 존재가 전제");
+        let (wi, hi) = (w as i32, h as i32);
+        let mut rects: Vec<(i32, i32, i32, i32)> = Vec::new();
+        if ddx != 0 || ddy != 0 {
+            scroll_rgba(&mut f.rgba, wi, hi, ddx, ddy);
+            f.vx = vxq;
+            f.vy = vyq;
+            // 노출 스트립(세로 + 가로, 코너 중복은 무해).
+            if ddx > 0 {
+                rects.push((wi - ddx, 0, ddx, hi));
+            } else if ddx < 0 {
+                rects.push((0, 0, -ddx, hi));
+            }
+            if ddy > 0 {
+                rects.push((0, hi - ddy, wi, ddy));
+            } else if ddy < 0 {
+                rects.push((0, 0, wi, -ddy));
+            }
+        }
+        // 편집 손상영역(월드) → 디바이스 rect(±4px: 컬링/재래스터 마진과 동일).
+        let pad = 4i32;
+        let mut drects: Vec<(i32, i32, i32, i32)> = Vec::new();
+        for r in dmg.rects.drain(..) {
+            let x0 = (((r.0 - f.vx) * s).floor() as i32 - pad).clamp(0, wi);
+            let y0 = (((r.1 - f.vy) * s).floor() as i32 - pad).clamp(0, hi);
+            let x1 = (((r.2 - f.vx) * s).ceil() as i32 + pad).clamp(0, wi);
+            let y1 = (((r.3 - f.vy) * s).ceil() as i32 + pad).clamp(0, hi);
+            if x1 > x0 && y1 > y0 {
+                drects.push((x0, y0, x1 - x0, y1 - y0));
+            }
+        }
+        if drects.len() > 8 {
+            // 너무 잘게 쪼개졌으면 합집합 1개로(putImageData 횟수 제한).
+            let u = drects.iter().fold((wi, hi, 0, 0), |a, r| {
+                (a.0.min(r.0), a.1.min(r.1), a.2.max(r.0 + r.2), a.3.max(r.1 + r.3))
+            });
+            drects = vec![(u.0, u.1, u.2 - u.0, u.3 - u.1)];
+        }
+        rects.extend(drects);
+        // 겹침 병합(낭비 제한): 같은 영역 중복 재합성 방지(전후 box 동일한 props 편집이
+        // rect 2개를 만드는 케이스). 합집합이 면적 합의 1.3배 이하일 때만 합친다 —
+        // 가는 스트립 + 작은 손상 rect를 거대한 union으로 만들지 않는다.
+        let mut merged: Vec<(i32, i32, i32, i32)> = Vec::new();
+        for r in rects {
+            let mut cur = r;
+            loop {
+                let mut absorbed = false;
+                merged.retain(|m| {
+                    let overlap = cur.0 < m.0 + m.2
+                        && m.0 < cur.0 + cur.2
+                        && cur.1 < m.1 + m.3
+                        && m.1 < cur.1 + cur.3;
+                    if !overlap {
+                        return true;
+                    }
+                    let ux0 = cur.0.min(m.0);
+                    let uy0 = cur.1.min(m.1);
+                    let ux1 = (cur.0 + cur.2).max(m.0 + m.2);
+                    let uy1 = (cur.1 + cur.3).max(m.1 + m.3);
+                    let ua = (ux1 - ux0) as i64 * (uy1 - uy0) as i64;
+                    let sum = cur.2 as i64 * cur.3 as i64 + m.2 as i64 * m.3 as i64;
+                    if ua * 10 <= sum * 13 {
+                        cur = (ux0, uy0, ux1 - ux0, uy1 - uy0);
+                        absorbed = true;
+                        false // 흡수된 기존 rect 제거
+                    } else {
+                        true
+                    }
+                });
+                if !absorbed {
+                    break;
+                }
+            }
+            merged.push(cur);
+        }
+        let rects = merged;
+        if rects.is_empty() {
+            return js_sys::Int32Array::from(&[0i32, 0, 0, 0][..]);
+        }
+        for &(rx, ry, rw, rh) in &rects {
+            let sub = dcli_raster::composite_view_display(
+                doc,
+                f.vx + rx as f32 / s,
+                f.vy + ry as f32 / s,
+                s,
+                rw as u32,
+                rh as u32,
+                ex_id,
+                &ab,
+                &cb,
+            );
+            let bytes = sub.to_srgb8_rgba_fast();
+            let rww = rw as usize * 4;
+            for row in 0..rh as usize {
+                let dst = ((ry as usize + row) * w as usize + rx as usize) * 4;
+                f.rgba[dst..dst + rww].copy_from_slice(&bytes[row * rww..(row + 1) * rww]);
+            }
+        }
+        let mut out = vec![2i32, ddx, ddy, rects.len() as i32];
+        for r in &rects {
+            out.extend_from_slice(&[r.0, r.1, r.2, r.3]);
+        }
+        js_sys::Int32Array::from(&out[..])
+    }
+
+    /// 보존 프레임 버퍼(sRGB8 RGBA, w×h×4)의 **제로카피 뷰**.
+    ///
+    /// 계약: 반환 직후 putImageData까지 다른 wasm 호출 금지 — wasm 메모리가 성장하면
+    /// 뷰의 ArrayBuffer가 detach된다. 프레임이 없으면 길이 0.
+    pub fn frame_pixels(&self) -> js_sys::Uint8ClampedArray {
+        match &*self.frame.borrow() {
+            Some(f) => unsafe { js_sys::Uint8ClampedArray::view(&f.rgba) },
+            None => js_sys::Uint8ClampedArray::new_with_length(0),
+        }
     }
 
     /// 뷰 합성 결과를 PNG로 — 루프 엔지니어링 시각 검수 산출물용(render_scene.mjs).
@@ -250,7 +552,8 @@ impl Editor {
     ) -> Result<Vec<u8>, JsError> {
         let doc = &self.hist.doc;
         // 브라우저 표시와 같은 디스플레이 블렌드 경로(시각 검수 산출물의 대표성).
-        let rgba = dcli_raster::composite_view_display(doc, vx, vy, s, w, h, &|n, sc| {
+        let ab = |n: &dcli_model::Node| self.meta_world_bounds(doc, n);
+        let rgba = dcli_raster::composite_view_display(doc, vx, vy, s, w, h, None, &ab, &|n, sc| {
             self.vector_render(doc, n, sc)
         })
         .to_srgb8_rgba();
@@ -285,6 +588,7 @@ impl Editor {
             .map_err(|e| JsError::new(&e))?;
         self.view_cache.borrow_mut().clear();
         self.dirty = true;
+        self.damage.borrow_mut().full = true; // 글꼴 교체 = 텍스트 전부 재래스터.
         Ok(())
     }
 
@@ -427,6 +731,9 @@ impl Editor {
             rgba: Vec::new(),
             dirty: true,
             view_cache: Default::default(),
+            frame: Default::default(),
+            damage: Default::default(),
+            bounds_cache: Default::default(),
         })
     }
 
@@ -439,6 +746,100 @@ impl Editor {
 }
 
 impl Editor {
+    /// identity Paint 노드의 meta 벡터 아이템 **월드 경계**(그림자/스트로크 마진 포함).
+    ///
+    /// 컬링·그룹 tmp·손상영역이 표면 밖으로 뻗은 meta(set_props meta-only 흐름)를
+    /// 놓치지 않게 한다. (meta+offset 해시) 키로 캐시 — 파싱은 변경 시에만.
+    fn meta_world_bounds(
+        &self,
+        doc: &dcli_model::Document,
+        node: &dcli_model::Node,
+    ) -> Option<(f32, f32, f32, f32)> {
+        use std::hash::{Hash, Hasher};
+        node.meta.as_deref()?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        node.meta.hash(&mut h);
+        node.offset.hash(&mut h);
+        let key = h.finish();
+        if let Some(v) = self.bounds_cache.borrow().get(&key) {
+            return *v;
+        }
+        let b = vector_items_of(doc, node)
+            .as_deref()
+            .and_then(dcli_raster::view_items_bounds);
+        let mut cache = self.bounds_cache.borrow_mut();
+        if cache.len() > 1024 {
+            cache.clear();
+        }
+        cache.insert(key, b);
+        b
+    }
+
+    /// 변이 직전 호출 — diff용 사전 스냅샷. 이미 full 손상이면 스냅샷 생략(None).
+    fn begin_mutation(
+        &self,
+    ) -> Option<(std::collections::HashMap<u64, NodeSig>, (u32, u32))> {
+        if self.damage.borrow().full {
+            return None;
+        }
+        let doc = &self.hist.doc;
+        let sigs = snapshot_sigs(doc, &|n| self.meta_world_bounds(doc, n));
+        Some((sigs, (doc.width, doc.height)))
+    }
+
+    /// 변이 직후 호출 — 전후 시그니처 diff로 손상 rect를 누적한다.
+    fn end_mutation(
+        &self,
+        before: Option<(std::collections::HashMap<u64, NodeSig>, (u32, u32))>,
+    ) {
+        let mut dmg = self.damage.borrow_mut();
+        if dmg.full {
+            return;
+        }
+        let Some((before, bdims)) = before else {
+            dmg.full = true;
+            dmg.rects.clear();
+            return;
+        };
+        let doc = &self.hist.doc;
+        if bdims != (doc.width, doc.height) {
+            dmg.full = true;
+            dmg.rects.clear();
+            return;
+        }
+        let after = snapshot_sigs(doc, &|n| self.meta_world_bounds(doc, n));
+        for (id, b) in &before {
+            match after.get(id) {
+                None => {
+                    if let Some(r) = b.proxy {
+                        dmg.rects.push(r);
+                    }
+                }
+                Some(a) if a != b => {
+                    if let Some(r) = b.proxy {
+                        dmg.rects.push(r);
+                    }
+                    if let Some(r) = a.proxy {
+                        dmg.rects.push(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (id, a) in &after {
+            if !before.contains_key(id) {
+                if let Some(r) = a.proxy {
+                    dmg.rects.push(r);
+                }
+            }
+        }
+        // 폭주 방지: 변이 폭이 크면(에이전트 대량 배치) 전체 재합성이 더 싸다.
+        if dmg.rects.len() > 32 {
+            dmg.full = true;
+            dmg.rects.clear();
+        }
+    }
+
     /// RGBA 바이트 → PNG 인코딩(공용).
     fn encode_png(&self, rgba: Vec<u8>, w: u32, h: u32) -> Result<Vec<u8>, JsError> {
         let mut png = Vec::new();
@@ -455,9 +856,11 @@ impl Editor {
         Ok(png)
     }
 
-    /// 벡터 레이어 재래스터(+캐시) — **전 배율**. 확대는 계단 제거, 축소는 타깃 해상도
-    /// AA(4-tap 샘플의 줌아웃 계단 제거). 키 = (표면 id, meta+offset 해시, scale bits):
-    /// 편집(표면 교체)·이동·meta·줌 변경 시 자연 무효화, 같은 줌의 팬·재합성은 블릿만.
+    /// 뷰 배율 레이어 캐시 — **전 배율**. 벡터 meta는 재래스터(확대 계단 제거, 축소
+    /// 타깃 해상도 AA), 비벡터(이미지) 레이어는 스케일 리샘플 1회 → 이후 정수 블릿
+    /// (매 프레임 픽셀당 bilinear/슈퍼샘플 제거 — PSD/사진 문서의 지배 비용).
+    /// 키 = (표면 id, meta+offset 해시, scale bits): 편집(표면 교체)·이동·meta·줌
+    /// 변경 시 자연 무효화, 같은 줌의 팬·재합성은 블릿만.
     fn vector_render(
         &self,
         doc: &dcli_model::Document,
@@ -468,17 +871,37 @@ impl Editor {
         let dcli_model::NodeKind::Paint { surface } = node.kind else {
             return None;
         };
-        let meta = node.meta.as_deref()?;
         let mut hsh = std::collections::hash_map::DefaultHasher::new();
-        meta.hash(&mut hsh);
-        node.offset.hash(&mut hsh); // 이동 시 월드 좌표가 바뀌므로 키에 포함.
+        node.meta.hash(&mut hsh);
+        node.offset.hash(&mut hsh); // 이동 시 월드 좌표(리샘플 위상)가 바뀌므로 키에 포함.
         let key = (surface.0, hsh.finish(), s.to_bits());
         if let Some(hit) = self.view_cache.borrow().get(&key) {
             return Some(hit.clone());
         }
-        let items = vector_items_of(doc, node)?;
-        let (sfc, origin) = dcli_raster::render_view_items(&items, s, 16_000_000)?;
-        let entry = (std::rc::Rc::new(sfc), origin);
+        let entry = if let Some(items) = vector_items_of(doc, node) {
+            let (sfc, origin) = dcli_raster::render_view_items(&items, s, 16_000_000)?;
+            (std::rc::Rc::new(sfc), origin)
+        } else {
+            // 이미지(비벡터) 레이어: composite_layer_view와 동일한 샘플 수학으로 뷰
+            // 배율 표면을 만들어 둔다. s=1은 정수 시프트 직행 경로가 있으므로 제외.
+            if (s - 1.0).abs() < 1e-6 {
+                return None;
+            }
+            // 고수위 가드: 캐시가 이미 가득이면 라이브 샘플 폴백(뷰포트 비례 비용).
+            // clear() 재삽입 스래시(매 프레임 전 레이어 리샘플)가 라이브보다 나쁘다.
+            let total_px: u64 = self
+                .view_cache
+                .borrow()
+                .values()
+                .map(|(s, _)| s.width() as u64 * s.height() as u64)
+                .sum();
+            if total_px > 24_000_000 {
+                return None;
+            }
+            let src = doc.pixels().get(surface)?;
+            let (sfc, origin) = scale_raster_for_view(src, node.offset, s, 16_000_000)?;
+            (std::rc::Rc::new(sfc), origin)
+        };
         let mut cache = self.view_cache.borrow_mut();
         // 예산: 엔트리 수 + 총 픽셀(16B/px — 큰 표면 몇 장이면 수백 MB). 초과 시 전체
         // 비움(단순·안전): 다음 프레임 가시 항목만 다시 채워져 working set으로 수렴한다.
@@ -493,6 +916,90 @@ impl Editor {
         cache.insert(key, entry.clone());
         Some(entry)
     }
+}
+
+/// 이미지(비벡터) 레이어를 뷰 배율 s로 리샘플한 표면 + 디바이스 좌표 원점(월드×s).
+///
+/// composite_layer_view(identity)와 동일한 샘플 수학(픽셀중심 bilinear, s<0.75는
+/// 2×2 슈퍼샘플, 격자 밖 투명)을 위상(offset×s의 소수부)까지 그대로 굽는다 —
+/// 뷰 원점이 디바이스 정수 격자에 있을 때(setView 스냅/프레임 양자화) 라이브 샘플과
+/// 일치한다. 결과 픽셀 수가 max_px를 넘으면 None(라이브 경로 폴백 — 뷰포트가 잘라줌).
+fn scale_raster_for_view(
+    src: &dcli_tile::Surface,
+    offset: (i32, i32),
+    s: f32,
+    max_px: u64,
+) -> Option<(dcli_tile::Surface, (i32, i32))> {
+    use dcli_color::LinearPremul;
+    if s <= 0.0 {
+        return None;
+    }
+    let (sw, sh) = (src.width() as i32, src.height() as i32);
+    let (ox, oy) = (offset.0 as f32, offset.1 as f32);
+    // 디바이스 그리드 범위(+1px 필터 서포트 마진).
+    let x0 = (ox * s).floor() as i32 - 1;
+    let y0 = (oy * s).floor() as i32 - 1;
+    let x1 = ((ox + sw as f32) * s).ceil() as i32 + 1;
+    let y1 = ((oy + sh as f32) * s).ceil() as i32 + 1;
+    let w = (x1 - x0).max(1) as u32;
+    let h = (y1 - y0).max(1) as u32;
+    if w as u64 * h as u64 > max_px {
+        return None;
+    }
+    let px = src.pixels();
+    let zero = LinearPremul { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    let tap = |ix: i32, iy: i32| -> LinearPremul {
+        if ix < 0 || iy < 0 || ix >= sw || iy >= sh {
+            zero
+        } else {
+            px[(iy * sw + ix) as usize]
+        }
+    };
+    let lerp = |a: LinearPremul, b: LinearPremul, t: f32| LinearPremul {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    };
+    let inv = 1.0 / s;
+    let sample_at = |dx: f32, dy: f32| -> LinearPremul {
+        let fx = dx * inv - ox - 0.5;
+        let fy = dy * inv - oy - 0.5;
+        let ix = fx.floor() as i32;
+        let iy = fy.floor() as i32;
+        let tx = fx - ix as f32;
+        let ty = fy - iy as f32;
+        lerp(
+            lerp(tap(ix, iy), tap(ix + 1, iy), tx),
+            lerp(tap(ix, iy + 1), tap(ix + 1, iy + 1), tx),
+            ty,
+        )
+    };
+    let supersample = s < 0.75;
+    let mut out = dcli_tile::Surface::new(w, h);
+    let dst = out.pixels_mut();
+    for j in 0..h as i32 {
+        for i in 0..w as i32 {
+            let cx = (x0 + i) as f32;
+            let cy = (y0 + j) as f32;
+            let v = if supersample {
+                let a = sample_at(cx + 0.25, cy + 0.25);
+                let b = sample_at(cx + 0.75, cy + 0.25);
+                let c = sample_at(cx + 0.25, cy + 0.75);
+                let d = sample_at(cx + 0.75, cy + 0.75);
+                LinearPremul {
+                    r: (a.r + b.r + c.r + d.r) * 0.25,
+                    g: (a.g + b.g + c.g + d.g) * 0.25,
+                    b: (a.b + b.b + c.b + d.b) * 0.25,
+                    a: (a.a + b.a + c.a + d.a) * 0.25,
+                }
+            } else {
+                sample_at(cx + 0.5, cy + 0.5)
+            };
+            dst[(j as u32 * w + i as u32) as usize] = v;
+        }
+    }
+    Some((out, (x0, y0)))
 }
 
 /// node.meta가 기술하는 벡터 아이템들을 **월드 좌표**로 복원한다(뷰 재래스터용).

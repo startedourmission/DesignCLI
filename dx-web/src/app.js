@@ -41,10 +41,12 @@ export class Renderer {
   setView(x, y, zoom, cssW, cssH, renderScale) {
     const w = Math.max(1, Math.round(cssW * renderScale));
     const h = Math.max(1, Math.round(cssH * renderScale));
-    // 디바이스 1:1(s=1)에서 정수 시프트 비트 경로를 타도록 월드 원점을 양자화.
+    // 월드 원점을 **디바이스 정수 격자**로 스냅: 팬 델타가 항상 정수 디바이스 px이 되어
+    // 보존 프레임이 스크롤 경로(행 memmove + 노출 스트립만 재합성)를 타고, 블릿 위상이
+    // 고정돼 서브픽셀 리샘플 블러도 없다. (s=1 정수 시프트 비트 경로도 이 스냅에 포함.)
     const s = zoom * renderScale;
-    const qx = Math.abs(s - 1) < 1e-6 ? Math.floor(x) : x;
-    const qy = Math.abs(s - 1) < 1e-6 ? Math.floor(y) : y;
+    const qx = Math.round(x * s) / s;
+    const qy = Math.round(y * s) / s;
     const next = { x: qx, y: qy, zoom, cssW, cssH, renderScale, w, h };
     const o = this.view;
     this.view = next;
@@ -81,11 +83,40 @@ export class Renderer {
     this._raf = 0;
     if (!this._dirty) return;
     this._dirty = false;
-    // 매 프레임 새 복사본을 받는다(메모리 detach 무관 — wasm이 소유 복사본 반환).
-    // 신형 wasm이면 화면 공간 합성(벡터 재래스터 포함), 아니면 종전 영역 합성 폴백.
     if (this.view && this.hasViewComposite()) {
       const v = this.view;
       const s = v.zoom * v.renderScale;
+      // 보존 프레임 경로: wasm이 바뀐 픽셀만 다시 만들고 어디가 바뀌었는지 알려준다.
+      // 팬 = 캔버스 자체 시프트 + 노출 스트립 업로드, 편집 = 손상 rect만 업로드.
+      if (typeof this.editor.render_frame === "function") {
+        const ex = this.excludeId != null ? this.excludeId : -1;
+        const d = this.editor.render_frame(v.x, v.y, s, v.w, v.h, ex);
+        const mode = d[0];
+        if (mode === 0) return; // 변화 없음 — 업로드 생략.
+        // 제로카피 뷰 — 이 뒤로 putImageData까지 wasm 호출 금지(메모리 성장 시 detach).
+        const px = this.editor.frame_pixels();
+        if (px.length !== v.w * v.h * 4) return;
+        const img = new ImageData(px, v.w, v.h);
+        if (mode === 1) {
+          this.ctx.putImageData(img, 0, 0);
+          return;
+        }
+        const dx = d[1], dy = d[2], n = d[3];
+        if (dx || dy) {
+          // 원점이 (dx,dy) 디바이스px 이동 → 기존 픽셀은 (−dx,−dy)로 시프트.
+          // 'copy'로 그려 시프트 결과만 남긴다(source-over면 반투명 픽셀이 이중 블렌드).
+          const op = this.ctx.globalCompositeOperation;
+          this.ctx.globalCompositeOperation = "copy";
+          this.ctx.drawImage(this.canvas, -dx, -dy);
+          this.ctx.globalCompositeOperation = op;
+        }
+        for (let i = 0; i < n; i++) {
+          const o = 4 + i * 4;
+          this.ctx.putImageData(img, 0, 0, d[o], d[o + 1], d[o + 2], d[o + 3]);
+        }
+        return;
+      }
+      // 구형 wasm 폴백: 전체 프레임 복사본.
       const canExclude = typeof this.editor.composite_view_rgba_excluding === "function";
       const buf = this.excludeId != null && canExclude
         ? this.editor.composite_view_rgba_excluding(this.excludeId, v.x, v.y, s, v.w, v.h)
