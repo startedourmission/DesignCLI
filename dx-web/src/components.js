@@ -2337,13 +2337,16 @@ class DxProps extends LitElement {
       </div>
       ${(() => {
         // ── 공용 색+알파 한 줄 컨트롤 ──
+        // 숫자 입력은 다른 필드(W/X/Y)와 같은 cell+접두 라벨 패턴 — 맨숫자 금지(의미 불명).
         const colorAlpha = (rgba, onChange) => html`
           <div class="colorrow">
-            <input type="color" .value=${HEX(rgba)}
+            <input type="color" title="색상" .value=${HEX(rgba)}
               @change=${(e) => onChange(RGBA(e.target.value, (rgba[3] ?? 255) / 255))} />
-            <input type="number" min="0" max="100" step="1" title="불투명도 %"
-              .value=${String(Math.round(((rgba[3] ?? 255) / 255) * 100))}
-              @change=${(e) => { const a = Math.max(0, Math.min(100, +e.target.value || 0)) / 100; onChange([rgba[0], rgba[1], rgba[2], Math.round(a * 255)]); }} />
+            <div class="cell" title="불투명도 %"><span>%</span>
+              <input type="number" min="0" max="100" step="1"
+                .value=${String(Math.round(((rgba[3] ?? 255) / 255) * 100))}
+                @change=${(e) => { const a = Math.max(0, Math.min(100, +e.target.value || 0)) / 100; onChange([rgba[0], rgba[1], rgba[2], Math.round(a * 255)]); }} />
+            </div>
           </div>`;
         // ── 그라데이션 헬퍼(bbox 상대 0~1, 2-stop) ──
         const mkGrad = (deg, radial, c1, c2) => {
