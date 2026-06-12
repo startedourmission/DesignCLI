@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- 브라우저 스모크 — check.sh 7단계가 헤드리스 크롬으로 연다.
+     Node 게이트가 못 보는 브라우저 전용 경로(실제 Renderer._frame: ImageData 브랜드,
+     putImageData 더티렉트, drawImage 'copy' 스크롤 시프트)를 실제 캔버스로 검증한다.
+     결과는 console.log 한 줄: "SMOKE PASS ..." / "SMOKE FAIL ..." (stderr 로깅으로 수집). -->
+<meta charset="utf-8">
+<title>dx smoke</title>
+<script type="module">
+  import init, { Editor } from "./src/wasm/pkg/dcli_wasm.js";
+  import { Renderer } from "./src/app.js";
+
+  const fail = (msg) => { console.log(`SMOKE FAIL ${msg}`); };
+  window.addEventListener("error", (e) => fail(`uncaught: ${e.message} @${e.filename}:${e.lineno}`));
+  window.addEventListener("unhandledrejection", (e) => fail(`rejection: ${e.reason}`));
+
+  try {
+    await init();
+    const ed = new Editor(400, 300, "u8");
+    // 마지막 delta mode 관측용 스파이(인스턴스 프로퍼티가 프로토타입을 가린다).
+    let lastMode = -1;
+    const origRF = ed.render_frame.bind(ed);
+    ed.render_frame = (...a) => { const d = origRF(...a); lastMode = d[0]; return d; };
+
+    const J = JSON.stringify;
+    const r1 = JSON.parse(ed.apply_actions(J([
+      { // 벡터 rect(문서 전체 빨강) — meta 재래스터 경로.
+        op: "add_paint_layer", name: "bg", bind: "bg",
+        source: { from: "shapes", items: [{ shape: "rect", x: 0, y: 0, w: 400, h: 300, rgba: [255, 0, 0, 255] }] },
+      },
+      { op: "set_props", id: { bind: "bg" }, patch: { meta: J({ type: "shape", shape: "rect", item: { shape: "rect", x: 0, y: 0, w: 400, h: 300, rgba: [255, 0, 0, 255] }, fill: [255, 0, 0, 255], rgba: [255, 0, 0, 255], stroke: null, strokeWidth: 0 }) } },
+      { // meta 없는 초록 레이어 — 래스터(이미지) 경로.
+        op: "add_paint_layer", name: "img",
+        source: { from: "shapes", items: [{ shape: "rect", x: 50, y: 40, w: 100, h: 80, rgba: [0, 200, 0, 255] }] },
+      },
+    ])));
+    if (!r1.ok) { fail(`장면 생성: ${J(r1)}`); throw 0; }
+    const imgId = JSON.parse(ed.layers()).layers.find((l) => l.name === "img").id;
+
+    const canvas = document.createElement("canvas");
+    document.body.appendChild(canvas);
+    const r = new Renderer(ed, canvas);
+    const Z = 1.25, W = 480, H = 360; // 버퍼 600×450 디바이스px.
+    const px = (x, y) => Array.from(r.ctx.getImageData(x, y, 1, 1).data);
+    const painted = () => {
+      const d = r.ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let n = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] !== 0) n++;
+      return n / (d.length / 4);
+    };
+
+    // 1) 초기 풀 프레임 — ImageData 생성/업로드 자체가 동작해야 한다(브랜드 회귀 감시).
+    r.setView(-20, -15, Z, W, H, 1);
+    r._frame();
+    const cover = painted();
+    const bgPx = px(300, 225), imgPx = px(150, 100);
+    if (cover < 0.5) { fail(`풀 프레임 칠해짐 ${(cover * 100).toFixed(1)}% < 50%`); throw 0; }
+    if (!(bgPx[0] > 200 && bgPx[1] < 60)) { fail(`bg 픽셀(300,225)=${bgPx} — 빨강 아님`); throw 0; }
+    if (!(imgPx[1] > 150 && imgPx[0] < 60)) { fail(`img 픽셀(150,100)=${imgPx} — 초록 아님`); throw 0; }
+    const fullMode = lastMode;
+
+    // 2) 무변경 재호출 — mode 0(업로드 생략)이어야 한다.
+    r.markDirty(); r._frame();
+    const noopMode = lastMode;
+    if (noopMode !== 0) { fail(`무변경 mode=${noopMode} (기대 0)`); throw 0; }
+
+    // 3) 팬 +24 디바이스px — 스크롤 경로(mode 2): 기존 픽셀이 정확히 24px 왼쪽으로.
+    const before = px(150, 100);
+    r.setView(-20 + 24 / Z, -15, Z, W, H, 1);
+    r._frame();
+    const panMode = lastMode;
+    const after = px(150 - 24, 100);
+    if (String(before) !== String(after)) { fail(`팬 시프트 불일치 ${before} → ${after}`); throw 0; }
+
+    // 4) 편집 — damage 경로: img 영역은 변하고 먼 bg 픽셀은 그대로.
+    const farBefore = px(40, 380);
+    ed.apply_actions(J([{ op: "set_props", id: { node: imgId }, patch: { opacity: 0.45 } }]));
+    r.markDirty(); r._frame();
+    const editMode = lastMode;
+    const imgAfter = px(150 - 24, 100), farAfter = px(40, 380);
+    if (String(imgAfter) === String(after)) { fail(`편집 후 img 픽셀 불변 ${imgAfter}`); throw 0; }
+    if (String(farBefore) !== String(farAfter)) { fail(`편집이 먼 픽셀을 건드림 ${farBefore} → ${farAfter}`); throw 0; }
+
+    console.log(`SMOKE PASS cover=${(cover * 100).toFixed(0)}% modes full=${fullMode} noop=${noopMode} pan=${panMode} edit=${editMode}`);
+  } catch (e) {
+    if (e !== 0) fail(`예외: ${e?.message || e}`);
+  }
+</script>
