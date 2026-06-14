@@ -33,7 +33,7 @@ fn create_add_export_roundtrip() {
     let dir = tmp("roundtrip");
     let d = doc_arg(&dir);
 
-    let (_, _, ok) = run(&["--doc", &d, "doc", "create", "--w", "64", "--h", "64"]);
+    let (_, _, ok) = run(&["--doc", &d, "doc", "create"]);
     assert!(ok, "doc create 실패");
     assert!(dir.join("doc.json").is_file());
 
@@ -53,13 +53,13 @@ fn create_add_export_roundtrip() {
 fn json_output_is_parseable() {
     let dir = tmp("json");
     let d = doc_arg(&dir);
-    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+    run(&["--doc", &d, "doc", "create"]);
     run(&["--doc", &d, "layer", "add", "--name", "a", "--fill", "1,2,3,255"]);
 
     let (stdout, _, ok) = run(&["--doc", &d, "--json", "doc", "info"]);
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("유효한 JSON 아님");
-    assert_eq!(v["w"], 8);
+    assert_eq!(v["w"], dcli_model::Document::DEFAULT_SIZE.0, "명목 기본 크기");
     assert_eq!(v["layers"], 1);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -69,7 +69,7 @@ fn json_output_is_parseable() {
 fn dry_run_does_not_persist() {
     let dir = tmp("dryrun");
     let d = doc_arg(&dir);
-    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+    run(&["--doc", &d, "doc", "create"]);
 
     // dry-run으로 레이어 추가 → applied:false, 실제 저장 안 됨.
     let (stdout, _, ok) = run(&[
@@ -91,7 +91,7 @@ fn dry_run_does_not_persist() {
 fn missing_layer_errors_to_stderr_with_nonzero_exit() {
     let dir = tmp("err");
     let d = doc_arg(&dir);
-    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+    run(&["--doc", &d, "doc", "create"]);
 
     let (stdout, stderr, ok) = run(&["--doc", &d, "--json", "layer", "get", "999"]);
     assert!(!ok, "없는 레이어 조회는 exit!=0 이어야");
@@ -105,7 +105,7 @@ fn missing_layer_errors_to_stderr_with_nonzero_exit() {
 fn export_is_deterministic() {
     let dir = tmp("det");
     let d = doc_arg(&dir);
-    run(&["--doc", &d, "doc", "create", "--w", "32", "--h", "32"]);
+    run(&["--doc", &d, "doc", "create"]);
     run(&["--doc", &d, "layer", "add", "--name", "bg", "--fill", "200,100,50,255"]);
     run(&["--doc", &d, "layer", "add", "--name", "top", "--fill", "100,100,100,200"]);
     run(&["--doc", &d, "blend", "set", "1", "multiply"]);
@@ -126,7 +126,7 @@ fn export_is_deterministic() {
 fn save_load_preserves_structure_and_pixels() {
     let dir = tmp("persist");
     let d = doc_arg(&dir);
-    run(&["--doc", &d, "doc", "create", "--w", "16", "--h", "16"]);
+    run(&["--doc", &d, "doc", "create"]);
     run(&["--doc", &d, "layer", "add", "--name", "bg", "--fill", "10,20,30,255"]);
 
     // 첫 export.
@@ -158,7 +158,7 @@ fn delete_then_save_removes_orphan_bin() {
     // 검증 #1 회귀 가드: 레이어 삭제 후 저장하면 그 픽셀 .bin이 디스크에서 사라져야.
     let dir = tmp("orphan");
     let d = doc_arg(&dir);
-    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+    run(&["--doc", &d, "doc", "create"]);
     run(&["--doc", &d, "layer", "add", "--name", "a", "--fill", "1,2,3,255"]);
     run(&["--doc", &d, "layer", "add", "--name", "b", "--fill", "4,5,6,255"]);
     assert_eq!(count_bins(&dir), 2, "레이어 2개 → .bin 2개");
@@ -178,7 +178,7 @@ fn save_is_atomic_no_partial_dir() {
     std::fs::create_dir_all(&parent).unwrap();
     let dir = parent.join("doc.dxdoc");
     let d = doc_arg(&dir);
-    run(&["--doc", &d, "doc", "create", "--w", "8", "--h", "8"]);
+    run(&["--doc", &d, "doc", "create"]);
     run(&["--doc", &d, "layer", "add", "--name", "a", "--fill", "1,2,3,255"]);
 
     // 격리 부모에 .tmp-/.bak 잔여물이 없어야.

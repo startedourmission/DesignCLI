@@ -50,6 +50,25 @@ function ref(id) {
 }
 // 자유곡선(브러시) — points = [x0,y0,x1,y1,...].
 export const path = (points, width, rgba) => ({ shape: "path", points, width, rgba });
+// 정다각형 — 외접 타원(cx,cy,rx,ry)에 내접, sides=3~64(위 꼭짓점 시작).
+export const polygon = (cx, cy, rx, ry, sides, rgba) => ({ shape: "polygon", cx, cy, rx, ry, sides, rgba });
+export const strokePolygon = (cx, cy, rx, ry, sides, width, rgba) => ({ shape: "stroke_polygon", cx, cy, rx, ry, sides, width, rgba });
+// 자유 다각형(닫힌 채움) — 꼭짓점 points = [x0,y0,...], 오목 허용. 정다각형 점 편집 시 변환 형태.
+export const polygonPath = (points, rgba) => ({ shape: "polygon_path", points, rgba });
+export const strokePolygonPath = (points, width, rgba) => ({ shape: "stroke_polygon_path", points, width, rgba });
+// 부드러운 곡선 — 앵커 points = [x0,y0,...]를 **지나는** Catmull-Rom 스트로크.
+export const curve = (points, width, rgba) => ({ shape: "curve", points, width, rgba });
+
+/** 정다각형 꼭짓점 [x,y,...] — 엔진 regular_polygon_points 미러(위 꼭짓점 시작, 3~64). */
+export const polygonPoints = (cx, cy, rx, ry, sides) => {
+  const n = Math.max(3, Math.min(64, Math.round(sides) || 5));
+  const pts = [];
+  for (let k = 0; k < n; k++) {
+    const a = -Math.PI / 2 + (k * 2 * Math.PI) / n;
+    pts.push(cx + rx * Math.cos(a), cy + ry * Math.sin(a));
+  }
+  return pts;
+};
 // 그룹 묶기/해제.
 export const groupLayers = (ids, name = "group") => ({ op: "group_layers", ids: ids.map(ref), name });
 export const ungroup = (id) => ({ op: "ungroup", id: ref(id) });

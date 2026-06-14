@@ -30,11 +30,13 @@ Design quality rules:
 - Do not let text overlap shapes or run outside the card. Use multiple text layers for multiline copy when using CLI.
 - Do not use literal `\n` in `dx draw text`; create separate text layers for each line unless you have confirmed newline handling.
 - Layer order matters: add background first, then large containers and decorations, then text and foreground details.
-- Use `rounded-rect`, `ellipse`, `line`, and text layers to create rhythm and structure.
+- Use `rounded-rect`, `ellipse`, `polygon`, `line`, `curve`, and text layers to create rhythm and structure.
+- `draw polygon CX CY RX RY --sides N` makes a regular N-gon (top vertex up); `draw polygon-path "x,y x,y ..."` makes a free polygon (concave/star allowed); `draw curve "x,y x,y ..."` draws a smooth Catmull-Rom curve through the anchor points.
+- `layer points ID "x,y x,y ..."` edits anchors of line/curve/polygon_path layers; on a regular `polygon` it converts to a free `polygon_path`. In the web UI, double-click a line/curve/polygon to drag its vertices.
 - Name layers descriptively so `dx layer list` is readable.
 
 Useful commands:
-- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc doc create --w 1080 --h 1080 --depth u8`
+- `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc doc create --depth u8`
 - `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc layer add --name bg --fill 245,241,232,255`
 - `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc layer add --name bg --image design-assets/card-news/01-warm-paper.png`
 - `target/debug/dx --server http://localhost:8137 --doc projects/example.dxdoc draw rounded-rect 84 86 912 908 --radius 44 --color 255,252,245,255 --name card`

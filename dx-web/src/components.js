@@ -61,6 +61,8 @@ const P = {
   lock: svg`<rect x="4" y="7" width="8" height="6" rx="1"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7"/>`,
   unlock: svg`<rect x="4" y="7" width="8" height="6" rx="1"/><path d="M5.5 7V5.5a2.5 2.5 0 015-.8"/>`,
   minus: svg`<path d="M3.5 8h9"/>`,
+  polygonFill: svg`<path d="M8 2.5L13.2 6.3 11.2 12.4H4.8L2.8 6.3Z" fill="currentColor" stroke="none"/>`,
+  curve: svg`<path d="M2 12.5C5 12.5 5.5 3.5 8.5 3.5c2.8 0 2.3 6 5.5 6"/>`,
 };
 const icon = (name, size = 15) => svg`
   <svg viewBox="0 0 16 16" width=${size} height=${size} fill="none"
@@ -70,9 +72,41 @@ const icon = (name, size = 15) => svg`
 const SHAPES = [
   { id: "rect", ic: "squareFill", label: "사각형", key: "R" },
   { id: "ellipse", ic: "circleFill", label: "타원", key: "E" },
+  { id: "polygon", ic: "polygonFill", label: "다각형", key: "P" },
+  { id: "line", ic: "line", label: "선", key: "L" },
+  { id: "curve", ic: "curve", label: "곡선", key: "C" },
 ];
 const isShapeTool = (t) => SHAPES.some((s) => s.id === t);
-const needsWidth = (t) => t === "line" || t === "brush";
+const needsWidth = (t) => t === "line" || t === "brush" || t === "curve";
+const polygonPts = B.polygonPoints; // 엔진 regular_polygon_points 미러(bridge 공용).
+
+/** uniform Catmull-Rom 평탄화(끝점 클램프) — 엔진 catmull_rom_flatten의 미리보기 미러. */
+const curveFlatten = (pts) => {
+  const n = pts.length / 2;
+  if (n < 2) return [...pts];
+  const P = (i) => {
+    const j = Math.max(0, Math.min(n - 1, i));
+    return [pts[2 * j], pts[2 * j + 1]];
+  };
+  const out = [pts[0], pts[1]];
+  for (let i = 0; i < n - 1; i++) {
+    const [p0, p1, p2, p3] = [P(i - 1), P(i), P(i + 1), P(i + 2)];
+    const m1 = [(p2[0] - p0[0]) * 0.5, (p2[1] - p0[1]) * 0.5];
+    const m2 = [(p3[0] - p1[0]) * 0.5, (p3[1] - p1[1]) * 0.5];
+    const chord = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+    const steps = Math.max(4, Math.min(48, Math.ceil(chord / 2.5)));
+    for (let k = 1; k <= steps; k++) {
+      const t = k / steps, t2 = t * t, t3 = t2 * t;
+      const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t;
+      const h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+      out.push(
+        h00 * p1[0] + h10 * m1[0] + h01 * p2[0] + h11 * m2[0],
+        h00 * p1[1] + h10 * m1[1] + h01 * p2[1] + h11 * m2[1],
+      );
+    }
+  }
+  return out;
+};
 const MAX_VIEWPORT_SIDE = 4096;
 const MAX_VIEWPORT_PIXELS = 12_000_000;
 
@@ -103,6 +137,7 @@ class DxTopbar extends LitElement {
     app: { attribute: false }, zoom: { attribute: false }, theme: { attribute: false },
     tool: { state: true }, color: { state: true }, alpha: { state: true },
     width: { state: true }, radius: { state: true }, fontSize: { state: true },
+    sides: { state: true },
     _shape: { state: true }, _menu: { state: true }, _exportMenu: { state: true }, _v: { state: true },
   };
   static styles = [controls, css`
@@ -164,7 +199,8 @@ class DxTopbar extends LitElement {
   constructor() {
     super();
     this.tool = "select"; this.color = "#0d99ff"; this.alpha = 1;
-    this.width = 4; this.radius = 12; this.fontSize = 32; this.fontName = "Pretendard"; this._fonts = null;
+    this.width = 4; this.radius = 12; this.sides = 5;
+    this.fontSize = 32; this.fontName = "Pretendard"; this._fonts = null;
     this._shape = "rect"; this._menu = false; this._exportMenu = false; this._v = 0;
     this._returnTool = "select";
     this.zoom = 1; this.theme = "dark";
@@ -201,7 +237,7 @@ class DxTopbar extends LitElement {
   _toolState() {
     return {
       tool: this.tool, rgba: RGBA(this.color, this.alpha),
-      width: this.width, radius: this.radius, size: this.fontSize,
+      width: this.width, radius: this.radius, sides: this.sides, size: this.fontSize,
       font: this.fontName === "Pretendard" ? null : this.fontName,
     };
   }
@@ -243,7 +279,6 @@ class DxTopbar extends LitElement {
         ${t("select", "cursor", "선택/이동 (V)")}
         <button class="dd ${isShapeTool(this.tool) ? "active" : ""}" title="도형 (${cur.label})"
           @click=${() => { this._menu = !this._menu; }}>${icon(cur.ic)}${icon("chevDown", 9)}</button>
-        ${t("line", "line", "선 (L)")}
         ${t("brush", "pencil", "브러시 (B)")}
         ${t("frame", "frame", "프레임 (F)")}
         ${t("text", "text", "텍스트 (T)")}
@@ -252,7 +287,8 @@ class DxTopbar extends LitElement {
         ${this._menu ? html`
           <div class="menu">
             ${SHAPES.map((s) => html`
-              <button @click=${() => this._pick(s.id)}>${icon(s.ic)}${s.label}
+              <button title=${s.id === "curve" ? "클릭으로 점 추가, 더블클릭/Enter로 완성" : s.label}
+                @click=${() => this._pick(s.id)}>${icon(s.ic)}${s.label}
                 ${s.key ? html`<span class="key">${s.key}</span>` : nothing}</button>`)}
           </div>` : nothing}
       </div>
@@ -265,6 +301,8 @@ class DxTopbar extends LitElement {
             @input=${(e) => { this.alpha = +e.target.value; this._emit(); }} /></label>
           ${needsWidth(this.tool) ? html`<label>W<input class="num" type="number" min="1" max="100" .value=${String(this.width)}
             @change=${(e) => { this.width = +e.target.value || 1; this._emit(); }} /></label>` : nothing}
+          ${this.tool === "polygon" ? html`<label>변<input class="num" type="number" min="3" max="64" .value=${String(this.sides)}
+            @change=${(e) => { this.sides = Math.max(3, Math.min(64, Math.round(+e.target.value) || 5)); this._emit(); }} /></label>` : nothing}
           ${this.tool === "text" ? html`
             <label>크기<input class="num" type="number" min="6" max="400" .value=${String(this.fontSize)}
               @change=${(e) => { this.fontSize = +e.target.value || 12; this._emit(); }} /></label>
@@ -369,6 +407,7 @@ class DxCanvas extends LitElement {
     this._drag = null; this._hoverId = null; this._ctx = null; this._v = 0; this._zoom = 1; this._origin = { x: 0, y: 0 };
     this._hoverFrameId = null;
     this._space = false; this._text = null;
+    this._editPts = null; // 점 편집 모드: { id } — 곡선/선/다각형 더블클릭으로 진입.
     this._bgMode = localStorage.getItem("dx.canvas.bg") || "dot";
   }
   connectedCallback() {
@@ -397,7 +436,28 @@ class DxCanvas extends LitElement {
     this._mv = (e) => this._move(e); this._up = (e) => this._end(e);
     window.addEventListener("pointermove", this._mv);
     window.addEventListener("pointerup", this._up);
-    this._kd = (e) => { if (e.code === "Space" && !this._isTyping(e)) { this._space = true; this.style.cursor = "grab"; e.preventDefault(); } };
+    this._kd = (e) => {
+      if (this._isTyping(e)) return;
+      if (this._drag?.mode === "curve") {
+        if (e.key === "Enter") { e.preventDefault(); this._commitCurve(); return; }
+        if (e.key === "Escape") { e.preventDefault(); this._cancelCurve(); return; }
+      }
+      // 점 드래그 중 Escape = 그 드래그만 취소(커밋 안 함).
+      if (this._drag?.mode === "point" && e.key === "Escape") {
+        e.preventDefault();
+        this._drag = null;
+        this.app.renderer.excludeId = null;
+        this.app.renderer.markDirty();
+        this._drawOverlay();
+        return;
+      }
+      if (this._editPts && this._drag?.mode !== "point" && (e.key === "Enter" || e.key === "Escape")) {
+        e.preventDefault();
+        this._exitPointEdit();
+        return;
+      }
+      if (e.code === "Space") { this._space = true; this.style.cursor = "grab"; e.preventDefault(); }
+    };
     this._ku = (e) => { if (e.code === "Space") { this._space = false; this.style.cursor = ""; } };
     window.addEventListener("keydown", this._kd);
     window.addEventListener("keyup", this._ku);
@@ -452,6 +512,30 @@ class DxCanvas extends LitElement {
     this._bgMode = mode;
     localStorage.setItem("dx.canvas.bg", mode);
     this._applyBg();
+    this._updateBgGrid();
+  }
+
+  /** 도트 격자를 월드 좌표에 고정 — 팬/줌을 따라 움직인다(간격 = 24 doc px). */
+  _updateBgGrid() {
+    if (this._bgMode !== "dot") {
+      this.style.backgroundImage = "";
+      this.style.backgroundSize = "";
+      this.style.backgroundPosition = "";
+      return;
+    }
+    const z = this._zoom;
+    const step = 24 * z;
+    if (step < 7) {
+      // 줌아웃에서 도트가 노이즈가 되는 밀도 — 격자 숨김.
+      this.style.backgroundImage = "none";
+      return;
+    }
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const snap = (v) => Math.round(v * dpr) / dpr;
+    this.style.backgroundImage = ""; // 스타일시트의 radial-gradient로 복귀.
+    this.style.backgroundSize = `${step}px ${step}px`;
+    // 월드 (0,0)의 화면 위치에 격자 원점을 고정.
+    this.style.backgroundPosition = `${snap(-this._origin.x * z)}px ${snap(-this._origin.y * z)}px`;
   }
 
   /** 텍스트 입력 오버레이 열기. 클릭 직후 캔버스의 포커스 스틸을 피해 지연 포커스. */
@@ -487,17 +571,28 @@ class DxCanvas extends LitElement {
     this._drawOverlay();
   }
 
-  /** select 도구 더블클릭: 텍스트 레이어(meta.type==text)면 인라인 편집. */
+  /** select 도구 더블클릭: 텍스트 = 인라인 편집, 곡선/선/다각형 = 점 편집 진입.
+   *  곡선 그리기 도구 중에는 커밋. */
   _dblclick(e) {
     try {
-      if ((this.toolState?.tool ?? "select") !== "select") return;
+      const tool = this.toolState?.tool ?? "select";
+      if (tool === "curve") {
+        e.preventDefault();
+        this._commitCurve();
+        return;
+      }
+      if (tool !== "select") return;
       const p = this._coords(e);
       const hit = this.app.hitTest(p.x, p.y);
-      if (hit == null) return;
+      if (hit == null) {
+        this._exitPointEdit();
+        return;
+      }
       const layer = this.app.layers().find((l) => l.id === hit);
       const meta = this.app.metaOf(layer);
       if (meta?.type !== "text") {
-        console.info("[text] 더블클릭한 레이어에 텍스트 meta 없음(이 빌드 이전에 만든 텍스트는 편집 불가):", layer?.name);
+        e.preventDefault();
+        this._enterPointEdit(hit, layer, meta);
         return;
       }
       e.preventDefault();
@@ -520,7 +615,20 @@ class DxCanvas extends LitElement {
       console.error("[text] 편집 진입 실패:", err);
     }
   }
-  updated() { this._applyZoom(); this._drawOverlay(); }
+  updated() {
+    // 곡선 작성 중 도구가 바뀌면(단축키 등) 진행분 폐기 — 유령 곡선 잔류 방지.
+    if (this._drag?.mode === "curve" && (this.toolState?.tool ?? "select") !== "curve") this._cancelCurve();
+    // 점 편집 중 도구 변경·선택 해제·다른 레이어 선택이면 모드 종료.
+    if (this._editPts) {
+      const sel = this.app.selectedIds ?? [];
+      const stale = (this.toolState?.tool ?? "select") !== "select"
+        || sel.length !== 1 || sel[0] !== this._editPts.id
+        || !this.app.layers().some((l) => l.id === this._editPts.id);
+      if (stale) this._exitPointEdit();
+    }
+    this._applyZoom();
+    this._drawOverlay();
+  }
 
   _scheduleOverlay() {
     if (this._overlayRaf) return;
@@ -562,6 +670,7 @@ class DxCanvas extends LitElement {
   }
   _applyZoom(force = false, render = true) {
     if (!this.base) return;
+    this._updateBgGrid();
     const z = this._zoom;
     const cw = Math.max(1, this.clientWidth);
     const ch = Math.max(1, this.clientHeight);
@@ -993,6 +1102,20 @@ class DxCanvas extends LitElement {
     return null;
   }
 
+  /** 점 편집 모드에서 앵커 핸들 히트 — 가장 가까운(반경 내) 앵커 인덱스. */
+  _hitAnchor(e) {
+    const g = this._pointGeom();
+    if (!g) return null;
+    const r = this.getBoundingClientRect();
+    const sx = e.clientX - r.left, sy = e.clientY - r.top;
+    let best = null, bd = HANDLE + 2;
+    for (let i = 0; i < g.screen.length; i++) {
+      const d = Math.hypot(g.screen[i].x - sx, g.screen[i].y - sy);
+      if (d <= bd) { bd = d; best = i; }
+    }
+    return best == null ? null : { idx: best, g };
+  }
+
   // ---- 스냅 가이드 ----
   /** 이동 스냅 타깃(doc px) — 비선택·표시 레이어의 AABB left/centerX/right(+세로 동등) + 문서 가장자리·중심.
    *  드래그 시작 시 한 번 수집(드래그 중 레이어 변형 없음). */
@@ -1054,6 +1177,21 @@ class DxCanvas extends LitElement {
       this._drag = { mode: "brush", pts: [p.x, p.y], last: p };
       return;
     }
+    if (tool === "curve") {
+      // 클릭마다 앵커 추가 — 더블클릭/Enter 커밋, Escape 취소(_end는 드래그를 유지).
+      e.preventDefault();
+      const d = this._drag;
+      if (d?.mode === "curve") {
+        const lx = d.pts[d.pts.length - 2], ly = d.pts[d.pts.length - 1];
+        // 더블클릭의 1·2차 클릭이 같은 자리에 점을 중복 추가하지 않게 최소 간격.
+        if (Math.hypot(p.x - lx, p.y - ly) >= 3 / (this._zoom || 1)) d.pts.push(p.x, p.y);
+        d.cur = p;
+      } else {
+        this._drag = { mode: "curve", pts: [p.x, p.y], cur: p };
+      }
+      this._drawCurveGhost();
+      return;
+    }
     if (tool === "frame") {
       this._drag = { mode: "frame", start: p, cur: p };
       return;
@@ -1068,6 +1206,22 @@ class DxCanvas extends LitElement {
       return;
     }
     if (tool === "select") {
+      // 점 편집 모드: 앵커 핸들 잡기 우선. 빈 곳 클릭은 모드 이탈(아래 일반 select로 폴스루).
+      if (this._editPts) {
+        const ph = this._hitAnchor(e);
+        if (ph) {
+          const g = ph.g;
+          // 정다각형은 첫 드래그에서 자유 다각형(polygon_path)으로 굳혀 꼭짓점을 자유 편집.
+          const pts = g.kind === "polygon" ? [...g.pts] : [...g.pts];
+          // 원본 래스터는 드래그 동안 화면에서 제외(ghost가 대체) — 이중 표시 방지.
+          this.app.renderer.excludeId = g.l.id;
+          this.app.renderer.markDirty();
+          this._drag = { mode: "point", id: g.l.id, idx: ph.idx, geom: g, pts, start: p, moved: false };
+          return;
+        }
+        // 앵커 밖 클릭 = 점 편집 종료(이어서 일반 select 동작).
+        this._exitPointEdit();
+      }
       // 핸들 우선(선택 유지한 채 리사이즈/회전).
       const fh = this._hitFrameHandle(e);
       if (fh) {
@@ -1236,6 +1390,23 @@ class DxCanvas extends LitElement {
         d.last = p;
         this._drawBrushGhost();
       }
+    } else if (d.mode === "curve") {
+      d.cur = p;
+      this._drawCurveGhost();
+    } else if (d.mode === "point") {
+      // 잡은 앵커를 item 좌표로 환산해 갱신(Shift = 8방향 직교 스냅).
+      d.moved = true;
+      let wx = p.x, wy = p.y;
+      if (e.shiftKey) {
+        const base = d.geom.toWorld(d.geom.pts[2 * d.idx], d.geom.pts[2 * d.idx + 1]);
+        const dx = wx - base.x, dy = wy - base.y;
+        if (Math.abs(dx) > Math.abs(dy) * 2) wy = base.y;
+        else if (Math.abs(dy) > Math.abs(dx) * 2) wx = base.x;
+      }
+      const [ix, iy] = d.geom.toItem(wx, wy);
+      d.pts[2 * d.idx] = ix;
+      d.pts[2 * d.idx + 1] = iy;
+      this._drawPointGhost(d);
     } else if (d.mode === "frame") {
       d.cur = p;
       this._scheduleOverlay();
@@ -1277,6 +1448,21 @@ class DxCanvas extends LitElement {
     const d = this._drag;
     if (!d) return;
     this.style.cursor = this._space ? "grab" : "";
+    // 곡선은 클릭 누적 도구 — pointerup으로 끝나지 않는다(더블클릭/Enter가 커밋).
+    if (d.mode === "curve") return;
+    if (d.mode === "point") {
+      this._drag = null;
+      this.app.renderer.excludeId = null;
+      if (d.moved) {
+        // 변경된 앵커로 노드 보존 재래스터(정다각형은 polygon_path로 변환). 점 편집 유지.
+        const ok = this.app.setShapePoints(d.id, d.pts);
+        if (!ok) { this.app.renderer.markDirty(); }
+      } else {
+        this.app.renderer.markDirty();
+      }
+      this._drawOverlay();
+      return;
+    }
     if (d.mode === "pan") {
       this._drag = null;
       clearTimeout(this._viewportTimer);
@@ -1387,10 +1573,15 @@ class DxCanvas extends LitElement {
     const bx = Math.min(start.x, cur.x), by = Math.min(start.y, cur.y);
     const bw = Math.abs(cur.x - start.x), bh = Math.abs(cur.y - start.y);
     const ecx = (start.x + cur.x) / 2, ecy = (start.y + cur.y) / 2;
-    let shape, name;
+    let shape, name, extra = {};
     switch (s.tool) {
       case "rect": if (bw < 1 || bh < 1) return; shape = B.rect(bx, by, bw, bh, rgba); name = "rect"; break;
       case "ellipse": if (bw < 1 || bh < 1) return; shape = B.ellipse(ecx, ecy, bw / 2, bh / 2, rgba); name = "ellipse"; break;
+      case "polygon":
+        if (bw < 1 || bh < 1) return;
+        shape = B.polygon(ecx, ecy, bw / 2, bh / 2, s.sides ?? 5, rgba); name = "polygon";
+        extra = { sides: s.sides ?? 5 };
+        break;
       case "stroke-rect": if (bw < 1 || bh < 1) return; shape = B.strokeRect(bx, by, bw, bh, s.width, rgba); name = "stroke-rect"; break;
       case "stroke-ellipse": if (bw < 1 || bh < 1) return; shape = B.strokeEllipse(ecx, ecy, bw / 2, bh / 2, s.width, rgba); name = "stroke-ellipse"; break;
       case "rounded-rect": if (bw < 1 || bh < 1) return; shape = B.roundedRect(bx, by, bw, bh, s.radius, rgba); name = "rounded-rect"; break;
@@ -1399,10 +1590,169 @@ class DxCanvas extends LitElement {
         shape = B.line(start.x, start.y, cur.x, cur.y, s.width, rgba); name = "line"; break;
       default: return;
     }
-    this.app.apply([
+    const res = this.app.apply([
       B.addPaintLayer(name, B.shapes([shape]), { bind: "drawn" }),
-      B.setProps("drawn", { meta: JSON.stringify({ type: "shape", shape: s.tool, item: shape, fill: rgba, rgba, stroke: null, strokeWidth: 0 }) }),
+      B.setProps("drawn", { meta: JSON.stringify({ type: "shape", shape: s.tool, item: shape, fill: rgba, rgba, stroke: null, strokeWidth: 0, ...extra }) }),
     ]);
+    this._finishDraw(res);
+  }
+
+  /** 곡선 커밋 — 앵커 2개 이상이면 레이어로 확정, 아니면 폐기. */
+  _commitCurve() {
+    const d = this._drag;
+    if (d?.mode !== "curve") return;
+    this._drag = null;
+    const s = this.toolState;
+    if (d.pts.length >= 4) {
+      const rgba = s.rgba;
+      const item = B.curve(d.pts, s.width, rgba);
+      const res = this.app.apply([
+        B.addPaintLayer("curve", B.shapes([item]), { bind: "drawn" }),
+        B.setProps("drawn", { meta: JSON.stringify({ type: "shape", shape: "curve", item, fill: rgba, rgba, stroke: null, strokeWidth: 0 }) }),
+      ]);
+      this._finishDraw(res);
+      return;
+    }
+    this._drawOverlay();
+  }
+
+  _cancelCurve() {
+    this._drag = null;
+    this._drawOverlay();
+  }
+
+  // ---- 점 편집 (곡선/선/다각형 핸들) ----
+  /** 점 편집 진입 — 정다각형은 첫 꼭짓점 드래그에서 자유 다각형(polygon_path)으로 변환.
+   *  비-identity 트랜스폼(회전·스케일≠1)은 재래스터 시 표면 중심 이동으로 위치가 틀어질
+   *  수 있어 진입하지 않는다(도형 리사이즈는 bake로 scale 1 복귀 — 실사용 제약 적음). */
+  _enterPointEdit(id, layer, meta) {
+    if (!layer || !this.app.shapePoints?.(layer, meta)) return;
+    const identity = (layer.rotation ?? 0) === 0
+      && (layer.scale?.[0] ?? 1) === 1 && (layer.scale?.[1] ?? 1) === 1;
+    if (!identity) {
+      console.info("[points] 회전/스케일된 레이어는 점 편집 미지원:", layer.name);
+      return;
+    }
+    this.app.select(id);
+    this._editPts = { id };
+    this._drawOverlay();
+  }
+
+  /** 패널 버튼에서 점 편집 진입(도구가 select가 아니면 먼저 전환). */
+  editPointsById(id) {
+    const l = this.app.layers().find((v) => v.id === id);
+    if (!l) return;
+    if ((this.toolState?.tool ?? "select") !== "select") {
+      this.dispatchEvent(new CustomEvent("draw-finished", { bubbles: true, composed: true }));
+    }
+    this._enterPointEdit(id, l, this.app.metaOf(l));
+  }
+
+  _exitPointEdit() {
+    if (!this._editPts) return;
+    this._editPts = null;
+    if (this.app.renderer.excludeId != null) {
+      this.app.renderer.excludeId = null;
+      this.app.renderer.markDirty();
+    }
+    this._drawOverlay();
+  }
+
+  /** 점 편집 지오메트리 — 앵커 item 좌표·화면 좌표·item↔world 변환(identity 전제).
+   *  item→world = item − origin(items) + offset (editor-coordinate-contracts). */
+  _pointGeom() {
+    const ep = this._editPts;
+    if (!ep) return null;
+    const l = this.app.layers().find((v) => v.id === ep.id);
+    const meta = l ? this.app.metaOf(l) : null;
+    const pts = l ? this.app.shapePoints(l, meta) : null;
+    if (!pts || pts.length < 2) return null;
+    const oc = this.app._isDocSizedSurface(l)
+      ? [0, 0]
+      : this.app._itemsOrigin(this.app.itemsFromMeta(meta)) ?? [0, 0];
+    const [ox, oy] = l.offset ?? [0, 0];
+    const toWorld = (px, py) => ({ x: px - oc[0] + ox, y: py - oc[1] + oy });
+    const toItem = (wx, wy) => [wx - ox + oc[0], wy - oy + oc[1]];
+    const screen = [];
+    for (let i = 0; i + 1 < pts.length; i += 2) screen.push(this._screen(toWorld(pts[i], pts[i + 1])));
+    return { l, meta, pts, screen, toWorld, toItem, kind: meta.item?.shape ?? null };
+  }
+
+  /** pts(kind별)를 화면 경로로 구성 — 스트로크/필은 호출자가. map = (item x,y) → 화면점. */
+  _tracePointPath(o, pts, kind, map) {
+    o.beginPath();
+    const flat = kind === "curve" ? curveFlatten(pts) : pts;
+    if (flat.length < 4) return;
+    const p0 = map(flat[0], flat[1]);
+    o.moveTo(p0.x, p0.y);
+    for (let i = 2; i < flat.length; i += 2) {
+      const p = map(flat[i], flat[i + 1]);
+      o.lineTo(p.x, p.y);
+    }
+    if (kind === "polygon" || kind === "polygon_path") o.closePath();
+  }
+
+  _drawAnchors(o, screen, acc, hot = -1) {
+    for (let i = 0; i < screen.length; i++) {
+      const p = screen[i];
+      o.beginPath(); o.arc(p.x, p.y, hot === i ? 4.5 : 3.5, 0, 7);
+      o.fillStyle = hot === i ? acc : "#fff"; o.fill();
+      o.strokeStyle = acc; o.lineWidth = 1.5; o.stroke();
+    }
+  }
+
+  /** 점 편집 크롬(드래그 아님) — 도형 윤곽(액센트 얇은 선) + 앵커 핸들. */
+  _drawPointEditChrome(o) {
+    const g = this._pointGeom();
+    if (!g) { this._exitPointEdit(); return; }
+    const { acc } = this._themeColors();
+    this._tracePointPath(o, g.pts, g.kind, (px, py) => this._screen(g.toWorld(px, py)));
+    o.strokeStyle = acc; o.lineWidth = 1;
+    o.stroke();
+    this._drawAnchors(o, g.screen, acc);
+  }
+
+  /** 점 드래그 ghost — 원본 래스터는 excludeId로 숨긴 채 작업 점으로 도형 전체를 미리보기. */
+  _drawPointGhost(d) {
+    const o = this._overlayCtx(true);
+    const z = this._zoom;
+    this._drawFrames(o, z);
+    const g = d.geom, meta = g.meta;
+    const it = meta.item ?? {};
+    const map = (px, py) => this._screen(g.toWorld(px, py));
+    const opa = g.l?.opacity ?? 1;
+    const [cr, cg, cb, ca] = it.rgba ?? meta.rgba ?? [13, 153, 255, 255];
+    this._tracePointPath(o, d.pts, g.kind, map);
+    if (g.kind === "line" || g.kind === "curve") {
+      o.strokeStyle = `rgba(${cr},${cg},${cb},${(ca / 255) * opa})`;
+      o.lineWidth = Math.max(1, (it.width ?? 4) * z);
+      o.lineCap = "round"; o.lineJoin = "round";
+      o.stroke();
+    } else {
+      if (!meta.noFill) {
+        o.fillStyle = `rgba(${cr},${cg},${cb},${(ca / 255) * opa})`;
+        o.fill();
+      }
+      const sw = Number(meta.strokeWidth) || 0;
+      if (sw > 0 && meta.stroke) {
+        const [sr, sg, sb, sa] = meta.stroke;
+        o.strokeStyle = `rgba(${sr},${sg},${sb},${((sa ?? 255) / 255) * opa})`;
+        o.lineWidth = sw * z; o.lineJoin = "round";
+        o.stroke();
+      }
+    }
+    const { acc } = this._themeColors();
+    const screen = [];
+    for (let i = 0; i + 1 < d.pts.length; i += 2) screen.push(map(d.pts[i], d.pts[i + 1]));
+    this._drawAnchors(o, screen, acc, d.idx);
+  }
+
+  /** 도형/곡선 하나를 그리면: 새 레이어 선택 + 선택 도구로 복귀(Figma 동작). */
+  _finishDraw(res) {
+    const id = res?.bindings?.drawn?.node;
+    if (id != null && res?.ok !== false) this.app.select(id);
+    this.dispatchEvent(new CustomEvent("draw-finished", { bubbles: true, composed: true }));
+    this._drawOverlay();
   }
 
   // ---- 텍스트 입력 커밋 ----
@@ -1468,9 +1818,53 @@ class DxCanvas extends LitElement {
       case "stroke-rect": o.setLineDash([]); o.lineWidth = s.width * z; o.strokeRect(bx, by, bw, bh); break;
       case "stroke-ellipse": o.setLineDash([]); o.lineWidth = s.width * z; o.beginPath(); o.ellipse(bx + bw / 2, by + bh / 2, bw / 2, bh / 2, 0, 0, 7); o.stroke(); break;
       case "rounded-rect": o.beginPath(); if (o.roundRect) o.roundRect(bx, by, bw, bh, s.radius * z); else o.rect(bx, by, bw, bh); o.fill(); o.stroke(); break;
+      case "polygon": {
+        const pts = polygonPts(bx + bw / 2, by + bh / 2, bw / 2, bh / 2, s.sides ?? 5);
+        o.beginPath();
+        o.moveTo(pts[0], pts[1]);
+        for (let i = 2; i < pts.length; i += 2) o.lineTo(pts[i], pts[i + 1]);
+        o.closePath(); o.fill(); o.stroke();
+        break;
+      }
       default: o.setLineDash([]); o.lineWidth = s.width * z; o.beginPath(); o.moveTo(s0.x, s0.y); o.lineTo(s1.x, s1.y); o.stroke();
     }
     o.setLineDash([]);
+  }
+
+  /** 곡선 진행 ghost — 찍은 앵커(+커서)를 지나는 CR 미리보기 + 앵커 마커. */
+  _drawCurveGhost() {
+    const o = this._overlayCtx(true);
+    const z = this._zoom;
+    this._drawFrames(o, z);
+    const d = this._drag, s = this.toolState;
+    if (d?.mode !== "curve") return;
+    const pts = [...d.pts];
+    if (d.cur) {
+      const lx = pts[pts.length - 2], ly = pts[pts.length - 1];
+      if (Math.hypot(d.cur.x - lx, d.cur.y - ly) > 0.5 / (z || 1)) pts.push(d.cur.x, d.cur.y);
+    }
+    const [r, g, b, a] = s.rgba;
+    if (pts.length >= 4) {
+      const flat = curveFlatten(pts);
+      o.strokeStyle = `rgba(${r},${g},${b},${a / 255})`;
+      o.lineWidth = s.width * z;
+      o.lineCap = "round"; o.lineJoin = "round";
+      o.beginPath();
+      const p0 = this._screen({ x: flat[0], y: flat[1] });
+      o.moveTo(p0.x, p0.y);
+      for (let i = 2; i < flat.length; i += 2) {
+        const p = this._screen({ x: flat[i], y: flat[i + 1] });
+        o.lineTo(p.x, p.y);
+      }
+      o.stroke();
+    }
+    const { acc } = this._themeColors();
+    for (let i = 0; i < d.pts.length; i += 2) {
+      const p = this._screen({ x: d.pts[i], y: d.pts[i + 1] });
+      o.beginPath(); o.arc(p.x, p.y, 3.5, 0, 7);
+      o.fillStyle = "#fff"; o.fill();
+      o.strokeStyle = acc; o.lineWidth = 1.5; o.stroke();
+    }
   }
   /** 브러시 진행 중 폴리라인 ghost. */
   _drawBrushGhost() {
@@ -1566,6 +1960,8 @@ class DxCanvas extends LitElement {
     if (this._text && this._text.editId == null) return;
     if (this._drag?.mode === "draw") { this._drawGhost(); return; }
     if (this._drag?.mode === "brush") { this._drawBrushGhost(); return; }
+    if (this._drag?.mode === "point") { this._drawPointGhost(this._drag); return; }
+    if (this._editPts) { this._drawPointEditChrome(o); return; }
     const acc = this._themeColors().accStrong;
     // 마퀴(점선 사각형, --accent 색).
     if (this._drag?.mode === "marquee") {
@@ -1684,7 +2080,7 @@ class DxLayerPanel extends LitElement {
     app: { attribute: false }, _v: { state: true }, _menu: { state: true },
     _editing: { state: true }, _dragId: { state: true }, _dropId: { state: true },
     _ctx: { state: true }, _projectMenu: { state: true }, _query: { state: true },
-    _collapsed: { state: true },
+    _collapsed: { state: true }, _projects: { state: true },
   };
   static styles = [controls, css`
     :host {
@@ -1713,7 +2109,19 @@ class DxLayerPanel extends LitElement {
     .project-name {
       flex: 1; min-width: 0; color: var(--fg); font-size: 12px; font-weight: 600;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      display: flex; align-items: center; gap: 6px;
     }
+    .project-name .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: #43d17a; flex: none;
+    }
+    .project-menu .pm-label {
+      font-size: 9.5px; font-weight: 600; color: var(--fg-3); text-transform: uppercase;
+      letter-spacing: 0.5px; padding: 3px 8px 2px;
+    }
+    .project-menu .pm-proj { gap: 7px; }
+    .project-menu .pm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .project-menu .pm-open { font-size: 9px; color: var(--fg-3); flex: none; }
+    .project-menu .pm-proj:hover .pm-open { color: rgba(255,255,255,0.7); }
     .project .add { width: 28px; height: 28px; padding: 0; justify-content: center; flex: none; }
     .list { flex: 1; overflow-y: auto; padding: 0 6px 8px; position: relative; }
     .menu, .ctx, .project-menu {
@@ -1721,7 +2129,7 @@ class DxLayerPanel extends LitElement {
       border: 1px solid var(--line); border-radius: 9px; padding: 5px; min-width: 160px;
       box-shadow: var(--shadow-menu); display: flex; flex-direction: column; gap: 1px;
     }
-    .project-menu { top: 38px; min-width: 180px; }
+    .project-menu { top: 38px; min-width: 180px; max-height: 60vh; overflow-y: auto; }
     .ctx { right: auto; }
     .menu button, .ctx button, .project-menu button { width: 100%; justify-content: flex-start; height: 30px; color: var(--fg); }
     .menu button:hover, .ctx button:hover, .project-menu button:hover { background: var(--accent); color: #fff; }
@@ -1757,6 +2165,26 @@ class DxLayerPanel extends LitElement {
     this._v = 0; this._menu = false; this._editing = null;
     this._dragId = null; this._dropId = null; this._ctx = null; this._projectMenu = false; this._query = "";
     this._collapsed = new Set(); // 접힌 그룹/프레임 키("n<id>"|"f<id>") — 세션 상태.
+    this._projects = null; // /projects 목록(드롭다운 전환용) — 열릴 때 1회 로드.
+  }
+
+  /** 현재 문서 id(?doc=) — 프로젝트 폴더와 매칭하는 키. */
+  get _docId() {
+    return new URLSearchParams(location.search).get("doc") || "";
+  }
+
+  /** /projects 폴더를 읽어 현재 문서와 매칭되는 엔트리를 찾는다(드롭다운 표시·전환용). */
+  async _loadProjects() {
+    try {
+      const r = await fetch("/projects");
+      if (!r.ok) throw new Error(String(r.status));
+      const list = await r.json();
+      // 이름 오름차순(서버도 정렬하지만 방어적으로).
+      list.sort((a, b) => a.name.localeCompare(b.name));
+      this._projects = list;
+    } catch {
+      this._projects = []; // 로컬/오프라인 모드 — 드롭다운 전환 없이 현재 이름만.
+    }
   }
 
   _toggleCollapse(key) {
@@ -1798,6 +2226,8 @@ class DxLayerPanel extends LitElement {
       }
     };
     document.addEventListener("pointerdown", this._onDoc);
+    // 문서 열림 시 폴더 확인 — 현재 문서와 매칭되는 프로젝트를 드롭다운에 표시.
+    this._loadProjects();
   }
   disconnectedCallback() {
     this.app?.removeEventListener("changed", this._onChange);
@@ -1882,9 +2312,17 @@ class DxLayerPanel extends LitElement {
     this._ctx = null;
     fn();
   }
-  _projectAction(fn) {
+  async _projectAction(fn) {
     this._projectMenu = false;
+    // 네비게이션/이름변경 전 진행 중 편집을 데몬에 도달시킨다(마지막 편집 유실 방지).
+    await this.app?.live?.flush?.();
     fn();
+  }
+  /** 다른 프로젝트로 전환. 진행 중 편집 flush는 호출부(_projectAction)에서 끝난 뒤다 —
+   *  데몬은 도달한 편집을 in-memory 보존 + 1.5s 디바운스로 디스크 저장하므로 이동해도 안전. */
+  _switchProject(name) {
+    if (!name || name === this._docId) return;
+    location.search = `?doc=${encodeURIComponent(name)}`;
   }
   async _renameProject(currentName) {
     const next = prompt("새 프로젝트 이름", currentName)?.trim();
@@ -2007,16 +2445,31 @@ class DxLayerPanel extends LitElement {
   render() {
     const items = this._filterItems(this._items(), this._query);
     const selIds = this.app?.selectedIds ?? [];
-    const projectName = new URLSearchParams(location.search).get("doc") || "Untitled";
+    const docId = this._docId;
+    // 폴더에서 현재 문서와 매칭되는 프로젝트 — 있으면 그 이름, 없으면 doc id 폴백.
+    const matched = (this._projects ?? []).find((p) => p.name === docId);
+    const projectName = matched?.name || docId || "Untitled";
+    const others = (this._projects ?? []).filter((p) => p.name !== docId);
     return html`
       <div class="project">
-        <div class="project-name" title=${projectName}>${projectName}</div>
-        <button class="add" title="프로젝트 관리"
-          @click=${(e) => { e.stopPropagation(); this._projectMenu = !this._projectMenu; }}>
+        <div class="project-name" title=${matched ? `${projectName} (열림)` : projectName}>
+          ${projectName}${matched ? html`<span class="dot" title="폴더에 저장됨"></span>` : nothing}
+        </div>
+        <button class="add" title="프로젝트 전환·관리"
+          @click=${(e) => { e.stopPropagation(); this._projectMenu = !this._projectMenu; if (this._projectMenu) this._loadProjects(); }}>
           ${icon("chevDown", 13)}
         </button>
         ${this._projectMenu ? html`
           <div class="project-menu">
+            ${others.length ? html`
+              <div class="pm-label">프로젝트 전환</div>
+              ${others.map((p) => html`
+                <button class="pm-proj" @click=${() => this._projectAction(() => this._switchProject(p.name))}
+                  title=${p.modified ? `수정: ${p.modified}` : p.name}>
+                  ${icon("folder", 13)}<span class="pm-name">${p.name}</span>${p.open ? html`<span class="pm-open">열림</span>` : nothing}
+                </button>`)}
+              <div class="hr"></div>
+            ` : nothing}
             <button @click=${() => this._projectAction(() => { location.href = "/"; })}>${icon("chevLeft", 13)}대시보드</button>
             <button @click=${() => this._projectAction(() => this._renameProject(projectName))}>${icon("text", 13)}이름 변경</button>
             <div class="hr"></div>
@@ -2126,6 +2579,11 @@ class DxProps extends LitElement {
     /* 컨트롤이 연달아 쌓일 때 세로 간격 — 채움(단색 셀렉트↔색상행), 그라데이션 2색 등. */
     select + .colorrow, .colorrow + .colorrow, .colorrow + select, select + select { margin-top: 7px; }
     .chk { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fg-2); cursor: pointer; }
+    .ptedit {
+      width: 100%; justify-content: flex-start; gap: 6px; margin-top: 10px;
+      height: 28px; color: var(--fg-2); background: var(--bg-elev); border-radius: var(--radius);
+    }
+    .ptedit:hover { background: var(--accent); color: #fff; }
     .empty { padding: 22px 14px; font-size: 11px; color: var(--fg-3); line-height: 1.8; }
   `];
   constructor() { super(); this._v = 0; this._lock = false; this._fonts = null; }
@@ -2203,8 +2661,15 @@ class DxProps extends LitElement {
     const strokeRgba = meta?.stroke ?? [20, 24, 28, 255];
     const strokeHex = HEX(strokeRgba);
     const strokeWidth = Math.round(meta?.strokeWidth ?? 0);
+    const itemShape = String(meta?.item?.shape ?? "").toLowerCase();
     const shapeKind = String(meta?.shape ?? meta?.item?.shape ?? l.name ?? "").toLowerCase();
-    const canRadius = isShape && !shapeKind.includes("ellipse") && !shapeKind.includes("line");
+    const isStrokeKind = isShape && (itemShape === "line" || itemShape === "curve");
+    const isPolyPath = isShape && itemShape === "polygon_path";
+    const canSides = isShape && itemShape === "polygon";
+    // 점 편집 가능(선/곡선/다각형/자유다각형) — 패널에 안내.
+    const canPointEdit = isShape && ["line", "curve", "polygon", "polygon_path"].includes(itemShape)
+      && (l.rotation ?? 0) === 0 && (l.scale?.[0] ?? 1) === 1 && (l.scale?.[1] ?? 1) === 1;
+    const canRadius = isShape && !shapeKind.includes("ellipse") && !canSides && !isPolyPath && !isStrokeKind;
     const [ox, oy] = l.offset ?? [0, 0];
     const [sx, sy] = l.scale ?? [1, 1];
     const b = this.app.layerBounds(l.id);
@@ -2311,7 +2776,8 @@ class DxProps extends LitElement {
         </div>
         <div class="lbls">
           <span class="lbl">불투명도</span>
-          ${canRadius ? html`<span class="lbl">모서리 반경</span>` : html`<span></span>`}
+          ${canRadius ? html`<span class="lbl">모서리 반경</span>`
+            : canSides ? html`<span class="lbl">변 개수</span>` : html`<span></span>`}
         </div>
         <div class="grid2">
           <div class="cell"><span>%</span>
@@ -2321,7 +2787,16 @@ class DxProps extends LitElement {
             <div class="cell"><span>⌒</span>
               <input type="number" min="0" max="400" step="1" .value=${String(Math.round(meta.radius ?? meta.item?.radius ?? 0))}
                 @change=${(e) => this.app.setShapeRadius(l.id, +e.target.value)} /></div>` : nothing}
+          ${canSides ? html`
+            <div class="cell" title="다각형 변 개수 (3~64)"><span>변</span>
+              <input type="number" min="3" max="64" step="1" .value=${String(Math.round(meta.sides ?? meta.item?.sides ?? 5))}
+                @change=${(e) => this.app.setShapeSides(l.id, +e.target.value)} /></div>` : nothing}
         </div>
+        ${canPointEdit ? html`
+          <button class="ptedit" title="캔버스에서 더블클릭해도 진입합니다"
+            @click=${() => this.dispatchEvent(new CustomEvent("edit-points", { detail: l.id, bubbles: true, composed: true }))}>
+            ${icon("pencil", 12)}점 편집${canSides ? html` <span style="opacity:.6">(자유 다각형으로 변환)</span>` : nothing}
+          </button>` : nothing}
         <div class="lbl">블렌드</div>
         <div class="field" style="margin-top:0">
           <select .value=${l.blend} @change=${(e) => this.app.apply([B.setBlend(l.id, e.target.value)])}>
@@ -2385,6 +2860,20 @@ class DxProps extends LitElement {
                 </div>` : nothing}
             ` : nothing}`;
         };
+        if (isStrokeKind) {
+          // 선/곡선: 채움·테두리 대신 선 색+두께만(외곽 stroke 개념이 없는 스트로크 도형).
+          return html`
+            <div class="sec">
+              <div class="sec-t">선</div>
+              ${colorAlpha(styleRgba, (c) => this.app.setLayerColor(l.id, c))}
+              <div class="lbl">두께</div>
+              <div class="grid2">
+                <div class="cell"><span>W</span>
+                  <input type="number" min="1" max="400" step="1" .value=${String(Math.round(meta.item?.width ?? 4))}
+                    @change=${(e) => this.app.setItemWidth(l.id, +e.target.value)} /></div>
+              </div>
+            </div>`;
+        }
         if (isShape) {
           const shadow = meta?.shadow ?? null;
           const hasStroke = strokeWidth > 0 && meta?.stroke;
@@ -2533,6 +3022,10 @@ class DxAgentTerminal extends LitElement {
       box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
     }
     .bubble:hover { background: var(--accent-strong); color: #fff; filter: brightness(1.08); }
+    .bubble .live {
+      position: absolute; top: 2px; right: 2px; width: 10px; height: 10px;
+      border-radius: 50%; background: #43d17a; border: 2px solid var(--bg-panel);
+    }
     .panel {
       position: fixed; right: 24px; bottom: 24px; z-index: 96;
       width: min(760px, calc(100vw - 288px)); height: min(520px, calc(100vh - 82px));
@@ -2590,10 +3083,14 @@ class DxAgentTerminal extends LitElement {
     this._error = "";
     this._encoder = new TextEncoder();
     this._decoder = new TextDecoder();
-    this._disposables = [];
+    // kind → 살아있는 세션({term, fit, ws, mount, ...}). 탭 전환·패널 닫기에도 유지 —
+    // 세션은 새로고침(disconnectedCallback)에서만 정리된다.
+    this._sessions = new Map();
   }
   disconnectedCallback() {
-    this._disconnect();
+    this._ro?.disconnect();
+    this._ro = null;
+    for (const kind of [...this._sessions.keys()]) this._disposeSession(kind);
     super.disconnectedCallback();
   }
   async _ensureXterm() {
@@ -2606,26 +3103,39 @@ class DxAgentTerminal extends LitElement {
     const [{ Terminal }, { FitAddon }] = await window.__dxXterm;
     return { Terminal, FitAddon };
   }
+  /** 탭 진입 — 살아있는 세션이면 재표시만, 죽었거나 없으면 새로 연결. */
   async _start(kind) {
     this._open = true;
     this._active = kind;
+    await this.updateComplete;
+    const s = this._sessions.get(kind);
+    if (s && s.ws && s.ws.readyState <= WebSocket.OPEN) {
+      // 살아있는 세션 — 인터럽트 없이 다시 보여준다(탭 전환/패널 재오픈).
+      this._syncMounts();
+      this._status = s.status;
+      this._error = s.error ?? "";
+      try { s.fit.fit(); } catch { /* 표시 직후 race 무해 */ }
+      s.term.focus();
+      return;
+    }
+    if (s) this._disposeSession(kind); // exited/closed 세션 잔해 → 새로 시작.
     this._status = "connecting";
     this._error = "";
-    await this.updateComplete;
     this._connect(kind);
   }
   async _connect(kind) {
-    this._disconnect(false);
     const host = this.renderRoot.querySelector(".term");
-    const mount = this.renderRoot.querySelector(".term-mount");
-    if (!host || !mount) return;
-    mount.innerHTML = "";
+    if (!host) return;
     try {
       const { Terminal, FitAddon } = await this._ensureXterm();
+      // 세션별 mount — Lit 템플릿 밖에서 만들어 탭 전환·패널 닫기에 파괴되지 않는다.
+      const mount = document.createElement("div");
+      mount.className = "term-mount";
       const link = document.createElement("link");
       link.rel = "stylesheet";
       link.href = "https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css";
       mount.appendChild(link);
+      host.appendChild(mount);
 
       const cs = getComputedStyle(this);
       const term = new Terminal({
@@ -2646,91 +3156,103 @@ class DxAgentTerminal extends LitElement {
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(mount);
-      fit.fit();
-      term.focus();
-      this._term = term;
-      this._fit = fit;
 
       const proto = location.protocol === "https:" ? "wss" : "ws";
       const qs = new URLSearchParams({ cols: String(term.cols || 100), rows: String(term.rows || 28) });
       if (this.docId) qs.set("doc", this.docId);
       const ws = new WebSocket(`${proto}://${location.host}/terminal/${encodeURIComponent(kind)}?${qs}`);
       ws.binaryType = "arraybuffer";
-      this._ws = ws;
-      this._disposables.push(term.onData((data) => {
+      const sess = { kind, term, fit, ws, mount, status: "connecting", error: "", disposables: [] };
+      this._sessions.set(kind, sess);
+      const setStatus = (status, error = sess.error) => {
+        sess.status = status;
+        sess.error = error;
+        if (this._active === kind) {
+          this._status = status;
+          this._error = error;
+        }
+      };
+      sess.disposables.push(term.onData((data) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(this._encoder.encode(data));
       }));
-      this._disposables.push(term.onResize(({ cols, rows }) => {
+      sess.disposables.push(term.onResize(({ cols, rows }) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
       }));
 
-      ws.onopen = () => {
-        this._status = "running";
-      };
+      ws.onopen = () => setStatus("running");
       ws.onmessage = (ev) => {
         if (typeof ev.data === "string") {
-          this._handleControl(ev.data);
+          this._handleControl(sess, setStatus, ev.data);
           return;
         }
         term.write(this._decoder.decode(ev.data, { stream: true }));
       };
-      ws.onerror = () => {
-        this._error = "terminal connection failed";
-        this._status = "error";
-      };
+      ws.onerror = () => setStatus("error", "terminal connection failed");
       ws.onclose = () => {
-        if (this._status !== "exited" && this._status !== "idle") this._status = "closed";
+        if (sess.status !== "exited" && sess.status !== "idle") setStatus("closed");
       };
 
-      this._ro = new ResizeObserver(() => {
-        clearTimeout(this._fitTimer);
-        this._fitTimer = setTimeout(() => {
-          try {
-            fit.fit();
-            if (ws.readyState === WebSocket.OPEN)
-              ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-          } catch {
-            // Resize during teardown is harmless.
-          }
-        }, 60);
-      });
+      // 패널 리사이즈 → 보이는(활성) 세션만 fit.
+      if (!this._ro) {
+        this._ro = new ResizeObserver(() => {
+          clearTimeout(this._fitTimer);
+          this._fitTimer = setTimeout(() => {
+            const a = this._sessions.get(this._active);
+            if (!a || !this._open) return;
+            try {
+              a.fit.fit();
+              if (a.ws.readyState === WebSocket.OPEN)
+                a.ws.send(JSON.stringify({ type: "resize", cols: a.term.cols, rows: a.term.rows }));
+            } catch {
+              // teardown 중 리사이즈는 무해.
+            }
+          }, 60);
+        });
+      }
       this._ro.observe(host);
+      this._syncMounts();
+      fit.fit();
+      term.focus();
     } catch (e) {
       this._status = "error";
       this._error = `xterm load failed: ${e.message ?? e}`;
     }
   }
-  _handleControl(text) {
+  _handleControl(sess, setStatus, text) {
     let msg;
     try { msg = JSON.parse(text); } catch { return; }
     if (msg.type === "error") {
-      this._status = "error";
-      this._error = msg.message || "terminal error";
-      this._term?.writeln(`\r\n${this._error}`);
+      setStatus("error", msg.message || "terminal error");
+      sess.term?.writeln(`\r\n${sess.error}`);
     } else if (msg.type === "exit") {
-      this._status = "exited";
-      this._term?.writeln(`\r\n[process exited${msg.code == null ? "" : `: ${msg.code}`}]`);
+      setStatus("exited");
+      sess.term?.writeln(`\r\n[process exited${msg.code == null ? "" : `: ${msg.code}`}]`);
     }
   }
-  _disconnect(reset = true) {
-    clearTimeout(this._fitTimer);
-    this._ro?.disconnect();
-    this._ro = null;
-    for (const d of this._disposables) d.dispose?.();
-    this._disposables = [];
-    if (this._ws && this._ws.readyState < WebSocket.CLOSING) this._ws.close();
-    this._ws = null;
-    this._term?.dispose?.();
-    this._term = null;
-    this._fit = null;
-    if (reset) {
-      this._active = null;
-      this._status = "idle";
-      this._error = "";
+  /** 세션 mount들을 패널에 다시 붙이고 활성만 표시(나머지는 살아있는 채 숨김). */
+  _syncMounts() {
+    const host = this.renderRoot.querySelector(".term");
+    if (!host) return;
+    for (const [kind, s] of this._sessions) {
+      if (s.mount.parentNode !== host) host.appendChild(s.mount);
+      s.mount.style.display = kind === this._active ? "" : "none";
     }
   }
+  updated() {
+    if (this._open) this._syncMounts();
+  }
+  _disposeSession(kind) {
+    const s = this._sessions.get(kind);
+    if (!s) return;
+    this._sessions.delete(kind);
+    for (const d of s.disposables) d.dispose?.();
+    if (s.ws && s.ws.readyState < WebSocket.CLOSING) s.ws.close();
+    s.term?.dispose?.();
+    s.mount?.remove();
+  }
+  /** 패널 닫기 — 세션은 유지(새로고침 전까지 인터럽트 없음). 다시 열면 그대로 복귀. */
   _close() {
-    this._disconnect();
+    clearTimeout(this._fitTimer);
     this._open = false;
   }
   _label(kind) {
@@ -2738,8 +3260,10 @@ class DxAgentTerminal extends LitElement {
   }
   render() {
     if (!this._open) {
-      return html`<button class="bubble" title="에이전트 터미널" @click=${() => { this._open = true; }}>
-        ${icon("terminal", 18)}
+      const live = [...this._sessions.values()].some((s) => s.ws && s.ws.readyState <= WebSocket.OPEN);
+      return html`<button class="bubble" title=${live ? "에이전트 터미널 — 세션 실행 중" : "에이전트 터미널"}
+        @click=${() => { this._open = true; }}>
+        ${icon("terminal", 18)}${live ? html`<span class="live"></span>` : nothing}
       </button>`;
     }
     const agents = ["codex", "claude", "shell"];
@@ -2756,10 +3280,9 @@ class DxAgentTerminal extends LitElement {
           <a class="guide" href=${`/terminal/guide.md${this.docId ? `?doc=${encodeURIComponent(this.docId)}` : ""}`}
             target="_blank" rel="noreferrer">CLI guide</a>
           <span class="state">${this._active ? `${this._label(this._active)} · ${this._status}` : this._status}</span>
-          <button class="close" title="닫기" @click=${() => this._close()}>${icon("close", 14)}</button>
+          <button class="close" title="닫기 (세션은 유지됨)" @click=${() => this._close()}>${icon("close", 14)}</button>
         </div>
         <div class="term">
-          <div class="term-mount"></div>
           ${!this._active ? html`
             <div class="idle">
               <div class="idle-row">
@@ -2847,7 +3370,7 @@ class AppShell extends LitElement {
     if (e.shiftKey && e.key === "1") { this._canvas?.zoomCmd("fit"); return; }
     if (e.shiftKey && e.key === "2") { this._canvas?.zoomCmd("selection"); return; }
     if (!meta) {
-      const map = { v: "select", r: "rect", e: "ellipse", l: "line", t: "text", b: "brush", f: "frame" };
+      const map = { v: "select", r: "rect", e: "ellipse", p: "polygon", c: "curve", l: "line", t: "text", b: "brush", f: "frame" };
       if (map[k]) { this._topbar?.setTool(map[k]); return; }
       if (e.key === "Escape") this.app.select(null);
     }
@@ -2874,8 +3397,10 @@ class AppShell extends LitElement {
       <dx-canvas .app=${this.app} .toolState=${this._tool}
         @zoom-changed=${(e) => { this._zoom = e.detail; }}
         @picked-color=${(e) => { this._topbar?.setColor(e.detail); this._topbar?.finishEyedrop(); }}
-        @text-finished=${() => this._topbar?.setTool("select")}></dx-canvas>
-      <dx-props .app=${this.app}></dx-props>
+        @text-finished=${() => this._topbar?.setTool("select")}
+        @draw-finished=${() => this._topbar?.setTool("select")}
+        @edit-points=${(e) => this._canvas?.editPointsById(e.detail)}></dx-canvas>
+      <dx-props .app=${this.app} @edit-points=${(e) => this._canvas?.editPointsById(e.detail)}></dx-props>
       <dx-agent-terminal .docId=${new URLSearchParams(location.search).get("doc") || ""}></dx-agent-terminal>
     `;
   }

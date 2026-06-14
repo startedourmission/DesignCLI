@@ -23,9 +23,29 @@ function itemsOrigin(items) {
     switch (it?.shape) {
       case "rect": case "rounded_rect": x0 = it.x - 1; y0 = it.y - 1; break;
       case "stroke_rect": case "stroke_rounded_rect": { const m = Math.max(it.width, 1); x0 = it.x - m; y0 = it.y - m; break; }
-      case "ellipse": x0 = it.cx - it.rx - 1; y0 = it.cy - it.ry - 1; break;
-      case "stroke_ellipse": { const m = Math.max(it.width, 1); x0 = it.cx - it.rx - m; y0 = it.cy - it.ry - m; break; }
+      case "ellipse": case "polygon": x0 = it.cx - it.rx - 1; y0 = it.cy - it.ry - 1; break;
+      case "stroke_ellipse": case "stroke_polygon": { const m = Math.max(it.width, 1); x0 = it.cx - it.rx - m; y0 = it.cy - it.ry - m; break; }
       case "line": { const m = it.width * 0.5 + 1; x0 = Math.min(it.x0, it.x1) - m; y0 = Math.min(it.y0, it.y1) - m; break; }
+      case "curve": {
+        let px = it.points[0], py = it.points[1], sx = 0, sy = 0;
+        for (let i = 2; i + 1 < it.points.length; i += 2) {
+          px = Math.min(px, it.points[i]); py = Math.min(py, it.points[i + 1]);
+          sx = Math.max(sx, Math.abs(it.points[i] - it.points[i - 2]));
+          sy = Math.max(sy, Math.abs(it.points[i + 1] - it.points[i - 1]));
+        }
+        x0 = px - (it.width * 0.5 + 1 + 0.5 * sx); y0 = py - (it.width * 0.5 + 1 + 0.5 * sy); break;
+      }
+      case "polygon_path": {
+        let px = it.points[0], py = it.points[1];
+        for (let i = 2; i + 1 < it.points.length; i += 2) { px = Math.min(px, it.points[i]); py = Math.min(py, it.points[i + 1]); }
+        x0 = px - 1; y0 = py - 1; break;
+      }
+      case "stroke_polygon_path": {
+        const m = Math.max(it.width, 1);
+        let px = it.points[0], py = it.points[1];
+        for (let i = 2; i + 1 < it.points.length; i += 2) { px = Math.min(px, it.points[i]); py = Math.min(py, it.points[i + 1]); }
+        x0 = px - m; y0 = py - m; break;
+      }
       case "text": { const m = Math.max(it.size, 1) * 0.15 + 2; x0 = it.x - m; y0 = it.y - m; break; }
       default: continue;
     }
@@ -48,6 +68,10 @@ const rebased = (offset, oldItems, newItems, docSized = false) => {
     [{ shape: "ellipse", cx: 200, cy: 150, rx: 45.5, ry: 30, rgba: [0, 0, 200, 255] }],
     [{ shape: "stroke_ellipse", cx: 100, cy: 100, rx: 40, ry: 40, width: 7, rgba: [9, 9, 9, 255] }],
     [{ shape: "line", x0: 30.7, y0: 200, x1: 180, y1: 40.2, width: 5, rgba: [1, 2, 3, 255] }],
+    [{ shape: "polygon", cx: 150, cy: 120, rx: 60.5, ry: 50, sides: 5, rgba: [255, 0, 100, 255] }],
+    [{ shape: "stroke_polygon", cx: 150, cy: 120, rx: 60.5, ry: 50, sides: 6, width: 7, rgba: [9, 9, 9, 255] }],
+    [{ shape: "curve", points: [40, 200, 120, 60.5, 220, 180, 300, 90], width: 6, rgba: [20, 40, 200, 255] }],
+    [{ shape: "polygon_path", points: [150, 40.25, 245, 110, 187, 153, 90, 222, 55.5, 110], rgba: [255, 180, 0, 255] }],
     [{ shape: "text", x: 100, y: 80, text: "안녕 DX", size: 41, rgba: [10, 20, 30, 255] }],
     [
       { shape: "rect", x: 50, y: 50, w: 60, h: 60, rgba: [9, 9, 9, 255] },
@@ -63,6 +87,42 @@ const rebased = (offset, oldItems, newItems, docSized = false) => {
       l.offset[0] === mine[0] && l.offset[1] === mine[1],
       `engine=${J(l.offset)} mirror=${J(mine)}`);
   }
+}
+
+// ── 1b. 점 편집: 정다각형 → 자유 다각형 변환 시 미이동 꼭짓점 월드 위치 보존 ──
+// app.js setShapePoints 플로우 미러: points는 item 좌표, rebase가 origin 시프트 보정.
+{
+  const ed = new Editor(400, 300, "u8");
+  const poly = { shape: "polygon", cx: 200, cy: 150, rx: 60, ry: 50, sides: 5, rgba: [120, 80, 220, 255] };
+  let r = apply(ed, [{ op: "add_paint_layer", name: "poly", source: { from: "shapes", items: [poly] }, bind: "d" }]);
+  const id0 = r.bindings.d.node;
+  let l0 = flat(layersOf(ed)).find((l) => l.id === id0);
+  // 사용자 이동 +20,+8 → offset = origin + (20,8).
+  apply(ed, [{ op: "set_props", id: { node: id0 }, patch: { offset: [l0.offset[0] + 20, l0.offset[1] + 8] } }]);
+  l0 = flat(layersOf(ed)).find((l) => l.id === id0);
+  // shapePoints 미러: 정다각형 전개(item 좌표 = cx/cy 기준).
+  const n = 5, base = [];
+  for (let k = 0; k < n; k++) { const a = -Math.PI / 2 + k * 2 * Math.PI / n; base.push(poly.cx + poly.rx * Math.cos(a), poly.cy + poly.ry * Math.sin(a)); }
+  // 안 건드린 둘째 꼭짓점(오른쪽 위)의 변경 전 월드 위치.
+  const oc0 = itemsOrigin([poly]);
+  const v2WorldBefore = [base[2] - oc0[0] + l0.offset[0], base[3] - oc0[1] + l0.offset[1]];
+  // 첫 꼭짓점만 위로 당김(item 좌표) → polygon_path로 변환.
+  const after = [...base]; after[1] -= 30;
+  const newItems = [{ shape: "polygon_path", points: after, rgba: poly.rgba }];
+  const off = rebased(l0.offset, [poly], newItems);
+  const idx = layersOf(ed).map((l) => l.id).indexOf(id0);
+  r = apply(ed, [
+    { op: "delete_layer", id: { node: id0 } },
+    { op: "add_paint_layer", name: "poly", source: { from: "shapes", items: newItems }, index: idx, bind: "s" },
+    { op: "set_props", id: { bind: "s" }, patch: { offset: off, scale: [1, 1], rotation: 0 } },
+  ]);
+  const id1 = r.bindings.s.node;
+  const l1 = flat(layersOf(ed)).find((l) => l.id === id1);
+  const oc1 = itemsOrigin(newItems);
+  const v2WorldAfter = [after[2] - oc1[0] + l1.offset[0], after[3] - oc1[1] + l1.offset[1]];
+  expect("점 편집: polygon→polygon_path 변환 후 미이동 꼭짓점 월드 보존",
+    Math.abs(v2WorldAfter[0] - v2WorldBefore[0]) <= 1 && Math.abs(v2WorldAfter[1] - v2WorldBefore[1]) <= 1,
+    `before=${J(v2WorldBefore)} after=${J(v2WorldAfter)}`);
 }
 
 // ── 2. B8 수정: 테두리 추가 시 fill 위치 보존 ──

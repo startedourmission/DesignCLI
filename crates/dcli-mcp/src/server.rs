@@ -34,18 +34,11 @@ pub struct DocOpenReq {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DocCreateReq {
     pub path: String,
-    #[serde(default = "default_dim")]
-    pub w: u32,
-    #[serde(default = "default_dim")]
-    pub h: u32,
     /// 비트깊이: "u8"(감마 합성) | "u16" | "f32"(리니어 합성).
     #[serde(default = "default_depth")]
     pub depth: String,
 }
 
-fn default_dim() -> u32 {
-    512
-}
 fn default_depth() -> String {
     "u8".to_string()
 }
@@ -155,13 +148,14 @@ impl DesignServer {
         }
     }
 
-    #[tool(description = "새 문서를 생성해 디스크에 저장하고 세션으로 연다.")]
+    #[tool(description = "새 문서를 생성해 디스크에 저장하고 세션으로 연다. \
+        작업영역은 무한 — 크기 지정 없음(export는 frame 단위).")]
     async fn doc_create(&self, Parameters(req): Parameters<DocCreateReq>) -> CallToolResult {
         let depth = match parse_depth(&req.depth) {
             Ok(d) => d,
             Err(e) => return tool_err(e),
         };
-        let doc = Document::new(req.w, req.h, depth);
+        let doc = Document::new(Document::DEFAULT_SIZE.0, Document::DEFAULT_SIZE.1, depth);
         let mut ws = self.ws.lock().await;
         match ws.create(req.path.into(), doc) {
             Ok(id) => {
@@ -260,8 +254,11 @@ impl DesignServer {
     #[tool(description = "Action 배열을 트랜잭션으로 적용(주 쓰기 경로). 전부 성공 또는 전체 롤백. \
         named binding(bind/ref)로 신규 노드 참조. 지원 op: \
         add_paint_layer(source.from: transparent|fill|png_base64|png_path|shapes — shapes.items에 \
-        rect/ellipse/line/stroke_rect/stroke_ellipse/rounded_rect/text, text는 번들 폰트 Pretendard로 \
-        한글/라틴 렌더링, '\\n' 줄바꿈), delete_layer, \
+        rect/ellipse/line/stroke_rect/stroke_ellipse/rounded_rect/polygon{cx,cy,rx,ry,sides}/\
+        polygon_path{points:[x,y,...] 자유 꼭짓점, 오목 허용}/stroke_polygon(_path)/\
+        curve{points:[x,y,...] 앵커를 지나는 부드러운 곡선,width}/path/text, \
+        text는 번들 폰트 Pretendard로 한글/라틴 렌더링, '\\n' 줄바꿈), delete_layer, \
+        replace_paint_source(픽셀 소스 교체 — 노드/그룹/z순서 보존 재래스터), \
         duplicate_layer(픽셀+속성 전체 복사 후 offset +12,+12 — bind로 새 노드 참조), move_layer, \
         set_props(patch: name/visible/opacity/offset[캔버스 이동 dx,dy]/scale[비파괴 sx,sy]/\
         rotation[도, 시계방향]/meta[임의 JSON 문자열, 빈 문자열=제거]), \
@@ -387,8 +384,6 @@ mod tests {
         let r = server
             .doc_create(Parameters(DocCreateReq {
                 path: path.display().to_string(),
-                w: 16,
-                h: 16,
                 depth: "u8".into(),
             }))
             .await;
@@ -437,13 +432,23 @@ mod tests {
         let r = server.composite_png(Parameters(DocRef { doc: doc.clone() })).await;
         assert_ne!(r.is_error, Some(true));
         let sc = r.structured_content.unwrap();
-        assert_eq!((sc["w"].as_u64(), sc["h"].as_u64()), (Some(16), Some(16)));
+        assert_eq!(
+            (sc["w"].as_u64(), sc["h"].as_u64()),
+            (
+                Some(Document::DEFAULT_SIZE.0 as u64),
+                Some(Document::DEFAULT_SIZE.1 as u64)
+            )
+        );
         use base64::Engine;
         let png = base64::engine::general_purpose::STANDARD
             .decode(sc["png_base64"].as_str().unwrap())
             .expect("base64 디코드");
         let info = png::Decoder::new(png.as_slice()).read_info().expect("PNG 파싱").info().clone();
-        assert_eq!((info.width, info.height), (16, 16));
+        assert_eq!(
+            (info.width, info.height),
+            Document::DEFAULT_SIZE,
+            "전체 PNG = 명목 문서 크기"
+        );
 
         // 정리(락 해제 + 임시 폴더 삭제).
         server.doc_close(Parameters(DocRef { doc })).await;

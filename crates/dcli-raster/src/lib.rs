@@ -146,6 +146,66 @@ pub enum ViewItem {
         feather: f32,
         rgba: [u8; 4],
     },
+    Polygon {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        sides: u32,
+        rgba: [u8; 4],
+        gradient: Option<ViewGrad>,
+    },
+    StrokePolygon {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        sides: u32,
+        width: f32,
+        rgba: [u8; 4],
+    },
+    Curve {
+        points: Vec<f32>,
+        width: f32,
+        rgba: [u8; 4],
+    },
+    PolygonPath {
+        points: Vec<f32>,
+        rgba: [u8; 4],
+        gradient: Option<ViewGrad>,
+    },
+    StrokePolygonPath {
+        points: Vec<f32>,
+        width: f32,
+        rgba: [u8; 4],
+    },
+}
+
+/// 점 목록 bbox (min_x, min_y, max_x, max_y).
+fn view_points_bbox(points: &[f32]) -> Option<(f32, f32, f32, f32)> {
+    if points.len() < 2 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (points[0], points[1], points[0], points[1]);
+    for p in points.chunks_exact(2) {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    Some((x0, y0, x1, y1))
+}
+
+/// 정다각형 꼭짓점(위 꼭짓점 시작) — dispatch::regular_polygon_points와 동일 정의.
+fn view_polygon_points(cx: f32, cy: f32, rx: f32, ry: f32, sides: u32) -> Vec<f32> {
+    let n = sides.clamp(3, 64);
+    let mut pts = Vec::with_capacity(n as usize * 2);
+    for k in 0..n {
+        let a = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::TAU / n as f32;
+        pts.push(cx + rx * a.cos());
+        pts.push(cy + ry * a.sin());
+    }
+    pts
 }
 
 /// (노드, 스케일) → 스케일된-월드 좌표 재래스터 표면 + floor(min×s) 원점.
@@ -516,6 +576,76 @@ fn view_item_to_screen(it: &ViewItem, vx: f32, vy: f32, s: f32) -> ViewItem {
             feather: feather * s,
             rgba: *rgba,
         },
+        ViewItem::Polygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            rgba,
+            gradient,
+        } => ViewItem::Polygon {
+            cx: tx(*cx),
+            cy: ty(*cy),
+            rx: rx * s,
+            ry: ry * s,
+            sides: *sides,
+            rgba: *rgba,
+            gradient: gradient.clone(),
+        },
+        ViewItem::StrokePolygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            width,
+            rgba,
+        } => ViewItem::StrokePolygon {
+            cx: tx(*cx),
+            cy: ty(*cy),
+            rx: rx * s,
+            ry: ry * s,
+            sides: *sides,
+            width: width * s,
+            rgba: *rgba,
+        },
+        ViewItem::Curve {
+            points,
+            width,
+            rgba,
+        } => ViewItem::Curve {
+            points: points
+                .chunks(2)
+                .flat_map(|p| [tx(p[0]), ty(p[1])])
+                .collect(),
+            width: width * s,
+            rgba: *rgba,
+        },
+        ViewItem::PolygonPath {
+            points,
+            rgba,
+            gradient,
+        } => ViewItem::PolygonPath {
+            points: points
+                .chunks(2)
+                .flat_map(|p| [tx(p[0]), ty(p[1])])
+                .collect(),
+            rgba: *rgba,
+            gradient: gradient.clone(),
+        },
+        ViewItem::StrokePolygonPath {
+            points,
+            width,
+            rgba,
+        } => ViewItem::StrokePolygonPath {
+            points: points
+                .chunks(2)
+                .flat_map(|p| [tx(p[0]), ty(p[1])])
+                .collect(),
+            width: width * s,
+            rgba: *rgba,
+        },
     }
 }
 
@@ -611,6 +741,61 @@ fn view_item_bounds(it: &ViewItem) -> Option<(f32, f32, f32, f32)> {
         } => {
             let m = feather.max(0.0) + 1.0;
             (*w > 0.0 && *h > 0.0).then_some((x - m, y - m, x + w + m, y + h + m))
+        }
+        ViewItem::Polygon { cx, cy, rx, ry, .. } => (*rx > 0.0 && *ry > 0.0).then_some((
+            cx - rx - 1.0,
+            cy - ry - 1.0,
+            cx + rx + 1.0,
+            cy + ry + 1.0,
+        )),
+        ViewItem::StrokePolygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            width,
+            ..
+        } => {
+            let m = width.max(1.0);
+            (*rx > 0.0 && *ry > 0.0 && *width > 0.0).then_some((
+                cx - rx - m,
+                cy - ry - m,
+                cx + rx + m,
+                cy + ry + m,
+            ))
+        }
+        ViewItem::Curve { points, width, .. } => {
+            if points.len() < 2 || *width <= 0.0 {
+                return None;
+            }
+            // dispatch shape_bounds Curve와 동일: CR 오버슈트 마진 0.5×축별 최대 스텝.
+            let (mut nx, mut ny, mut mx, mut my) = (points[0], points[1], points[0], points[1]);
+            let (mut sx, mut sy) = (0.0f32, 0.0f32);
+            for i in (2..points.len() - 1).step_by(2) {
+                let (x, y) = (points[i], points[i + 1]);
+                nx = nx.min(x);
+                mx = mx.max(x);
+                ny = ny.min(y);
+                my = my.max(y);
+                sx = sx.max((x - points[i - 2]).abs());
+                sy = sy.max((y - points[i - 1]).abs());
+            }
+            let wx = width * 0.5 + 1.0 + 0.5 * sx;
+            let wy = width * 0.5 + 1.0 + 0.5 * sy;
+            Some((nx - wx, ny - wy, mx + wx, my + wy))
+        }
+        ViewItem::PolygonPath { points, .. } => {
+            if points.len() < 6 {
+                return None;
+            }
+            view_points_bbox(points).map(|(x0, y0, x1, y1)| (x0 - 1.0, y0 - 1.0, x1 + 1.0, y1 + 1.0))
+        }
+        ViewItem::StrokePolygonPath { points, width, .. } => {
+            if points.len() < 6 || *width <= 0.0 {
+                return None;
+            }
+            let m = width.max(1.0);
+            view_points_bbox(points).map(|(x0, y0, x1, y1)| (x0 - m, y0 - m, x1 + m, y1 + m))
         }
     }
 }
@@ -763,6 +948,60 @@ fn draw_view_item(sfc: &mut Surface, it: &ViewItem) {
             feather,
             rgba,
         } => shapes::fill_shadow(sfc, *x, *y, *w, *h, *radius, *feather, *rgba),
+        ViewItem::Polygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            rgba,
+            gradient,
+        } => {
+            let pts = view_polygon_points(*cx, *cy, *rx, *ry, *sides);
+            match gradient {
+                Some(g) => shapes::fill_polygon_with(
+                    sfc,
+                    &pts,
+                    &view_grad_fn(g, cx - rx, cy - ry, rx * 2.0, ry * 2.0),
+                ),
+                None => shapes::fill_polygon(sfc, &pts, *rgba),
+            }
+        }
+        ViewItem::StrokePolygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            width,
+            rgba,
+        } => {
+            let pts = view_polygon_points(*cx, *cy, *rx, *ry, *sides);
+            shapes::stroke_polygon(sfc, &pts, *width, *rgba);
+        }
+        ViewItem::Curve {
+            points,
+            width,
+            rgba,
+        } => shapes::stroke_curve(sfc, points, *width, *rgba),
+        ViewItem::PolygonPath {
+            points,
+            rgba,
+            gradient,
+        } => match gradient {
+            Some(g) => {
+                let Some((x0, y0, x1, y1)) = view_points_bbox(points) else {
+                    return;
+                };
+                shapes::fill_polygon_with(sfc, points, &view_grad_fn(g, x0, y0, x1 - x0, y1 - y0));
+            }
+            None => shapes::fill_polygon(sfc, points, *rgba),
+        },
+        ViewItem::StrokePolygonPath {
+            points,
+            width,
+            rgba,
+        } => shapes::stroke_polygon(sfc, points, *width, *rgba),
     }
 }
 

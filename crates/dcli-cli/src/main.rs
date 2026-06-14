@@ -235,16 +235,45 @@ enum DrawCmd {
         #[arg(long, default_value = "path")]
         name: String,
     },
+    /// 정다각형: 중심 (cx,cy) 외접 반지름 (rx,ry), 변 개수 --sides (위 꼭짓점 시작).
+    Polygon {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        #[arg(long, default_value_t = 5)]
+        sides: u32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "polygon")]
+        name: String,
+    },
+    /// 부드러운 곡선: 점 목록 "x,y x,y ..."를 지나는 Catmull-Rom 곡선.
+    Curve {
+        /// 공백 구분 앵커 점 목록. 예: "10,80 60,20 120,90 180,40"
+        points: String,
+        #[arg(long, default_value_t = 4.0)]
+        width: f32,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "curve")]
+        name: String,
+    },
+    /// 자유 다각형(닫힌 채움): 꼭짓점 목록 "x,y x,y ..." (3점 이상, 오목/별 모양 허용).
+    PolygonPath {
+        /// 공백 구분 꼭짓점 목록. 예: "100,20 180,180 20,80 180,80 20,180"
+        points: String,
+        #[arg(long, default_value = "0,0,0,255")]
+        color: String,
+        #[arg(long, default_value = "polygon")]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum DocCmd {
-    /// 새 문서를 생성한다.
+    /// 새 문서를 생성한다. 작업영역은 무한 — 크기 지정 없음(export는 frame 단위).
     Create {
-        #[arg(long, default_value_t = 512)]
-        w: u32,
-        #[arg(long, default_value_t = 512)]
-        h: u32,
         /// 비트깊이: u8(감마 합성) | u16 | f32(리니어 합성).
         #[arg(long, default_value = "u8")]
         depth: String,
@@ -310,12 +339,22 @@ enum LayerCmd {
         /// 코너 반경(px, rect 계열).
         #[arg(long)]
         radius: Option<f32>,
+        /// 다각형 변 개수(3~64, polygon 전용).
+        #[arg(long)]
+        sides: Option<u32>,
         /// 그림자 "dx,dy,blur,R,G,B,A".
         #[arg(long)]
         shadow: Option<String>,
         /// 그림자 제거.
         #[arg(long)]
         no_shadow: bool,
+    },
+    /// 도형 앵커/꼭짓점 편집(노드 보존 재래스터) — line(점 2개)·curve·path·polygon_path.
+    /// 정다각형(polygon)에 쓰면 자유 다각형(polygon_path)으로 변환된다(웹 점 편집과 동일).
+    Points {
+        id: u64,
+        /// 공백 구분 점 목록 "x,y x,y ..." (생성 시점 월드 좌표).
+        points: String,
     },
     /// 텍스트 레이어 편집(내용/크기/색/배경) — 노드 보존 재래스터.
     Text {
@@ -719,27 +758,81 @@ fn draw_to_shape(cmd: &DrawCmd) -> Result<(Shape, String)> {
             width,
             color,
             name,
+        } => (
+            Shape::Path {
+                points: parse_points(points)?,
+                width: *width,
+                rgba: parse_rgba(color)?,
+            },
+            name.clone(),
+        ),
+        DrawCmd::Polygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            color,
+            name,
         } => {
-            // "x,y x,y ..." → 평탄 좌표 배열.
-            let mut flat = Vec::new();
-            for pair in points.split_whitespace() {
-                let (x, y) = pair
-                    .split_once(',')
-                    .ok_or_else(|| anyhow::anyhow!("점은 'x,y' 형식: {pair}"))?;
-                flat.push(x.trim().parse::<f32>().context("x 좌표")?);
-                flat.push(y.trim().parse::<f32>().context("y 좌표")?);
-            }
-            anyhow::ensure!(flat.len() >= 2, "점이 최소 1개 필요");
+            anyhow::ensure!((3..=64).contains(sides), "--sides는 3~64");
             (
-                Shape::Path {
-                    points: flat,
-                    width: *width,
+                Shape::Polygon {
+                    cx: *cx,
+                    cy: *cy,
+                    rx: *rx,
+                    ry: *ry,
+                    sides: *sides,
                     rgba: parse_rgba(color)?,
+                    gradient: None,
+                },
+                name.clone(),
+            )
+        }
+        DrawCmd::Curve {
+            points,
+            width,
+            color,
+            name,
+        } => (
+            Shape::Curve {
+                points: parse_points(points)?,
+                width: *width,
+                rgba: parse_rgba(color)?,
+            },
+            name.clone(),
+        ),
+        DrawCmd::PolygonPath {
+            points,
+            color,
+            name,
+        } => {
+            let pts = parse_points(points)?;
+            anyhow::ensure!(pts.len() >= 6, "자유 다각형은 꼭짓점 3개 이상");
+            (
+                Shape::PolygonPath {
+                    points: pts,
+                    rgba: parse_rgba(color)?,
+                    gradient: None,
                 },
                 name.clone(),
             )
         }
     })
+}
+
+/// "x,y x,y ..." → 평탄 좌표 배열(점 최소 1개).
+fn parse_points(points: &str) -> anyhow::Result<Vec<f32>> {
+    let mut flat = Vec::new();
+    for pair in points.split_whitespace() {
+        let (x, y) = pair
+            .split_once(',')
+            .ok_or_else(|| anyhow::anyhow!("점은 'x,y' 형식: {pair}"))?;
+        flat.push(x.trim().parse::<f32>().context("x 좌표")?);
+        flat.push(y.trim().parse::<f32>().context("y 좌표")?);
+    }
+    anyhow::ensure!(flat.len() >= 2, "점이 최소 1개 필요");
+    Ok(flat)
 }
 
 /// 명시적 --server 모드면 데몬 문서 id를 만든다. id = --doc 경로의 파일명 stem
@@ -836,14 +929,15 @@ fn apply_one(cli: &Cli, path: &DocPath, action: Action) -> Result<BatchResult> {
 fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
     let path = DocPath::new(cli.doc.clone());
     match &cli.command {
-        Command::Doc(DocCmd::Create { w, h, depth }) => {
+        Command::Doc(DocCmd::Create { depth }) => {
             let depth_bd = parse_depth(depth)?;
+            let (dw, dh) = Document::DEFAULT_SIZE;
             if let Some(srv) = server_of(cli) {
                 // 데몬에 문서 등록(이미 있으면 멱등). 데몬이 진실원. dry-run은 호출 생략.
                 if !cli.dry_run {
-                    srv.ensure_doc(*w, *h, depth)?;
+                    srv.ensure_doc(depth)?;
                 }
-                let doc = Document::new(*w, *h, depth_bd);
+                let doc = Document::new(dw, dh, depth_bd);
                 emit.doc_created_target(&cli.doc, &doc, cli.dry_run, Some("live"));
                 return Ok(());
             }
@@ -852,7 +946,7 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 "이미 문서가 존재: {}",
                 cli.doc.display()
             );
-            let doc = Document::new(*w, *h, depth_bd);
+            let doc = Document::new(dw, dh, depth_bd);
             if !cli.dry_run {
                 path.save(&doc)?;
             }
@@ -942,11 +1036,25 @@ fn run(cli: &Cli, emit: &Emitter) -> Result<()> {
                 Shape::Path { rgba, .. } => serde_json::json!({
                     "type": "brush", "item": shape, "rgba": rgba,
                 }),
+                Shape::Curve { rgba, .. } => serde_json::json!({
+                    "type": "shape", "shape": "curve", "item": shape, "fill": rgba, "rgba": rgba,
+                    "stroke": null, "strokeWidth": 0,
+                }),
+                Shape::Polygon { rgba, sides, .. } => serde_json::json!({
+                    "type": "shape", "shape": "polygon", "item": shape, "fill": rgba, "rgba": rgba,
+                    "stroke": null, "strokeWidth": 0, "sides": sides,
+                }),
+                Shape::PolygonPath { rgba, .. } => serde_json::json!({
+                    "type": "shape", "shape": "polygon_path", "item": shape, "fill": rgba, "rgba": rgba,
+                    "stroke": null, "strokeWidth": 0,
+                }),
                 Shape::Rect { rgba, .. }
                 | Shape::Ellipse { rgba, .. }
                 | Shape::Line { rgba, .. }
                 | Shape::StrokeRect { rgba, .. }
                 | Shape::StrokeEllipse { rgba, .. }
+                | Shape::StrokePolygon { rgba, .. }
+                | Shape::StrokePolygonPath { rgba, .. }
                 | Shape::Shadow { rgba, .. } => serde_json::json!({
                     "type": "shape", "shape": name, "item": shape, "fill": rgba, "rgba": rgba,
                     "stroke": null, "strokeWidth": 0, "radius": 0,
@@ -1317,6 +1425,7 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
             stroke_width,
             no_stroke,
             radius,
+            sides,
             shadow,
             no_shadow,
         } => {
@@ -1380,6 +1489,15 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                         }
                     }
                 }
+                if let Some(n) = sides {
+                    anyhow::ensure!((3..=64).contains(n), "--sides는 3~64");
+                    anyhow::ensure!(
+                        m["item"]["shape"] == "polygon",
+                        "--sides는 다각형 레이어 전용"
+                    );
+                    m["item"]["sides"] = serde_json::json!(n);
+                    m["sides"] = serde_json::json!(n);
+                }
                 if *no_shadow {
                     if let Some(o) = m.as_object_mut() {
                         o.remove("shadow");
@@ -1391,6 +1509,53 @@ fn run_layer(cli: &Cli, emit: &Emitter, path: &DocPath, cmd: &LayerCmd) -> Resul
                 Ok(())
             })?;
             emit.ok_target(&format!("레이어 스타일: n{id}"), cli.dry_run, write_target(cli));
+            Ok(())
+        }
+        LayerCmd::Points { id, points } => {
+            let pts = parse_points(points)?;
+            restyle_layer(cli, &path, *id, |m| {
+                anyhow::ensure!(
+                    m["type"] == "shape" || m["type"] == "brush",
+                    "layer points는 도형/브러시 레이어 전용"
+                );
+                let kind = m["item"]["shape"].as_str().unwrap_or("").to_string();
+                match kind.as_str() {
+                    "line" => {
+                        anyhow::ensure!(pts.len() == 4, "line은 점 2개(\"x0,y0 x1,y1\")");
+                        m["item"]["x0"] = serde_json::json!(pts[0]);
+                        m["item"]["y0"] = serde_json::json!(pts[1]);
+                        m["item"]["x1"] = serde_json::json!(pts[2]);
+                        m["item"]["y1"] = serde_json::json!(pts[3]);
+                    }
+                    "curve" | "path" => {
+                        m["item"]["points"] = serde_json::json!(pts);
+                    }
+                    "polygon_path" => {
+                        anyhow::ensure!(pts.len() >= 6, "다각형은 꼭짓점 3개 이상");
+                        m["item"]["points"] = serde_json::json!(pts);
+                    }
+                    "polygon" => {
+                        anyhow::ensure!(pts.len() >= 6, "다각형은 꼭짓점 3개 이상");
+                        // 정다각형 → 자유 다각형 변환(꼭짓점 직접 편집 — 웹과 동일 규약).
+                        let rgba = m["item"]["rgba"].clone();
+                        let gradient = m["item"].get("gradient").cloned().filter(|g| !g.is_null());
+                        let mut item = serde_json::json!({
+                            "shape": "polygon_path", "points": pts, "rgba": rgba,
+                        });
+                        if let Some(g) = gradient {
+                            item["gradient"] = g;
+                        }
+                        m["item"] = item;
+                        m["shape"] = serde_json::json!("polygon_path");
+                        if let Some(o) = m.as_object_mut() {
+                            o.remove("sides");
+                        }
+                    }
+                    other => anyhow::bail!("점 편집 미지원 도형: {other:?}"),
+                }
+                Ok(())
+            })?;
+            emit.ok_target(&format!("점 편집: n{id}"), cli.dry_run, write_target(cli));
             Ok(())
         }
         LayerCmd::Text {

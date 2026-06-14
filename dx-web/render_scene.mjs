@@ -25,6 +25,12 @@ const circle = { shape: "ellipse", cx: 600, cy: 200, rx: 110, ry: 110, rgba: [22
 add(circle, shapeMeta(circle));
 const line = { shape: "line", x0: 80, y0: 480, x1: 720, y1: 430, width: 6, rgba: [40, 60, 90, 255] };
 add(line, shapeMeta(line));
+// 다각형(오각형) — 꼭짓점 AA·방향(위 꼭짓점) 검수.
+const penta = { shape: "polygon", cx: 620, cy: 430, rx: 85, ry: 78, sides: 5, rgba: [88, 86, 214, 235] };
+add(penta, { ...shapeMeta(penta), sides: 5 });
+// 곡선 — 앵커 통과·부드러움·둥근 끝 검수.
+const wave = { shape: "curve", points: [90, 545, 230, 495, 380, 560, 530, 500, 700, 545], width: 7, rgba: [200, 60, 120, 255] };
+add(wave, shapeMeta(wave));
 const title = { shape: "text", x: 100, y: 110, text: "디자인 검수 Scene — Aa한글123", size: 40, rgba: [24, 28, 32, 255] };
 add(title, { type: "text", x: title.x, y: title.y, text: title.text, size: title.size, rgba: title.rgba });
 // ── 신기능 검수: 그림자 / 그라데이션 / 채움없음 / 텍스트 배경 ──

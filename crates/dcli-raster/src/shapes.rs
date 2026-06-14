@@ -330,6 +330,147 @@ pub fn fill_shadow(
     }
 }
 
+/// 점 (px,py)의 단순 다각형 부호화 거리 — 음수=내부(짝홀 교차 + 최근접 변 거리).
+#[inline]
+fn polygon_sdf(px: f32, py: f32, pts: &[f32]) -> f32 {
+    let n = pts.len() / 2;
+    let mut inside = false;
+    let mut dist = f32::MAX;
+    let (mut jx, mut jy) = (pts[2 * n - 2], pts[2 * n - 1]);
+    for i in 0..n {
+        let (ix, iy) = (pts[2 * i], pts[2 * i + 1]);
+        // 짝홀 교차(수평 반직선) — 볼록/오목 무관.
+        if (iy > py) != (jy > py) {
+            let t = (py - iy) / (jy - iy);
+            if px < ix + t * (jx - ix) {
+                inside = !inside;
+            }
+        }
+        dist = dist.min(dist_point_segment(px, py, ix, iy, jx, jy));
+        (jx, jy) = (ix, iy);
+    }
+    if inside {
+        -dist
+    } else {
+        dist
+    }
+}
+
+#[inline]
+fn polygon_bbox(pts: &[f32]) -> (f32, f32, f32, f32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in pts.chunks_exact(2) {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    (x0, y0, x1, y1)
+}
+
+/// 채워진 다각형 — 꼭짓점 [x0,y0,x1,y1,...] (닫힘 가정, 3점 이상). 경계 1px AA.
+pub fn fill_polygon(s: &mut Surface, pts: &[f32], rgba: [u8; 4]) {
+    let color = to_linear(rgba);
+    fill_polygon_with(s, pts, &|_, _| color);
+}
+
+/// 픽셀별 색 콜백 버전(그라데이션 채움).
+pub fn fill_polygon_with(s: &mut Surface, pts: &[f32], color_at: &dyn Fn(f32, f32) -> LinearPremul) {
+    if pts.len() < 6 {
+        return;
+    }
+    let (x0, y0, x1, y1) = polygon_bbox(pts);
+    let px0 = (x0 - 1.0).floor().max(0.0) as u32;
+    let py0 = (y0 - 1.0).floor().max(0.0) as u32;
+    let px1 = (((x1 + 1.0).ceil() as i64).clamp(0, s.width() as i64)) as u32;
+    let py1 = (((y1 + 1.0).ceil() as i64).clamp(0, s.height() as i64)) as u32;
+    for py in py0..py1 {
+        for px in px0..px1 {
+            let (cx, cy) = (px as f32 + 0.5, py as f32 + 0.5);
+            let cov = (0.5 - polygon_sdf(cx, cy, pts)).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                blend_px(s, px, py, color_at(cx, cy), cov);
+            }
+        }
+    }
+}
+
+/// 다각형 테두리 — 링만, 두께 `width`(안쪽으로). (outer − inner) 한 패스 커버리지.
+/// 두께가 내접 반지름 이상이면 자연히 채움으로 수렴한다.
+pub fn stroke_polygon(s: &mut Surface, pts: &[f32], width: f32, rgba: [u8; 4]) {
+    if pts.len() < 6 || width <= 0.0 {
+        return;
+    }
+    let color = to_linear(rgba);
+    let (x0, y0, x1, y1) = polygon_bbox(pts);
+    let px0 = (x0 - 1.0).floor().max(0.0) as u32;
+    let py0 = (y0 - 1.0).floor().max(0.0) as u32;
+    let px1 = (((x1 + 1.0).ceil() as i64).clamp(0, s.width() as i64)) as u32;
+    let py1 = (((y1 + 1.0).ceil() as i64).clamp(0, s.height() as i64)) as u32;
+    for py in py0..py1 {
+        for px in px0..px1 {
+            let sd = polygon_sdf(px as f32 + 0.5, py as f32 + 0.5, pts);
+            let outer = (0.5 - sd).clamp(0.0, 1.0);
+            let inner = (0.5 - (sd + width)).clamp(0.0, 1.0);
+            let cov = (outer - inner).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                blend_px(s, px, py, color, cov);
+            }
+        }
+    }
+}
+
+/// 점들을 지나는 uniform Catmull-Rom 스플라인 평탄화(끝점 클램프).
+/// pts = [x0,y0,...] (2점 이상). ★bounds contract★: 이 곡선의 체인 이탈은 축별로
+/// 0.393×(인접 점 최대 스텝) 이하 — dispatch shape_bounds의 0.5×스텝 마진이 이를 덮는다.
+pub fn catmull_rom_flatten(pts: &[f32]) -> Vec<f32> {
+    let n = pts.len() / 2;
+    if n < 2 {
+        return pts.to_vec();
+    }
+    let p = |i: isize| -> (f32, f32) {
+        let i = i.clamp(0, n as isize - 1) as usize;
+        (pts[2 * i], pts[2 * i + 1])
+    };
+    let mut out = Vec::with_capacity(pts.len() * 8);
+    out.push(pts[0]);
+    out.push(pts[1]);
+    for i in 0..(n - 1) {
+        let i = i as isize;
+        let (p0, p1, p2, p3) = (p(i - 1), p(i), p(i + 1), p(i + 2));
+        let (m1x, m1y) = ((p2.0 - p0.0) * 0.5, (p2.1 - p0.1) * 0.5);
+        let (m2x, m2y) = ((p3.0 - p1.0) * 0.5, (p3.1 - p1.1) * 0.5);
+        let chord = ((p2.0 - p1.0).powi(2) + (p2.1 - p1.1).powi(2)).sqrt();
+        let steps = ((chord / 2.5).ceil() as usize).clamp(4, 48);
+        for k in 1..=steps {
+            let t = k as f32 / steps as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+            let h10 = t3 - 2.0 * t2 + t;
+            let h01 = -2.0 * t3 + 3.0 * t2;
+            let h11 = t3 - t2;
+            out.push(h00 * p1.0 + h10 * m1x + h01 * p2.0 + h11 * m2x);
+            out.push(h00 * p1.1 + h10 * m1y + h01 * p2.1 + h11 * m2y);
+        }
+    }
+    out
+}
+
+/// 부드러운 곡선 — 점들을 지나는 Catmull-Rom을 둥근 끝(capsule) 선분 연쇄로 스트로크.
+pub fn stroke_curve(s: &mut Surface, pts: &[f32], width: f32, rgba: [u8; 4]) {
+    if width <= 0.0 || pts.len() < 2 {
+        return;
+    }
+    if pts.len() == 2 {
+        // 점 1개(클릭)는 도트.
+        return stroke_line(s, pts[0], pts[1], pts[0], pts[1], width, rgba);
+    }
+    let flat = catmull_rom_flatten(pts);
+    for seg in flat.windows(4).step_by(2) {
+        stroke_line(s, seg[0], seg[1], seg[2], seg[3], width, rgba);
+    }
+}
+
 /// 선분 — (x0,y0)→(x1,y1), 두께 width. 둥근 끝(capsule 거리)으로 AA.
 pub fn stroke_line(s: &mut Surface, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, rgba: [u8; 4]) {
     if width <= 0.0 {
@@ -627,6 +768,80 @@ mod tests {
             [0, 0, 255, 255],
             "t=1 → 마지막 stop"
         );
+    }
+
+    /// 정다각형 꼭짓점(테스트용 — dispatch와 동일 정의: 위쪽 시작).
+    fn ngon(cx: f32, cy: f32, rx: f32, ry: f32, n: u32) -> Vec<f32> {
+        (0..n)
+            .flat_map(|k| {
+                let a = -std::f32::consts::FRAC_PI_2
+                    + k as f32 * std::f32::consts::TAU / n as f32;
+                [cx + rx * a.cos(), cy + ry * a.sin()]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn polygon_center_opaque_corner_transparent() {
+        let mut s = Surface::new(40, 40);
+        fill_polygon(&mut s, &ngon(20.0, 20.0, 16.0, 16.0, 5), [255, 80, 0, 255]);
+        assert_eq!(s.get(20, 20).to_srgb8_straight()[3], 255, "중심 불투명");
+        // 위 꼭짓점(20, 4) 바로 위는 내부.
+        assert!(s.get(20, 6).to_srgb8_straight()[3] > 200, "위 꼭짓점 방향 내부");
+        // 오각형(꼭짓점 위)은 좌상단 모서리가 잘린다.
+        assert_eq!(s.get(6, 6).to_srgb8_straight()[3], 0, "모서리 투명");
+        assert_eq!(s.get(0, 0).to_srgb8_straight()[3], 0, "바깥 투명");
+    }
+
+    #[test]
+    fn polygon_triangle_points_up() {
+        // 삼각형(sides=3, 위 꼭짓점): 아래 변 중앙은 내부, 위쪽 좌우는 외부.
+        let mut s = Surface::new(40, 40);
+        fill_polygon(&mut s, &ngon(20.0, 20.0, 15.0, 15.0, 3), [0, 0, 0, 255]);
+        assert!(s.get(20, 8).to_srgb8_straight()[3] > 200, "위 꼭짓점 내부");
+        assert!(s.get(20, 25).to_srgb8_straight()[3] > 200, "중심 아래 내부");
+        assert_eq!(s.get(8, 8).to_srgb8_straight()[3], 0, "좌상단 외부(꼭짓점 위 방향)");
+        assert_eq!(s.get(32, 8).to_srgb8_straight()[3], 0, "우상단 외부");
+    }
+
+    #[test]
+    fn stroke_polygon_hollow_center() {
+        let mut s = Surface::new(40, 40);
+        stroke_polygon(&mut s, &ngon(20.0, 20.0, 16.0, 16.0, 6), 3.0, [0, 0, 255, 255]);
+        assert_eq!(s.get(20, 20).to_srgb8_straight()[3], 0, "중심 투명");
+        // 위 꼭짓점(20,4) 안쪽 링 위.
+        assert!(s.get(20, 6).to_srgb8_straight()[3] > 200, "링 위 불투명");
+        assert_eq!(s.get(0, 0).to_srgb8_straight()[3], 0, "바깥 투명");
+    }
+
+    #[test]
+    fn curve_passes_through_anchor_points() {
+        // CR 곡선은 모든 앵커를 통과한다 — 각 앵커 픽셀이 칠해져야 한다.
+        let mut s = Surface::new(120, 80);
+        let pts = [10.0, 60.0, 40.0, 20.0, 80.0, 60.0, 110.0, 30.0];
+        stroke_curve(&mut s, &pts, 4.0, [0, 0, 0, 255]);
+        for a in pts.chunks_exact(2) {
+            let alpha = s.get(a[0] as u32, a[1] as u32).to_srgb8_straight()[3];
+            assert!(alpha > 200, "앵커 ({}, {}) 통과: alpha={alpha}", a[0], a[1]);
+        }
+        assert_eq!(s.get(5, 10).to_srgb8_straight()[3], 0, "곡선 밖 투명");
+    }
+
+    #[test]
+    fn curve_overshoot_within_bounds_margin() {
+        // 지그재그 곡선의 이탈이 0.5×최대 스텝 마진 안에 있는지(=bounds 계약) 확인.
+        let pts = [20.0, 40.0, 60.0, 10.0, 100.0, 70.0, 140.0, 10.0];
+        let flat = catmull_rom_flatten(&pts);
+        let (mut sx, mut sy) = (0.0f32, 0.0f32);
+        for w in pts.chunks_exact(2).collect::<Vec<_>>().windows(2) {
+            sx = sx.max((w[1][0] - w[0][0]).abs());
+            sy = sy.max((w[1][1] - w[0][1]).abs());
+        }
+        let (bx0, by0, bx1, by1) = polygon_bbox(&pts);
+        for p in flat.chunks_exact(2) {
+            assert!(p[0] >= bx0 - 0.5 * sx && p[0] <= bx1 + 0.5 * sx, "x 이탈: {}", p[0]);
+            assert!(p[1] >= by0 - 0.5 * sy && p[1] <= by1 + 0.5 * sy, "y 이탈: {}", p[1]);
+        }
     }
 
     #[test]

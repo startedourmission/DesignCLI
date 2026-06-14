@@ -1221,6 +1221,76 @@ fn shape_to_view(sh: dcli_cli::dispatch::Shape, dx: f32, dy: f32) -> dcli_raster
             feather,
             rgba,
         },
+        S::Polygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            rgba,
+            gradient,
+        } => V::Polygon {
+            cx: cx + dx,
+            cy: cy + dy,
+            rx,
+            ry,
+            sides,
+            rgba,
+            gradient: gradient.map(grad_to_view),
+        },
+        S::StrokePolygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            width,
+            rgba,
+        } => V::StrokePolygon {
+            cx: cx + dx,
+            cy: cy + dy,
+            rx,
+            ry,
+            sides,
+            width,
+            rgba,
+        },
+        S::Curve {
+            points,
+            width,
+            rgba,
+        } => V::Curve {
+            points: points
+                .chunks(2)
+                .flat_map(|p| [p[0] + dx, p[1] + dy])
+                .collect(),
+            width,
+            rgba,
+        },
+        S::PolygonPath {
+            points,
+            rgba,
+            gradient,
+        } => V::PolygonPath {
+            points: points
+                .chunks(2)
+                .flat_map(|p| [p[0] + dx, p[1] + dy])
+                .collect(),
+            rgba,
+            gradient: gradient.map(grad_to_view),
+        },
+        S::StrokePolygonPath {
+            points,
+            width,
+            rgba,
+        } => V::StrokePolygonPath {
+            points: points
+                .chunks(2)
+                .flat_map(|p| [p[0] + dx, p[1] + dy])
+                .collect(),
+            width,
+            rgba,
+        },
     }
 }
 

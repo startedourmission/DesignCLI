@@ -309,13 +309,43 @@ export class App extends EventTarget {
           const m = Math.max(it.width, 1);
           x0 = it.x - m; y0 = it.y - m; break;
         }
-        case "ellipse":
+        case "ellipse": case "polygon":
           if (!(it.rx > 0 && it.ry > 0)) continue;
           x0 = it.cx - it.rx - 1; y0 = it.cy - it.ry - 1; break;
-        case "stroke_ellipse": {
+        case "stroke_ellipse": case "stroke_polygon": {
           if (!(it.rx > 0 && it.ry > 0 && it.width > 0)) continue;
           const m = Math.max(it.width, 1);
           x0 = it.cx - it.rx - m; y0 = it.cy - it.ry - m; break;
+        }
+        case "polygon_path": {
+          if ((it.points?.length ?? 0) < 6) continue;
+          let px = it.points[0], py = it.points[1];
+          for (let i = 2; i + 1 < it.points.length; i += 2) {
+            px = Math.min(px, it.points[i]); py = Math.min(py, it.points[i + 1]);
+          }
+          x0 = px - 1; y0 = py - 1; break;
+        }
+        case "stroke_polygon_path": {
+          if ((it.points?.length ?? 0) < 6 || !(it.width > 0)) continue;
+          const m = Math.max(it.width, 1);
+          let px = it.points[0], py = it.points[1];
+          for (let i = 2; i + 1 < it.points.length; i += 2) {
+            px = Math.min(px, it.points[i]); py = Math.min(py, it.points[i + 1]);
+          }
+          x0 = px - m; y0 = py - m; break;
+        }
+        case "curve": {
+          // 엔진 shape_bounds Curve 미러: 마진 = 두께/2 + 1 + 0.5×(축별 최대 인접 스텝).
+          if (!(it.width > 0) || (it.points?.length ?? 0) < 2) continue;
+          let px = it.points[0], py = it.points[1], sx = 0, sy = 0;
+          for (let i = 2; i + 1 < it.points.length; i += 2) {
+            px = Math.min(px, it.points[i]); py = Math.min(py, it.points[i + 1]);
+            sx = Math.max(sx, Math.abs(it.points[i] - it.points[i - 2]));
+            sy = Math.max(sy, Math.abs(it.points[i + 1] - it.points[i - 1]));
+          }
+          x0 = px - (it.width * 0.5 + 1 + 0.5 * sx);
+          y0 = py - (it.width * 0.5 + 1 + 0.5 * sy);
+          break;
         }
         case "line": {
           if (!(it.width > 0)) continue;
@@ -470,6 +500,8 @@ export class App extends EventTarget {
       const g = it.shape === "rect" ? { x: it.x, y: it.y, w: it.w, h: it.h, r: 0 }
         : it.shape === "rounded_rect" ? { x: it.x, y: it.y, w: it.w, h: it.h, r: it.radius ?? 0 }
         : it.shape === "ellipse" ? { x: it.cx - it.rx, y: it.cy - it.ry, w: it.rx * 2, h: it.ry * 2, r: Math.min(it.rx, it.ry) }
+        : it.shape === "polygon" ? { x: it.cx - it.rx, y: it.cy - it.ry, w: it.rx * 2, h: it.ry * 2, r: Math.min(it.rx, it.ry) * 0.5 }
+        : it.shape === "polygon_path" ? this._pointsBboxGeom(it.points)
         : null;
       if (meta.shadow?.rgba && g && g.w > 0 && g.h > 0) {
         items.push({
@@ -508,6 +540,18 @@ export class App extends EventTarget {
     return item ? { ...item, rgba } : null;
   }
 
+  /** 점 목록 bbox → 그림자 지오메트리(r = min(w,h)×0.25 — dispatch items_from_meta 미러). */
+  _pointsBboxGeom(points) {
+    if ((points?.length ?? 0) < 6) return null;
+    let x0 = points[0], y0 = points[1], x1 = points[0], y1 = points[1];
+    for (let i = 2; i + 1 < points.length; i += 2) {
+      x0 = Math.min(x0, points[i]); x1 = Math.max(x1, points[i]);
+      y0 = Math.min(y0, points[i + 1]); y1 = Math.max(y1, points[i + 1]);
+    }
+    const w = x1 - x0, h = y1 - y0;
+    return { x: x0, y: y0, w, h, r: Math.min(w, h) * 0.25 };
+  }
+
   _shapeKindOf(meta, l) {
     return String(meta?.shape ?? meta?.item?.shape ?? l?.name ?? "").toLowerCase();
   }
@@ -536,6 +580,10 @@ export class App extends EventTarget {
         return B.strokeEllipse(fillItem.cx, fillItem.cy, fillItem.rx, fillItem.ry, w, rgba);
       case "rounded_rect":
         return B.strokeRoundedRect(fillItem.x, fillItem.y, fillItem.w, fillItem.h, fillItem.radius, w, rgba);
+      case "polygon":
+        return B.strokePolygon(fillItem.cx, fillItem.cy, fillItem.rx, fillItem.ry, fillItem.sides, w, rgba);
+      case "polygon_path":
+        return B.strokePolygonPath(fillItem.points, w, rgba);
       default:
         return null;
     }
@@ -631,6 +679,69 @@ export class App extends EventTarget {
     return this._applyMetaRestyle(l, { ...m, item, radius: r });
   }
 
+  /** 다각형 변 개수(3~64) — 노드 보존 재래스터. */
+  setShapeSides(id, sides) {
+    const l = this.layers().find((v) => v.id === id);
+    const m = this._ensureShapeMeta(l, this._metaOf(l));
+    if (!l || !m || m.type !== "shape" || m.item?.shape !== "polygon") return false;
+    const n = Math.max(3, Math.min(64, Math.round(Number(sides) || 0) || 5));
+    return this._applyMetaRestyle(l, { ...m, item: { ...m.item, sides: n }, sides: n });
+  }
+
+  /** 점 편집 가능한 도형의 앵커/꼭짓점 목록(item 좌표 = 생성 시점 월드).
+   *  polygon은 정점 전개를 돌려준다(편집 시작용 — 첫 드래그에서 polygon_path로 변환).
+   *  path(브러시)는 점이 너무 촘촘해 UI 편집 대상에서 제외. */
+  shapePoints(l, meta) {
+    const it = meta?.item;
+    if (!it || (meta.type !== "shape" && meta.type !== "brush")) return null;
+    switch (it.shape) {
+      case "line": return [it.x0, it.y0, it.x1, it.y1];
+      case "curve": case "polygon_path": return [...(it.points ?? [])];
+      case "polygon": return B.polygonPoints(it.cx, it.cy, it.rx, it.ry, it.sides ?? 5);
+      default: return null;
+    }
+  }
+
+  /** 앵커/꼭짓점 교체(노드 보존 재래스터 + offset 리베이스).
+   *  polygon은 자유 다각형(polygon_path)으로 변환된다 — CLI `layer points`와 동일 규약. */
+  setShapePoints(id, pts) {
+    const l = this.layers().find((v) => v.id === id);
+    const m = this._ensureShapeMeta(l, this._metaOf(l));
+    if (!l || !m || (m.type !== "shape" && m.type !== "brush") || !m.item) return false;
+    const it = m.item;
+    if (it.shape === "line") {
+      if (pts.length !== 4) return false;
+      return this._applyMetaRestyle(l, { ...m, item: { ...it, x0: pts[0], y0: pts[1], x1: pts[2], y1: pts[3] } });
+    }
+    if (it.shape === "curve" || it.shape === "path") {
+      if (pts.length < 2) return false;
+      return this._applyMetaRestyle(l, { ...m, item: { ...it, points: [...pts] } });
+    }
+    if (it.shape === "polygon_path") {
+      if (pts.length < 6) return false;
+      return this._applyMetaRestyle(l, { ...m, item: { ...it, points: [...pts] } });
+    }
+    if (it.shape === "polygon") {
+      if (pts.length < 6) return false;
+      const item = { shape: "polygon_path", points: [...pts], rgba: it.rgba };
+      if (it.gradient) item.gradient = it.gradient;
+      const next = { ...m, shape: "polygon_path", item };
+      delete next.sides;
+      return this._applyMetaRestyle(l, next);
+    }
+    return false;
+  }
+
+  /** 선형 아이템(line/curve/path) 두께 — 노드 보존 재래스터. */
+  setItemWidth(id, width) {
+    const l = this.layers().find((v) => v.id === id);
+    const m = this._ensureShapeMeta(l, this._metaOf(l));
+    if (!l || !m || (m.type !== "shape" && m.type !== "brush")) return false;
+    if (!m.item || !["line", "curve", "path"].includes(m.item.shape)) return false;
+    const w = Math.max(0.5, Math.min(400, Number(width) || 0) || 1);
+    return this._applyMetaRestyle(l, { ...m, item: { ...m.item, width: w } });
+  }
+
   /** 그림자 — {dx, dy, blur, rgba} 또는 null(제거). */
   setShapeShadow(id, shadow) {
     const l = this.layers().find((v) => v.id === id);
@@ -682,19 +793,26 @@ export class App extends EventTarget {
       const a = W(it.x, it.y), b = W(it.x + it.w, it.y + it.h);
       const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
       baked = { ...it, x, y, w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
-    } else if (it.shape === "ellipse") {
+    } else if (it.shape === "ellipse" || it.shape === "polygon") {
       const c = W(it.cx, it.cy);
       baked = { ...it, cx: c.x, cy: c.y, rx: it.rx * asx, ry: it.ry * asy };
     } else if (it.shape === "line") {
       const a = W(it.x0, it.y0), b = W(it.x1, it.y1);
       baked = { ...it, x0: a.x, y0: a.y, x1: b.x, y1: b.y, width: Math.max(0.5, it.width * (asx + asy) / 2) };
-    } else if (it.shape === "path") {
+    } else if (it.shape === "path" || it.shape === "curve") {
       const pts = [];
       for (let i = 0; i + 1 < (it.points?.length ?? 0); i += 2) {
         const p = W(it.points[i], it.points[i + 1]);
         pts.push(p.x, p.y);
       }
       baked = { ...it, points: pts, width: Math.max(0.5, it.width * (asx + asy) / 2) };
+    } else if (it.shape === "polygon_path") {
+      const pts = [];
+      for (let i = 0; i + 1 < (it.points?.length ?? 0); i += 2) {
+        const p = W(it.points[i], it.points[i + 1]);
+        pts.push(p.x, p.y);
+      }
+      baked = { ...it, points: pts };
     }
     if (!baked) return false;
     // 굽힌 아이템은 월드 좌표 — 엔진 origin을 그대로 쓰고(offset 생략) scale은 1로 리셋.

@@ -184,6 +184,76 @@ pub enum Shape {
         width: f32,
         rgba: [u8; 4],
     },
+    /// 정다각형: 중심 (cx,cy), 외접 반지름 (rx,ry), 변 sides(3~64, 위 꼭짓점 시작).
+    /// gradient가 있으면 rgba 대신 그라데이션.
+    Polygon {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        sides: u32,
+        rgba: [u8; 4],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gradient: Option<GradFill>,
+    },
+    /// 정다각형 테두리: 링만, 두께 width(안쪽으로).
+    StrokePolygon {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        sides: u32,
+        width: f32,
+        rgba: [u8; 4],
+    },
+    /// 부드러운 곡선 — 점들을 **지나는** Catmull-Rom 스플라인(둥근 끝 스트로크).
+    /// points = [x0,y0,x1,y1,...] (앵커, 2점 이상 권장 — 1점은 도트).
+    Curve {
+        points: Vec<f32>,
+        width: f32,
+        rgba: [u8; 4],
+    },
+    /// 자유 다각형(닫힌 채움) — 꼭짓점 points = [x0,y0,...] (3점 이상, 오목 허용).
+    /// 정다각형(polygon)의 꼭짓점을 직접 편집하면 이 형태로 변환된다.
+    PolygonPath {
+        points: Vec<f32>,
+        rgba: [u8; 4],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gradient: Option<GradFill>,
+    },
+    /// 자유 다각형 테두리 — 링만, 두께 width(안쪽으로).
+    StrokePolygonPath {
+        points: Vec<f32>,
+        width: f32,
+        rgba: [u8; 4],
+    },
+}
+
+/// 점 목록 [x0,y0,...]의 bbox (min_x, min_y, max_x, max_y). 점이 없으면 None.
+fn points_bbox(points: &[f32]) -> Option<(f32, f32, f32, f32)> {
+    if points.len() < 2 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (points[0], points[1], points[0], points[1]);
+    for p in points.chunks_exact(2) {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    Some((x0, y0, x1, y1))
+}
+
+/// 정다각형 꼭짓점 [x0,y0,...] — 위 꼭짓점(-90°)에서 시계방향, sides는 3~64로 clamp.
+fn regular_polygon_points(cx: f32, cy: f32, rx: f32, ry: f32, sides: u32) -> Vec<f32> {
+    let n = sides.clamp(3, 64);
+    let mut pts = Vec::with_capacity(n as usize * 2);
+    for k in 0..n {
+        let a = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::TAU / n as f32;
+        pts.push(cx + rx * a.cos());
+        pts.push(cy + ry * a.sin());
+    }
+    pts
 }
 
 /// 노드 속성 부분 패치(지정한 필드만 변경).
@@ -597,6 +667,15 @@ pub fn items_from_meta(m: &serde_json::Value) -> Option<Vec<Shape>> {
                     Shape::Rect { x, y, w, h, .. } => (*x, *y, *w, *h, 0.0),
                     Shape::RoundedRect { x, y, w, h, radius, .. } => (*x, *y, *w, *h, *radius),
                     Shape::Ellipse { cx, cy, rx, ry, .. } => (cx - rx, cy - ry, rx * 2.0, ry * 2.0, rx.min(*ry)),
+                    // 다각형 그림자는 bbox 라운드 박스 근사(웹 itemsFromMeta와 동일 규약).
+                    Shape::Polygon { cx, cy, rx, ry, .. } => (cx - rx, cy - ry, rx * 2.0, ry * 2.0, rx.min(*ry) * 0.5),
+                    Shape::PolygonPath { points, .. } => match points_bbox(points) {
+                        Some((x0, y0, x1, y1)) => {
+                            let (w, h) = (x1 - x0, y1 - y0);
+                            (x0, y0, w, h, w.min(h) * 0.25)
+                        }
+                        None => (0.0, 0.0, -1.0, -1.0, 0.0),
+                    },
                     _ => (0.0, 0.0, -1.0, -1.0, 0.0),
                 };
                 if gw > 0.0 && gh > 0.0 {
@@ -629,6 +708,12 @@ pub fn items_from_meta(m: &serde_json::Value) -> Option<Vec<Shape>> {
                             }),
                             Shape::Ellipse { cx, cy, rx, ry, .. } => v.push(Shape::StrokeEllipse {
                                 cx: *cx, cy: *cy, rx: *rx, ry: *ry, width: sw, rgba: srgba,
+                            }),
+                            Shape::Polygon { cx, cy, rx, ry, sides, .. } => v.push(Shape::StrokePolygon {
+                                cx: *cx, cy: *cy, rx: *rx, ry: *ry, sides: *sides, width: sw, rgba: srgba,
+                            }),
+                            Shape::PolygonPath { points, .. } => v.push(Shape::StrokePolygonPath {
+                                points: points.clone(), width: sw, rgba: srgba,
                             }),
                             _ => {}
                         }
@@ -740,6 +825,67 @@ fn shape_bounds(items: &[Shape]) -> Option<(f32, f32, f32, f32)> {
                         maxy = maxy.max(y);
                     }
                     add(minx - m, miny - m, maxx + m, maxy + m);
+                }
+            }
+            // 다각형은 외접 타원에 내접 — 타원 bounds 공식을 그대로 쓴다(JS 미러 동일).
+            Shape::Polygon { cx, cy, rx, ry, .. } => {
+                if *rx > 0.0 && *ry > 0.0 {
+                    add(
+                        *cx - *rx - 1.0,
+                        *cy - *ry - 1.0,
+                        *cx + *rx + 1.0,
+                        *cy + *ry + 1.0,
+                    );
+                }
+            }
+            Shape::StrokePolygon {
+                cx,
+                cy,
+                rx,
+                ry,
+                width,
+                ..
+            } => {
+                if *rx > 0.0 && *ry > 0.0 && *width > 0.0 {
+                    let m = width.max(1.0);
+                    add(*cx - *rx - m, *cy - *ry - m, *cx + *rx + m, *cy + *ry + m);
+                }
+            }
+            // 자유 다각형 — 꼭짓점 bbox ± 1px AA 마진(JS 미러 동일).
+            Shape::PolygonPath { points, .. } => {
+                if points.len() >= 6 {
+                    if let Some((x0, y0, x1, y1)) = points_bbox(points) {
+                        add(x0 - 1.0, y0 - 1.0, x1 + 1.0, y1 + 1.0);
+                    }
+                }
+            }
+            Shape::StrokePolygonPath { points, width, .. } => {
+                if points.len() >= 6 && *width > 0.0 {
+                    if let Some((x0, y0, x1, y1)) = points_bbox(points) {
+                        let m = width.max(1.0);
+                        add(x0 - m, y0 - m, x1 + m, y1 + m);
+                    }
+                }
+            }
+            // 곡선 마진 = 두께/2 + 1 + 0.5×(축별 최대 인접 스텝) — uniform CR의 체인 이탈
+            // 상계(0.393×스텝)를 덮는다. ★JS _itemsOrigin의 curve 케이스와 동일 수식★
+            Shape::Curve { points, width, .. } => {
+                if points.len() >= 2 && *width > 0.0 {
+                    let (mut minx, mut miny) = (points[0], points[1]);
+                    let (mut maxx, mut maxy) = (points[0], points[1]);
+                    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+                    for i in (2..points.len() - 1).step_by(2) {
+                        let (x, y) = (points[i], points[i + 1]);
+                        minx = minx.min(x);
+                        maxx = maxx.max(x);
+                        miny = miny.min(y);
+                        maxy = maxy.max(y);
+                        sx = sx.max((x - points[i - 2]).abs());
+                        sy = sy.max((y - points[i - 1]).abs());
+                    }
+                    let mx = *width * 0.5 + 1.0 + 0.5 * sx;
+                    let my = *width * 0.5 + 1.0 + 0.5 * sy;
+                    add(minx - mx, miny - my, maxx + mx, maxy + my);
                 }
             }
             Shape::Shadow {
@@ -923,6 +1069,94 @@ fn shift_shape(shape: &Shape, dx: f32, dy: f32) -> Shape {
                 rgba: *rgba,
             }
         }
+        Shape::Polygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            rgba,
+            gradient,
+        } => Shape::Polygon {
+            cx: cx + dx,
+            cy: cy + dy,
+            rx: *rx,
+            ry: *ry,
+            sides: *sides,
+            rgba: *rgba,
+            gradient: gradient.clone(),
+        },
+        Shape::StrokePolygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            width,
+            rgba,
+        } => Shape::StrokePolygon {
+            cx: cx + dx,
+            cy: cy + dy,
+            rx: *rx,
+            ry: *ry,
+            sides: *sides,
+            width: *width,
+            rgba: *rgba,
+        },
+        Shape::Curve {
+            points,
+            width,
+            rgba,
+        } => {
+            let mut p = points.clone();
+            for chunk in p.chunks_mut(2) {
+                if let [x, y] = chunk {
+                    *x += dx;
+                    *y += dy;
+                }
+            }
+            Shape::Curve {
+                points: p,
+                width: *width,
+                rgba: *rgba,
+            }
+        }
+        Shape::PolygonPath {
+            points,
+            rgba,
+            gradient,
+        } => {
+            let mut p = points.clone();
+            for chunk in p.chunks_mut(2) {
+                if let [x, y] = chunk {
+                    *x += dx;
+                    *y += dy;
+                }
+            }
+            Shape::PolygonPath {
+                points: p,
+                rgba: *rgba,
+                gradient: gradient.clone(),
+            }
+        }
+        Shape::StrokePolygonPath {
+            points,
+            width,
+            rgba,
+        } => {
+            let mut p = points.clone();
+            for chunk in p.chunks_mut(2) {
+                if let [x, y] = chunk {
+                    *x += dx;
+                    *y += dy;
+                }
+            }
+            Shape::StrokePolygonPath {
+                points: p,
+                width: *width,
+                rgba: *rgba,
+            }
+        }
     }
 }
 
@@ -1066,6 +1300,60 @@ fn draw_shape(s: &mut Surface, shape: &Shape) {
                 shapes::stroke_line(s, points[0], points[1], points[0], points[1], *width, *rgba);
             }
         }
+        Shape::Polygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            rgba,
+            gradient,
+        } => {
+            let pts = regular_polygon_points(*cx, *cy, *rx, *ry, *sides);
+            match gradient {
+                Some(g) => shapes::fill_polygon_with(
+                    s,
+                    &pts,
+                    &grad_color_fn(g, cx - rx, cy - ry, rx * 2.0, ry * 2.0),
+                ),
+                None => shapes::fill_polygon(s, &pts, *rgba),
+            }
+        }
+        Shape::StrokePolygon {
+            cx,
+            cy,
+            rx,
+            ry,
+            sides,
+            width,
+            rgba,
+        } => {
+            let pts = regular_polygon_points(*cx, *cy, *rx, *ry, *sides);
+            shapes::stroke_polygon(s, &pts, *width, *rgba);
+        }
+        Shape::Curve {
+            points,
+            width,
+            rgba,
+        } => shapes::stroke_curve(s, points, *width, *rgba),
+        Shape::PolygonPath {
+            points,
+            rgba,
+            gradient,
+        } => match gradient {
+            Some(g) => {
+                let Some((x0, y0, x1, y1)) = points_bbox(points) else {
+                    return;
+                };
+                shapes::fill_polygon_with(s, points, &grad_color_fn(g, x0, y0, x1 - x0, y1 - y0));
+            }
+            None => shapes::fill_polygon(s, points, *rgba),
+        },
+        Shape::StrokePolygonPath {
+            points,
+            width,
+            rgba,
+        } => shapes::stroke_polygon(s, points, *width, *rgba),
     }
 }
 
@@ -1826,5 +2114,135 @@ mod tests {
         assert!(!res.ok);
         assert_eq!(res.issues[0].code, "duplicate_bind");
         assert_eq!(h.doc.pixels().len(), 0, "롤백 후 표면 누수 0");
+    }
+
+    /// 표면 가장자리 1px 링이 전부 투명이어야 한다 — bounds가 도형을 클리핑하지 않는다는 증거.
+    fn assert_border_transparent(s: &Surface, what: &str) {
+        let (w, h) = (s.width(), s.height());
+        for x in 0..w {
+            for y in [0, h - 1] {
+                assert_eq!(s.get(x, y).to_srgb8_straight()[3], 0, "{what} 클리핑: ({x},{y})");
+            }
+        }
+        for y in 0..h {
+            for x in [0, w - 1] {
+                assert_eq!(s.get(x, y).to_srgb8_straight()[3], 0, "{what} 클리핑: ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn curve_bounds_contain_overshoot() {
+        // 급격한 지그재그 곡선 — CR 오버슈트가 bounds 마진(0.5×스텝) 안에 들어와야
+        // 표면에서 잘리지 않는다(잘리면 가장자리에 불투명 픽셀이 닿는다).
+        let mut h = History::new(Document::new(400, 300, BitDepth::U8));
+        let actions = vec![Action::AddPaintLayer {
+            name: "curve".into(),
+            source: PixelSource::Shapes {
+                items: vec![Shape::Curve {
+                    points: vec![40.0, 200.0, 120.0, 40.0, 200.0, 240.0, 280.0, 40.0, 340.0, 180.0],
+                    width: 8.0,
+                    rgba: [255, 0, 0, 255],
+                }],
+            },
+            index: None,
+            bind: Some("c".into()),
+        }];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        let sid = dcli_tile::SurfaceId(res.bindings["c"].surface.unwrap());
+        let surface = h.doc.pixels().get(sid).unwrap();
+        assert_border_transparent(surface, "curve");
+        // 앵커 통과 확인(월드 → 표면 로컬: − offset).
+        let node = h.doc.get(h.doc.order()[0]).unwrap();
+        let (ox, oy) = node.offset;
+        let local = |x: f32, y: f32| ((x as i32 - ox) as u32, (y as i32 - oy) as u32);
+        for (x, y) in [(40.0, 200.0), (200.0, 240.0), (340.0, 180.0)] {
+            let (lx, ly) = local(x, y);
+            assert!(
+                surface.get(lx, ly).to_srgb8_straight()[3] > 200,
+                "앵커 ({x},{y}) 통과"
+            );
+        }
+    }
+
+    #[test]
+    fn polygon_path_origin_is_bbox_formula() {
+        // 자유 다각형(오목 별) origin = 꼭짓점 bbox − 1 floor — JS 미러 계약.
+        // 별 모양은 오목 채움(짝홀 교차)도 함께 검증한다.
+        let pts = vec![
+            150.0, 40.0, 173.5, 110.0, 245.0, 110.0, 187.0, 153.0, 210.0, 222.0, 150.0, 180.0,
+            90.0, 222.0, 113.0, 153.0, 55.0, 110.0, 126.5, 110.0,
+        ];
+        let mut h = History::new(Document::new(400, 300, BitDepth::U8));
+        let actions = vec![Action::AddPaintLayer {
+            name: "star".into(),
+            source: PixelSource::Shapes {
+                items: vec![Shape::PolygonPath {
+                    points: pts.clone(),
+                    rgba: [255, 180, 0, 255],
+                    gradient: None,
+                }],
+            },
+            index: None,
+            bind: Some("s".into()),
+        }];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        let node = h.doc.get(h.doc.order()[0]).unwrap();
+        assert_eq!(node.offset, (54, 39), "origin = bbox(55,40) − 1 floor");
+        let sid = dcli_tile::SurfaceId(res.bindings["s"].surface.unwrap());
+        let surface = h.doc.pixels().get(sid).unwrap();
+        assert_border_transparent(surface, "polygon_path");
+        let (ox, oy) = node.offset;
+        // 별 중심부(150,140)는 채움, 오목 파임(120,200)은 투명.
+        assert!(
+            surface.get((150 - ox) as u32, (140 - oy) as u32).to_srgb8_straight()[3] > 200,
+            "별 중심 채움"
+        );
+        assert_eq!(
+            surface.get((150 - ox) as u32, (215 - oy) as u32).to_srgb8_straight()[3],
+            0,
+            "별 꼭짓점 사이 오목부 투명"
+        );
+    }
+
+    #[test]
+    fn polygon_bounds_and_origin_match_ellipse_formula() {
+        // 다각형 origin은 외접 타원 공식(cx−rx−1 floor) — JS _itemsOrigin 미러 계약.
+        let mut h = History::new(Document::new(400, 300, BitDepth::U8));
+        let actions = vec![Action::AddPaintLayer {
+            name: "poly".into(),
+            source: PixelSource::Shapes {
+                items: vec![Shape::Polygon {
+                    cx: 150.0,
+                    cy: 120.0,
+                    rx: 60.5,
+                    ry: 50.0,
+                    sides: 5,
+                    rgba: [0, 120, 255, 255],
+                    gradient: None,
+                }],
+            },
+            index: None,
+            bind: Some("p".into()),
+        }];
+        let res = apply_batch(&mut h, &actions, false);
+        assert!(res.ok, "issues: {:?}", res.issues);
+        let node = h.doc.get(h.doc.order()[0]).unwrap();
+        assert_eq!(
+            node.offset,
+            ((150.0f32 - 60.5 - 1.0).floor() as i32, (120.0f32 - 50.0 - 1.0).floor() as i32),
+            "origin = 타원 bounds 공식"
+        );
+        let sid = dcli_tile::SurfaceId(res.bindings["p"].surface.unwrap());
+        let surface = h.doc.pixels().get(sid).unwrap();
+        assert_border_transparent(surface, "polygon");
+        // 중심 불투명.
+        let (ox, oy) = node.offset;
+        let c = surface
+            .get((150 - ox) as u32, (120 - oy) as u32)
+            .to_srgb8_straight();
+        assert_eq!(c, [0, 120, 255, 255], "다각형 중심 채움");
     }
 }

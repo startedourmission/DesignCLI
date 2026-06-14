@@ -135,8 +135,9 @@ impl Server {
     }
 
     /// 문서를 생성한다(없으면). 이미 있으면 409를 무시하고 Ok.
-    pub fn ensure_doc(&self, w: u32, h: u32, depth: &str) -> Result<()> {
-        let url = format!("{}?w={}&h={}&depth={}", self.url("/create"), w, h, depth);
+    /// 작업영역은 무한 — 크기 파라미터 없음(명목 크기는 데몬 기본값).
+    pub fn ensure_doc(&self, depth: &str) -> Result<()> {
+        let url = format!("{}?depth={}", self.url("/create"), depth);
         match ureq::post(&url).call() {
             Ok(_) => Ok(()),
             // 409 = 이미 존재(정상). 그 외 status는 에러.

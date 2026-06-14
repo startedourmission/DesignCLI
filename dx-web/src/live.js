@@ -29,6 +29,7 @@ class LiveLink {
     this.ws = null;
     this._resyncing = false;
     this._pendingOptimistic = [];
+    this._inflight = new Set(); // 진행 중 apply Promise들 — flush()가 대기.
   }
 
   async start() {
@@ -152,26 +153,39 @@ class LiveLink {
   // ---- App이 호출하는 송신 funnel (로컬 적용 안 함, 데몬에만 보냄) ----
   async sendApply(actions, encoded = JSON.stringify(actions)) {
     this._pendingOptimistic.push(encoded);
-    const r = await fetch(`/doc/${this.docId}/apply`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: encoded,
-    });
-    if (!r.ok) {
-      this._pendingOptimistic = this._pendingOptimistic.filter((v) => v !== encoded);
-      console.error("apply 전송 실패:", r.status, await r.text());
-      this._resync();
-      return;
-    }
-    // 엔진이 거부한 편집(예: PNG 디코드 실패)을 조용히 삼키지 않는다.
-    const j = await r.json().catch(() => null);
-    if (j?.result && j.result.ok === false) {
-      this._pendingOptimistic = this._pendingOptimistic.filter((v) => v !== encoded);
-      const msg = j.result.issues?.[0]?.message || "적용 실패";
-      console.error("[live] 편집 거부:", j.result.issues);
-      alert(`편집 실패: ${msg}`);
-      this._resync();
-    }
+    // 진행 중 apply 추적 — 네비게이션 전 flush()가 이들을 기다려 마지막 편집 유실 방지.
+    const inflight = (async () => {
+      const r = await fetch(`/doc/${this.docId}/apply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: encoded,
+      });
+      if (!r.ok) {
+        this._pendingOptimistic = this._pendingOptimistic.filter((v) => v !== encoded);
+        console.error("apply 전송 실패:", r.status, await r.text());
+        this._resync();
+        return;
+      }
+      // 엔진이 거부한 편집(예: PNG 디코드 실패)을 조용히 삼키지 않는다.
+      const j = await r.json().catch(() => null);
+      if (j?.result && j.result.ok === false) {
+        this._pendingOptimistic = this._pendingOptimistic.filter((v) => v !== encoded);
+        const msg = j.result.issues?.[0]?.message || "적용 실패";
+        console.error("[live] 편집 거부:", j.result.issues);
+        alert(`편집 실패: ${msg}`);
+        this._resync();
+      }
+    })();
+    this._inflight.add(inflight);
+    inflight.finally(() => this._inflight.delete(inflight));
+    return inflight;
+  }
+
+  /** 진행 중인 모든 apply가 데몬에 도달할 때까지 대기 — 프로젝트 전환/네비게이션 전 호출.
+   *  데몬은 apply가 도달하면 in-memory로 보존하고 1.5s 디바운스로 디스크 저장하므로,
+   *  flush 후 네비게이션하면 in-flight POST 취소로 인한 마지막 편집 유실이 없다. */
+  async flush() {
+    await Promise.allSettled([...this._inflight]);
   }
   async sendUndo() {
     await fetch(`/doc/${this.docId}/undo`, { method: "POST" });
