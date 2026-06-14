@@ -13,9 +13,12 @@ All images are PNG files generated for reuse as base layers. Current dimensions 
 
 ## Example
 
+The workspace is infinite — `doc create` takes no size. Add a `frame` to set export bounds (e.g. matching the background image).
+
 ```bash
-dx --doc demo.dxdoc doc create --w 1672 --h 941
+dx --doc demo.dxdoc doc create
 dx --doc demo.dxdoc layer add --name bg --image design-assets/paper-warm-bg.png
 dx --doc demo.dxdoc draw text 96 96 "DesignCLI" --size 72 --color 20,24,28,255
-dx --doc demo.dxdoc export png demo.png
+dx --doc demo.dxdoc frame add page 0 0 1672 941
+dx --doc demo.dxdoc export png demo.png --frame page
 ```

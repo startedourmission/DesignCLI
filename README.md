@@ -61,7 +61,7 @@ dx-studio -- dispatch/op -- dcli-model -- dcli-raster -- PNG/PSD export
 문서를 만들고 PNG로 내보냅니다.
 
 ```bash
-cargo run -p dcli-cli -- --doc demo.dxdoc doc create --w 800 --h 600 --depth u8
+cargo run -p dcli-cli -- --doc demo.dxdoc doc create --depth u8
 cargo run -p dcli-cli -- --doc demo.dxdoc layer add --name bg --fill 245,241,232,255
 cargo run -p dcli-cli -- --doc demo.dxdoc draw rounded-rect 80 80 320 180 \
   --radius 20 --color 60,120,220,255 --name card
@@ -81,7 +81,7 @@ target/debug/dx --doc demo.dxdoc layer list
 
 ```bash
 # 문서
-dx --doc my.dxdoc doc create --w 1280 --h 720 --depth u8
+dx --doc my.dxdoc doc create --depth u8
 dx --doc my.dxdoc --json doc info
 
 # 레이어
@@ -126,7 +126,7 @@ cargo run -p dcli-daemon
 기본 포트는 `8137`입니다.
 
 ```bash
-curl -X POST 'http://localhost:8137/doc/demo/create?w=800&h=600'
+curl -X POST 'http://localhost:8137/doc/demo/create'
 open 'http://localhost:8137/?doc=demo'
 
 dx --server http://localhost:8137 --doc demo draw rect 100 100 240 160 \

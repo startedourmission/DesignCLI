@@ -19,10 +19,13 @@ All files are `1254x1254` PNG images with no embedded text or logo.
 
 ## Example
 
+The workspace is infinite — `doc create` takes no size. Add a square `frame` to set the card-news export bounds (1254×1254).
+
 ```bash
-dx --doc card.dxdoc doc create --w 1254 --h 1254
+dx --doc card.dxdoc doc create
 dx --doc card.dxdoc layer add --name bg --image design-assets/card-news/01-warm-paper.png
 dx --doc card.dxdoc draw text 96 120 "카드뉴스 제목" --size 72 --color 24,28,32,255
 dx --doc card.dxdoc draw text 100 240 "본문을 여기에 배치하세요" --size 34 --color 64,70,78,255
-dx --doc card.dxdoc export png card.png
+dx --doc card.dxdoc frame add square 0 0 1254 1254
+dx --doc card.dxdoc export png card.png --frame square
 ```

@@ -43,8 +43,8 @@ CLI·다른 탭에 반영된다(양방향). 데몬이 `dx-web/` 정적 파일까
 # 1) 데몬 기동(8137). dx-web도 같은 포트에서 서빙됨.
 cargo run -p dcli-daemon
 
-# 2) 문서 생성(또는 CLI가 doc create로 만들어도 됨)
-curl -X POST 'http://localhost:8137/doc/demo/create?w=800&h=600'
+# 2) 문서 생성(또는 CLI가 doc create로 만들어도 됨) — 작업영역 무한, 크기 지정 없음
+curl -X POST 'http://localhost:8137/doc/demo/create'
 
 # 3) 브라우저: ?doc=<id> 가 있으면 라이브 모드로 진입
 #    http://localhost:8137/?doc=demo

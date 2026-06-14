@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
         "dx-daemon 기동: http://{addr}  (web: {})",
         web_dir.display()
     );
-    tracing::info!("문서 생성 예: curl -X POST 'http://{addr}/doc/demo/create?w=800&h=600'");
+    tracing::info!("문서 생성 예: curl -X POST 'http://{addr}/doc/demo/create'");
     tracing::info!("브라우저:    http://{addr}/?doc=demo");
     tracing::info!("대시보드:    http://{addr}/");
 

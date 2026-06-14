@@ -63,21 +63,12 @@ fn ensure_doc<'a>(app: &'a AppState, id: &str) -> Option<()> {
 
 // ─────────────────────── POST /doc/:id/create ───────────────────────
 
-/// POST /doc/:id/create?w&h&depth — 새 문서 등록 + 디스크 즉시 저장.
+/// POST /doc/:id/create?depth — 새 문서 등록 + 디스크 즉시 저장.
+/// 작업영역은 무한 — 크기 지정 없음(명목 크기는 Document::DEFAULT_SIZE).
 #[derive(Deserialize)]
 pub struct CreateParams {
-    #[serde(default = "default_w")]
-    w: u32,
-    #[serde(default = "default_h")]
-    h: u32,
     #[serde(default = "default_depth")]
     depth: String,
-}
-fn default_w() -> u32 {
-    512
-}
-fn default_h() -> u32 {
-    512
 }
 fn default_depth() -> String {
     "u8".into()
@@ -116,7 +107,7 @@ pub async fn create_doc(
         )
             .into_response();
     }
-    let doc = Document::new(p.w, p.h, depth);
+    let doc = Document::new(Document::DEFAULT_SIZE.0, Document::DEFAULT_SIZE.1, depth);
     // 디스크에 즉시 저장(폴더 생성).
     if let Err(e) = path.save(&doc) {
         return (
@@ -132,7 +123,7 @@ pub async fn create_doc(
     docs.insert(id.clone(), DocState::new(History::new(doc)));
     (
         StatusCode::CREATED,
-        Json(json!({ "id": id, "w": p.w, "h": p.h, "depth": p.depth, "seq": 0 })),
+        Json(json!({ "id": id, "depth": p.depth, "seq": 0 })),
     )
         .into_response()
 }
@@ -148,7 +139,7 @@ pub async fn list_docs(State(app): Shared) -> impl IntoResponse {
 
 // ─────────────────────── GET /projects ───────────────────────
 
-/// GET /projects 응답 엔트리.
+/// GET /projects 응답 엔트리. (작업영역 무한 — 크기 정보 없음)
 #[derive(Serialize)]
 struct ProjectEntry {
     name: String,
@@ -156,10 +147,6 @@ struct ProjectEntry {
     open: bool,
     /// 파일 mtime ISO 문자열(doc.json 기준). 실패 시 null.
     modified: Option<String>,
-    /// 문서 폭(열려 있으면 메모리, 아니면 doc.json 파싱).
-    w: Option<u32>,
-    /// 문서 높이.
-    h: Option<u32>,
 }
 
 pub async fn list_projects(State(app): Shared) -> impl IntoResponse {
@@ -205,23 +192,10 @@ pub async fn list_projects(State(app): Shared) -> impl IntoResponse {
                 unix_to_iso(secs)
             });
 
-        // 크기: 열려 있으면 메모리, 아니면 doc.json 경량 파싱.
-        let (w, h) = if open {
-            let ds = docs_lock.get(&name).unwrap();
-            (Some(ds.hist.doc.width), Some(ds.hist.doc.height))
-        } else if doc_json.is_file() {
-            // doc.json에서 width/height만 파싱(전체 Document 로드 안 함).
-            parse_doc_size(&doc_json)
-        } else {
-            (None, None)
-        };
-
         result.push(ProjectEntry {
             name,
             open,
             modified,
-            w,
-            h,
         });
     }
 
@@ -249,22 +223,6 @@ fn unix_to_iso(secs: u64) -> String {
     let mo = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if mo <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
-}
-
-/// doc.json에서 width/height만 경량 파싱(전체 Document 로드 없이).
-fn parse_doc_size(path: &std::path::Path) -> (Option<u32>, Option<u32>) {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return (None, None),
-    };
-    // serde_json Value로 최소한만 파싱.
-    let v: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => return (None, None),
-    };
-    let w = v["width"].as_u64().map(|n| n as u32);
-    let h = v["height"].as_u64().map(|n| n as u32);
-    (w, h)
 }
 
 // ─────────────────────── DELETE /projects/:name ───────────────────────

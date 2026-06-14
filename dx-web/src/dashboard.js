@@ -1,7 +1,8 @@
 // 프로젝트 관리 대시보드 — <dx-dashboard> Lit 컴포넌트.
 //
 // GET /projects 로 목록을 가져와 카드 그리드로 표시.
-// "새 프로젝트" 카드: 인라인 폼으로 이름/폭/높이 입력 → POST /doc/:name/create → 이동.
+// "새 프로젝트" 카드: 인라인 폼으로 이름 입력 → POST /doc/:name/create → 이동.
+// (작업영역은 무한 — 캔버스 크기 입력 없음, export는 frame 단위)
 // 카드 hover 시 삭제 버튼(SVG 휴지통) → DELETE /projects/:name.
 // ?doc= 쿼리 없이 접근하면 이 대시보드만 표시(wasm 초기화 불필요).
 //
@@ -39,8 +40,6 @@ export class DxDashboard extends LitElement {
     _error:    { state: true },
     _creating: { state: true },  // 새 프로젝트 폼 표시 여부
     _newName:  { state: true },
-    _newW:     { state: true },
-    _newH:     { state: true },
     _saving:   { state: true },  // POST 요청 중 여부
     _busyMsg:  { state: true },  // 장시간 작업(PSD 변환 등) 오버레이 메시지
   };
@@ -213,8 +212,6 @@ export class DxDashboard extends LitElement {
       height: 26px; padding: 0 7px; outline: none; width: 100%;
     }
     .card-form input:focus { border-color: var(--accent); }
-    .card-form .row { display: flex; gap: 6px; }
-    .card-form .row label { flex: 1; }
     .card-form .actions { display: flex; gap: 6px; margin-top: 2px; }
     .btn-primary {
       flex: 1; height: 28px; border: none; border-radius: 6px;
@@ -241,8 +238,6 @@ export class DxDashboard extends LitElement {
     this._error = null;
     this._creating = false;
     this._newName = "";
-    this._newW = 800;
-    this._newH = 600;
     this._saving = false;
   }
 
@@ -306,12 +301,10 @@ export class DxDashboard extends LitElement {
   async _create() {
     const name = this._newName.trim();
     if (!name) return;
-    const w = Math.max(1, Math.min(16384, parseInt(this._newW) || 800));
-    const h = Math.max(1, Math.min(16384, parseInt(this._newH) || 600));
     this._saving = true;
     try {
       const r = await fetch(
-        `/doc/${encodeURIComponent(name)}/create?w=${w}&h=${h}`,
+        `/doc/${encodeURIComponent(name)}/create`,
         { method: "POST" }
       );
       if (!r.ok) {
@@ -330,8 +323,6 @@ export class DxDashboard extends LitElement {
   _cancelCreate() {
     this._creating = false;
     this._newName = "";
-    this._newW = 800;
-    this._newH = 600;
   }
 
   // ── 썸네일 img — 404시 placeholder로 교체 ──
@@ -397,7 +388,6 @@ export class DxDashboard extends LitElement {
         <div class="card-body">
           <div class="card-name" title="${p.name}">${p.name}</div>
           <div class="card-meta">
-            ${p.w && p.h ? html`${p.w}&times;${p.h}px<br/>` : nothing}
             ${p.modified ? fmtDate(p.modified) : nothing}
           </div>
         </div>
@@ -434,18 +424,6 @@ export class DxDashboard extends LitElement {
             autofocus
           />
         </label>
-        <div class="row">
-          <label>
-            폭 (px)
-            <input type="number" min="1" max="16384" .value=${String(this._newW)}
-              @change=${(e) => { this._newW = +e.target.value; }} />
-          </label>
-          <label>
-            높이 (px)
-            <input type="number" min="1" max="16384" .value=${String(this._newH)}
-              @change=${(e) => { this._newH = +e.target.value; }} />
-          </label>
-        </div>
         <div class="actions">
           <button class="btn-primary" ?disabled=${this._saving || !this._newName.trim()}
             @click=${() => this._create()}>

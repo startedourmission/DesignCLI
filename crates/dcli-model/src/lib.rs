@@ -200,6 +200,10 @@ pub struct Document {
 }
 
 impl Document {
+    /// 신규 문서의 명목(nominal) 크기 — 작업 영역은 무한이라 사용자가 크기를 지정하지
+    /// 않는다. 이 값은 fit 줌·전체 PNG 같은 레거시 경로의 기준 사각형일 뿐이다.
+    pub const DEFAULT_SIZE: (u32, u32) = (800, 600);
+
     pub fn new(width: u32, height: u32, bit_depth: BitDepth) -> Self {
         Self {
             width,
